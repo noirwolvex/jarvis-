@@ -1,11 +1,11 @@
 from __future__ import annotations
 
-import os
+import queue
 import sys
-from pathlib import Path
+import threading
 
 from dotenv import load_dotenv
-from PySide6.QtCore import QObject, QThread, Signal
+from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
     QDialog,
@@ -23,6 +23,25 @@ from PySide6.QtWidgets import (
 load_dotenv()
 
 from core.agent import AgentEvent, JarvisAgent
+
+
+class ApprovalRequest:
+    def __init__(self, tool: str, args: dict) -> None:
+        self.tool = tool
+        self.args = args
+        self.event = threading.Event()
+        self.approved = False
+
+
+class ApprovalBridge:
+    def __init__(self) -> None:
+        self.requests: queue.Queue[ApprovalRequest] = queue.Queue()
+
+    def request(self, tool: str, args: dict) -> bool:
+        request = ApprovalRequest(tool, args)
+        self.requests.put(request)
+        request.event.wait(timeout=300)
+        return request.approved
 
 
 class Worker(QObject):
@@ -49,7 +68,7 @@ class ApprovalDialog(QDialog):
         self.setWindowTitle("JARVIS approval")
         self.setModal(True)
         layout = QVBoxLayout(self)
-        layout.addWidget(QLabel(f"JARVIS wants to run:\n\n{tool}"))
+        layout.addWidget(QLabel(f"JARVIS wants permission to run:\n\n{tool}"))
         details = QTextEdit()
         details.setReadOnly(True)
         details.setPlainText(str(args))
@@ -102,8 +121,13 @@ class MainWindow(QMainWindow):
         row.addWidget(self.send_button)
         layout.addLayout(row)
 
+        self.approvals = ApprovalBridge()
+        self.timer = QTimer(self)
+        self.timer.timeout.connect(self.process_approval_requests)
+        self.timer.start(100)
+
         try:
-            self.agent = JarvisAgent(approval=self.request_approval)
+            self.agent = JarvisAgent(approval=self.approvals.request)
             self.write("JARVIS online. Claude tool calling is ready.")
         except Exception as exc:
             self.agent = None
@@ -115,9 +139,14 @@ class MainWindow(QMainWindow):
     def write(self, text: str) -> None:
         self.log.append(text)
 
-    def request_approval(self, tool: str, args: dict) -> bool:
-        dialog = ApprovalDialog(tool, args)
-        return dialog.exec() == QDialog.DialogCode.Accepted
+    def process_approval_requests(self) -> None:
+        try:
+            request = self.approvals.requests.get_nowait()
+        except queue.Empty:
+            return
+        dialog = ApprovalDialog(request.tool, request.args)
+        request.approved = dialog.exec() == QDialog.DialogCode.Accepted
+        request.event.set()
 
     def send(self) -> None:
         if not self.agent:
