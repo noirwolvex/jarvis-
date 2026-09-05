@@ -42,7 +42,13 @@ class JarvisAgent:
         api_key = os.getenv("ANTHROPIC_API_KEY")
         if not api_key:
             raise RuntimeError("ANTHROPIC_API_KEY is not configured. Copy .env.example to .env and add your key.")
-        self.client = anthropic.Anthropic(api_key=api_key)
+
+        base_url = os.getenv("ANTHROPIC_BASE_URL", "").strip()
+        client_kwargs = {"api_key": api_key}
+        if base_url:
+            client_kwargs["base_url"] = base_url
+
+        self.client = anthropic.Anthropic(**client_kwargs)
         self.model = os.getenv("CLAUDE_MODEL", "claude-opus-5")
         self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "12"))
         self.tools = tools or ToolRegistry()
@@ -86,10 +92,7 @@ class JarvisAgent:
             for block in tool_uses:
                 emit and emit(AgentEvent("tool", f"Requesting tool: {block.name}", block.name))
                 approved = self.approval(block.name, block.input)
-                if approved:
-                    emit and emit(AgentEvent("tool", f"Approved: {block.name}", block.name))
-                else:
-                    emit and emit(AgentEvent("tool", f"Not approved: {block.name}", block.name))
+                emit and emit(AgentEvent("tool", f"{'Approved' if approved else 'Not approved'}: {block.name}", block.name))
                 result = self.tools.execute(block.name, block.input, approved=approved)
                 emit and emit(AgentEvent("tool_result", result, block.name))
                 results.append({
