@@ -1,13 +1,18 @@
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Callable, Any
 
+from dotenv import load_dotenv
 from openai import OpenAI
 
 from .memory import MemoryStore
 from .tools import ToolRegistry
+
+# Always let the project's .env be the source of truth for local development.
+load_dotenv(override=True)
 
 SYSTEM_PROMPT = """You are JARVIS, a Windows desktop AI agent.
 
@@ -33,8 +38,7 @@ class AgentEvent:
 
 
 def _tool_schemas(registry: ToolRegistry) -> list[dict[str, Any]]:
-    # OpenAI-compatible tool format. This also works with gateways that route Claude models.
-    result = []
+    result: list[dict[str, Any]] = []
     for spec in registry._tools.values():
         result.append({
             "type": "function",
@@ -54,17 +58,38 @@ class JarvisAgent:
         approval: Callable[[str, dict], bool] | None = None,
         memory: MemoryStore | None = None,
     ) -> None:
-        api_key = os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
+        api_key = (
+            os.getenv("TABITOKEN_API_KEY")
+            or os.getenv("AI_API_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+        )
         if not api_key:
-            raise RuntimeError("API key is not configured. Set TabiToken/OpenAI-compatible API key in .env.")
-        base_url = os.getenv("AI_BASE_URL", "https://tabitoken.com/v1").rstrip("/")
-        self.client = OpenAI(api_key=api_key, base_url=base_url)
+            raise RuntimeError("API key is not configured. Set TABITOKEN_API_KEY in .env.")
+
+        self.provider = os.getenv("AI_PROVIDER", "tabitoken")
+        self.base_url = os.getenv("AI_BASE_URL", "https://tabitoken.com/v1").rstrip("/")
         self.model = os.getenv("AI_MODEL", "claude-sonnet-4-5")
         self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "12"))
+
+        self.client = OpenAI(api_key=api_key, base_url=self.base_url)
         self.tools = tools or ToolRegistry()
         self.approval = approval or (lambda _name, _args: False)
         self.memory = memory or MemoryStore()
         self.messages: list[dict[str, Any]] = []
+
+    def provider_info(self) -> str:
+        key = (
+            os.getenv("TABITOKEN_API_KEY")
+            or os.getenv("AI_API_KEY")
+            or os.getenv("ANTHROPIC_API_KEY")
+            or os.getenv("OPENAI_API_KEY")
+            or ""
+        )
+        masked = "not-set"
+        if key:
+            masked = f"{key[:3]}…{key[-4:]} (length={len(key)})"
+        return f"provider={self.provider} | base_url={self.base_url} | model={self.model} | key={masked}"
 
     def reset(self) -> None:
         self.messages.clear()
@@ -99,11 +124,15 @@ class JarvisAgent:
 
             for call in tool_calls:
                 name = call.function.name
-                import json
-                arguments = json.loads(call.function.arguments or "{}")
-                emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
-                approved = self.approval(name, arguments)
-                result = self.tools.execute(name, arguments, approved=approved)
+                try:
+                    arguments = json.loads(call.function.arguments or "{}")
+                except json.JSONDecodeError as exc:
+                    arguments = {}
+                    result = f"ERROR: invalid tool arguments for {name}: {exc}"
+                else:
+                    emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
+                    approved = self.approval(name, arguments)
+                    result = self.tools.execute(name, arguments, approved=approved)
                 emit and emit(AgentEvent("tool_result", result, name))
                 self.messages.append({
                     "role": "tool",
