@@ -10,6 +10,9 @@ from typing import Any, Callable
 
 from .permissions import PermissionEngine, Risk
 
+_BROWSER = None
+_PAGE = None
+
 
 @dataclass(frozen=True)
 class ToolSpec:
@@ -31,11 +34,7 @@ class ToolRegistry:
 
     def definitions(self) -> list[dict[str, Any]]:
         return [
-            {
-                "name": spec.name,
-                "description": spec.description,
-                "input_schema": spec.input_schema,
-            }
+            {"name": spec.name, "description": spec.description, "input_schema": spec.input_schema}
             for spec in self._tools.values()
         ]
 
@@ -48,13 +47,13 @@ class ToolRegistry:
             return f"PERMISSION_DENIED: {reason}"
         try:
             return spec.handler(**arguments)
-        except Exception as exc:  # defensive boundary around OS tools
+        except Exception as exc:
             return f"ERROR executing {name}: {type(exc).__name__}: {exc}"
 
     def _register_builtin_tools(self) -> None:
         self.register(ToolSpec(
             "run_powershell",
-            "Run a non-interactive PowerShell command. Use only when the command is needed to accomplish the user's request.",
+            "Run a non-interactive PowerShell command. Use only when needed to accomplish the user's request.",
             Risk.MEDIUM,
             {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
             _run_powershell,
@@ -62,34 +61,34 @@ class ToolRegistry:
         self.register(ToolSpec(
             "open_application",
             "Open a Windows application or executable by command/name.",
-            Risk.LOW,
+            Risk.MEDIUM,
             {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
             _open_application,
         ))
         self.register(ToolSpec(
             "open_url",
-            "Open a URL in the user's default browser.",
+            "Open an HTTP(S) URL in the user's default browser.",
             Risk.LOW,
             {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
             _open_url,
         ))
         self.register(ToolSpec(
             "read_file",
-            "Read a UTF-8 text file. Paths should normally be inside the configured workspace.",
+            "Read a UTF-8 text file inside the configured JARVIS workspace.",
             Risk.LOW,
             {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
             _read_file,
         ))
         self.register(ToolSpec(
             "write_file",
-            "Write or replace a UTF-8 text file. Parent directories are created automatically.",
+            "Write or replace a UTF-8 text file inside the configured JARVIS workspace.",
             Risk.MEDIUM,
             {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
             _write_file,
         ))
         self.register(ToolSpec(
             "list_directory",
-            "List files and folders in a directory.",
+            "List files and folders in a directory inside the configured workspace.",
             Risk.SAFE,
             {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
             _list_directory,
@@ -100,6 +99,48 @@ class ToolRegistry:
             Risk.LOW,
             {"type": "object", "properties": {}, "additionalProperties": False},
             _take_screenshot,
+        ))
+        self.register(ToolSpec(
+            "browser_navigate",
+            "Launch or reuse a visible Chromium browser and navigate to an HTTP(S) URL.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
+            _browser_navigate,
+        ))
+        self.register(ToolSpec(
+            "browser_read_page",
+            "Read the current browser page title and visible text.",
+            Risk.LOW,
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            _browser_read_page,
+        ))
+        self.register(ToolSpec(
+            "browser_click",
+            "Click an element on the current browser page using a CSS selector or visible text.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"selector": {"type": "string"}}, "required": ["selector"]},
+            _browser_click,
+        ))
+        self.register(ToolSpec(
+            "browser_type",
+            "Type text into an element on the current browser page using a CSS selector.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"selector": {"type": "string"}, "text": {"type": "string"}}, "required": ["selector", "text"]},
+            _browser_type,
+        ))
+        self.register(ToolSpec(
+            "desktop_click",
+            "Click the Windows desktop at absolute screen coordinates.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]},
+            _desktop_click,
+        ))
+        self.register(ToolSpec(
+            "desktop_type",
+            "Type text into the currently focused Windows application.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+            _desktop_type,
         ))
 
 
@@ -137,8 +178,7 @@ def _safe_path(path: str) -> Path:
 
 
 def _read_file(path: str) -> str:
-    target = _safe_path(path)
-    return target.read_text(encoding="utf-8")[:20000]
+    return _safe_path(path).read_text(encoding="utf-8")[:20000]
 
 
 def _write_file(path: str, content: str) -> str:
@@ -150,18 +190,64 @@ def _write_file(path: str, content: str) -> str:
 
 def _list_directory(path: str) -> str:
     target = _safe_path(path)
-    entries = []
-    for item in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:500]:
-        entries.append({"name": item.name, "type": "directory" if item.is_dir() else "file"})
+    entries = [{"name": p.name, "type": "directory" if p.is_dir() else "file"} for p in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:500]]
     return json.dumps({"path": str(target), "entries": entries}, ensure_ascii=False)
 
 
 def _take_screenshot() -> str:
     from PIL import ImageGrab
+    from datetime import datetime
     out_dir = Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve() / ".jarvis" / "screenshots"
     out_dir.mkdir(parents=True, exist_ok=True)
-    from datetime import datetime
     path = out_dir / f"screen-{datetime.now().strftime('%Y%m%d-%H%M%S')}.png"
-    image = ImageGrab.grab()
-    image.save(path)
+    ImageGrab.grab().save(path)
     return f"Screenshot saved to {path}"
+
+
+def _browser_navigate(url: str) -> str:
+    global _BROWSER, _PAGE
+    if not (url.startswith("https://") or url.startswith("http://")):
+        raise ValueError("Only http:// and https:// URLs are allowed")
+    from playwright.sync_api import sync_playwright
+    if _PAGE is None:
+        if _BROWSER is None:
+            pw = sync_playwright().start()
+            _BROWSER = pw.chromium.launch(headless=os.getenv("JARVIS_BROWSER_HEADLESS", "false").lower() == "true")
+        _PAGE = _BROWSER.new_page()
+    _PAGE.goto(url, wait_until="domcontentloaded", timeout=30000)
+    return f"Loaded {_PAGE.title()} — {_PAGE.url}"
+
+
+def _browser_read_page() -> str:
+    if _PAGE is None:
+        return "No browser page is open."
+    return f"TITLE: {_PAGE.title()}\nURL: {_PAGE.url}\nTEXT:\n{_PAGE.locator('body').inner_text()[:20000]}"
+
+
+def _browser_click(selector: str) -> str:
+    if _PAGE is None:
+        raise RuntimeError("No browser page is open")
+    locator = _PAGE.get_by_text(selector, exact=True)
+    if locator.count() == 0:
+        locator = _PAGE.locator(selector)
+    locator.first.click(timeout=15000)
+    return f"Clicked: {selector}"
+
+
+def _browser_type(selector: str, text: str) -> str:
+    if _PAGE is None:
+        raise RuntimeError("No browser page is open")
+    _PAGE.locator(selector).first.fill(text, timeout=15000)
+    return f"Typed {len(text)} characters into {selector}"
+
+
+def _desktop_click(x: int, y: int) -> str:
+    import pyautogui
+    pyautogui.click(x=x, y=y)
+    return f"Clicked desktop at ({x}, {y})"
+
+
+def _desktop_type(text: str) -> str:
+    import pyautogui
+    pyautogui.write(text, interval=0.01)
+    return f"Typed {len(text)} characters into the focused application"
