@@ -192,7 +192,7 @@ class MainWindow(QMainWindow):
         self.write(f"<b>JARVIS:</b> {result}")
 
     def on_failed(self, error: str) -> None:
-        self.write(f"<span style='color:#ff9e9e"><b>Error:</b> {error}</span>")
+        self.write(f"<span style='color:#ff9e9e'><b>Error:</b> {error}</span>")
 
 
 def main() -> int:
