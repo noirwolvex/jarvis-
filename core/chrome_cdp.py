@@ -151,6 +151,28 @@ class _ChromeRuntime:
             return page.locator("a").evaluate_all(
                 "els => els.slice(0, 300).map(a => ({text:(a.innerText||a.textContent||'').trim(), href:a.href})).filter(x => x.text || x.href)"
             )
+        if operation == "selector_count":
+            return page.locator(args["selector"]).count()
+        if operation == "controls":
+            return {
+                "url": page.url,
+                "title": page.title(),
+                "controls": page.locator("input, textarea, select, button").evaluate_all(
+                    "els => els.slice(0, 200).map((el, i) => ({"
+                    "index:i,"
+                    "tag:el.tagName.toLowerCase(),"
+                    "type:el.type || '',"
+                    "name:el.getAttribute('name') || '',"
+                    "id:el.id || '',"
+                    "placeholder:el.getAttribute('placeholder') || '',"
+                    "aria_label:el.getAttribute('aria-label') || '',"
+                    "text:(el.innerText || el.textContent || '').trim().slice(0,160),"
+                    "required:!!el.required,"
+                    "disabled:!!el.disabled,"
+                    "visible:!!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)"
+                    "}))"
+                ),
+            }
         if operation == "click":
             selector = args["selector"]
             locator = page.get_by_text(selector, exact=True)
