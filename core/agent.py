@@ -20,7 +20,7 @@ from .skills import register_skill_tools
 from .orchestrator import TaskOrchestrator, build_execution_context
 from .monitor_tools import register_monitor_tools
 from .browser_guard import register_browser_guard_tools
-from .chrome_cdp import register_chrome_cdp_tools
+from .chrome_cdp import register_chrome_cdp_tools, chrome_is_connected, chrome_page_operation
 
 load_dotenv(override=True)
 
@@ -74,6 +74,89 @@ def _tool_schemas(registry: ToolRegistry) -> list[dict[str, Any]]:
     } for spec in registry._tools.values()]
 
 
+def _install_chrome_page_adapters(registry: ToolRegistry) -> None:
+    """Use the dedicated CDP runtime for browser tools whenever it is connected."""
+    def replace(name: str, adapter: Callable[..., str]) -> None:
+        spec = registry._tools.get(name)
+        if spec is None:
+            return
+        registry._tools[name] = ToolSpec(
+            name=spec.name,
+            description=spec.description,
+            risk=spec.risk,
+            input_schema=spec.input_schema,
+            handler=adapter,
+        )
+
+    def navigate(url: str) -> str:
+        if chrome_is_connected():
+            result = chrome_page_operation("goto", url=url)
+            return f"Loaded {result['title']} — {result['url']}"
+        from . import tools as builtin
+        return builtin._browser_navigate(url)
+
+    def read_page() -> str:
+        if chrome_is_connected():
+            current = chrome_page_operation("current")
+            body = chrome_page_operation("body_text")
+            return f"TITLE: {current['title']}\nURL: {current['url']}\nTEXT:\n{body}"
+        from . import tools as builtin
+        return builtin._browser_read_page()
+
+    def click(selector: str) -> str:
+        if chrome_is_connected():
+            chrome_page_operation("click", selector=selector)
+            return f"Clicked: {selector}"
+        from . import tools as builtin
+        return builtin._browser_click(selector)
+
+    def fill(selector: str, text: str) -> str:
+        if chrome_is_connected():
+            chrome_page_operation("fill", selector=selector, text=text)
+            return f"Typed {len(text)} characters into {selector}"
+        from . import tools as builtin
+        return builtin._browser_type(selector, text)
+
+    def links() -> str:
+        if chrome_is_connected():
+            return json.dumps(chrome_page_operation("links"), ensure_ascii=False)
+        from .advanced_tools import browser_links
+        return browser_links()
+
+    def wait(selector: str, timeout_ms: int = 15000) -> str:
+        if chrome_is_connected():
+            chrome_page_operation("wait", selector=selector, timeout_ms=timeout_ms)
+            return f"VERIFIED: selector is visible: {selector}"
+        from .advanced_tools import browser_wait
+        return browser_wait(selector, timeout_ms)
+
+    def press(key: str) -> str:
+        if chrome_is_connected():
+            chrome_page_operation("press", key=key)
+            return f"Pressed browser key: {key}"
+        from .advanced_tools import browser_press
+        return browser_press(key)
+
+    def screenshot() -> str:
+        workspace = os.getenv("JARVIS_WORKSPACE", ".")
+        path = os.path.join(workspace, ".jarvis", "screenshots", f"browser-{int(time.time() * 1000)}.png")
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        if chrome_is_connected():
+            chrome_page_operation("screenshot", path=path)
+            return f"Browser screenshot saved to {path}"
+        from .advanced_tools import browser_screenshot
+        return browser_screenshot()
+
+    replace("browser_navigate", navigate)
+    replace("browser_read_page", read_page)
+    replace("browser_click", click)
+    replace("browser_type", fill)
+    replace("browser_links", links)
+    replace("browser_wait", wait)
+    replace("browser_press", press)
+    replace("browser_screenshot", screenshot)
+
+
 class JarvisAgent:
     BROWSER_GUARDED_ACTIONS = {"browser_click", "browser_type", "browser_press"}
 
@@ -96,6 +179,7 @@ class JarvisAgent:
             register_monitor_tools(self.tools)
             register_browser_guard_tools(self.tools)
             register_chrome_cdp_tools(self.tools)
+            _install_chrome_page_adapters(self.tools)
             self.tools.register(ToolSpec(
                 "notepad_save_as",
                 "Save the live text currently shown in the foreground Notepad window to a workspace file and verify the saved bytes by reading the target back.",
