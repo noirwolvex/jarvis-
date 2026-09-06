@@ -38,7 +38,7 @@ Execution protocol:
 - Load a relevant skill with list_skills/load_skill before specialized or complex work. Skills provide procedures, not permissions.
 - Use wait after application launches, dialog transitions, or asynchronous browser changes instead of racing the next action.
 - For browser tasks, inspect browser_page_state before filling unfamiliar forms when practical. Before browser_click, browser_type, or browser_press, use browser_check_challenge when a live page is available. If it reports a challenge, stop automation and ask the user to complete the human-verification step manually; do not solve, bypass, click, or type into the challenge.
-- Ordinary browser navigation, reading pages, opening tabs, and filling normal form fields may continue normally. A human-verification checkpoint is the boundary, not a reason to refuse the whole task.
+- The browser challenge guard is enforced by JARVIS itself, not merely by this prompt. Ordinary browser navigation, reading pages, opening tabs, and filling normal form fields may continue normally. A human-verification checkpoint is the boundary, not a reason to refuse the whole task.
 - Treat passwords, session tokens, API keys, and other secrets as sensitive input. Never echo them back in responses, traces, logs, or tool descriptions.
 - If any tool returns ERROR or PERMISSION_DENIED, do not repeat the identical action blindly. Inspect state, diagnose the failure, and choose a safer alternate path. After recovery, verify the requested outcome again.
 - For browser work, coordinate browser_navigate, browser_read_page, browser_links, browser_wait, browser_click, browser_type, and browser_press, rereading state after important navigation or submission.
@@ -71,6 +71,8 @@ def _tool_schemas(registry: ToolRegistry) -> list[dict[str, Any]]:
 
 
 class JarvisAgent:
+    BROWSER_GUARDED_ACTIONS = {"browser_click", "browser_type", "browser_press"}
+
     def __init__(self, tools: ToolRegistry | None = None, approval: Callable[[str, dict], bool] | None = None, memory: MemoryStore | None = None) -> None:
         api_key = os.getenv("TABITOKEN_API_KEY") or os.getenv("AI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY")
         if not api_key:
@@ -126,6 +128,25 @@ class JarvisAgent:
             return f"{SYSTEM_PROMPT}\n\nRecent local memory:\n{memory_text}{task_context}"
         return SYSTEM_PROMPT + task_context
 
+    def _browser_action_guard(self, tool_name: str) -> str | None:
+        if tool_name not in self.BROWSER_GUARDED_ACTIONS:
+            return None
+        try:
+            result = self.tools.execute("browser_check_challenge", {}, approved=True)
+        except Exception as exc:
+            return f"ERROR: browser challenge guard failed: {type(exc).__name__}: {exc}"
+        try:
+            payload = json.loads(result)
+        except json.JSONDecodeError:
+            return f"ERROR: browser challenge guard returned invalid state: {result}"
+        if payload.get("challenge_detected"):
+            return (
+                "BROWSER_ACTION_BLOCKED: A human-verification/anti-bot challenge is present. "
+                "JARVIS will not click, type, press keys, solve, or bypass the challenge. "
+                "Ask the user to complete that verification manually, then continue from the current page."
+            )
+        return None
+
     def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None) -> str:
         self.orchestrator.begin(user_text)
         self.messages.append({"role": "user", "content": user_text})
@@ -159,8 +180,12 @@ class JarvisAgent:
                         arguments = {}
                     else:
                         emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
-                        approved = self.approval(name, arguments)
-                        result = self.tools.execute(name, arguments, approved=approved)
+                        guard_result = self._browser_action_guard(name)
+                        if guard_result:
+                            result = guard_result
+                        else:
+                            approved = self.approval(name, arguments)
+                            result = self.tools.execute(name, arguments, approved=approved)
                     duration_ms = (time.perf_counter() - started) * 1000.0
                     self.orchestrator.record_tool(name, arguments, result, duration_ms, turn + 1)
                     emit and emit(AgentEvent("tool_result", result, name))
