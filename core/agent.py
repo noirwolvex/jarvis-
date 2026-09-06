@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Callable, Any
 
@@ -106,6 +107,11 @@ class JarvisAgent:
         self.memory = memory or MemoryStore()
         self.orchestrator = TaskOrchestrator()
         self.messages: list[dict[str, Any]] = []
+        # Playwright's Sync API (used by browser/CDP tools) cannot run directly
+        # inside an asyncio event loop. A dedicated single worker thread keeps
+        # all synchronous tool calls on one stable thread, so stateful Playwright
+        # objects are both loop-safe and thread-consistent across a task.
+        self._tool_executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="jarvis-tools")
         if "desktop_type" in self.tools._tools:
             spec = self.tools._tools["desktop_type"]
             self.tools._tools["desktop_type"] = spec.__class__(
@@ -115,6 +121,11 @@ class JarvisAgent:
                 input_schema=spec.input_schema,
                 handler=paste_text,
             )
+
+    def _execute_tool(self, name: str, arguments: dict[str, Any], approved: bool = False) -> str:
+        """Execute every synchronous tool on JARVIS's dedicated tool thread."""
+        future = self._tool_executor.submit(self.tools.execute, name, arguments, approved)
+        return future.result()
 
     def provider_info(self) -> str:
         key = os.getenv("TABITOKEN_API_KEY") or os.getenv("AI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -136,7 +147,7 @@ class JarvisAgent:
         if tool_name not in self.BROWSER_GUARDED_ACTIONS:
             return None
         try:
-            result = self.tools.execute("browser_check_challenge", {}, approved=True)
+            result = self._execute_tool("browser_check_challenge", {}, approved=True)
         except Exception as exc:
             return f"ERROR: browser challenge guard failed: {type(exc).__name__}: {exc}"
         try:
@@ -189,7 +200,7 @@ class JarvisAgent:
                             result = guard_result
                         else:
                             approved = self.approval(name, arguments)
-                            result = self.tools.execute(name, arguments, approved=approved)
+                            result = self._execute_tool(name, arguments, approved=approved)
                     duration_ms = (time.perf_counter() - started) * 1000.0
                     self.orchestrator.record_tool(name, arguments, result, duration_ms, turn + 1)
                     emit and emit(AgentEvent("tool_result", result, name))
@@ -211,3 +222,13 @@ class JarvisAgent:
 
     def task_status(self) -> dict[str, Any]:
         return self.orchestrator.summary()
+
+    def close(self) -> None:
+        """Release the dedicated synchronous tool thread and its browser state."""
+        self._tool_executor.shutdown(wait=True, cancel_futures=False)
+
+    def __del__(self) -> None:
+        try:
+            self._tool_executor.shutdown(wait=False, cancel_futures=True)
+        except Exception:
+            pass
