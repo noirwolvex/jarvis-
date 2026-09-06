@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import ctypes
 import json
 import os
 import subprocess
+import time
 import webbrowser
 from dataclasses import dataclass
 from pathlib import Path
@@ -68,31 +70,17 @@ class ToolRegistry:
         ))
         self.register(ToolSpec(
             "focus_window",
-            "Find a visible Windows window by title and bring it to the foreground before another desktop action.",
-            Risk.MEDIUM,
+            "Find a visible Windows window by title text and bring it to the foreground.",
+            Risk.LOW,
             {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
             _focus_window,
         ))
         self.register(ToolSpec(
-            "active_window",
-            "Read the title of the currently focused Windows window.",
-            Risk.LOW,
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            _active_window,
-        ))
-        self.register(ToolSpec(
-            "desktop_hotkey",
-            "Press a Windows keyboard shortcut in the currently focused application, such as ctrl+l, ctrl+s, alt+tab, or ctrl+shift+esc.",
+            "open_application_and_type",
+            "Open a Windows application, wait for its window, focus it, and reliably paste the requested text. Use this for requests such as 'open Notepad and type X'.",
             Risk.MEDIUM,
-            {"type": "object", "properties": {"shortcut": {"type": "string"}}, "required": ["shortcut"]},
-            _desktop_hotkey,
-        ))
-        self.register(ToolSpec(
-            "desktop_press",
-            "Press a single keyboard key in the currently focused Windows application, such as enter, esc, tab, backspace, up, down, left, or right.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
-            _desktop_press,
+            {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]},
+            _open_application_and_type,
         ))
         self.register(ToolSpec(
             "open_url",
@@ -169,7 +157,21 @@ class ToolRegistry:
             "Reliably paste arbitrary text into the currently focused Windows application.",
             Risk.MEDIUM,
             {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
-            _desktop_type,
+            paste_text,
+        ))
+        self.register(ToolSpec(
+            "desktop_press",
+            "Press a keyboard key in the currently focused Windows application.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+            _desktop_press,
+        ))
+        self.register(ToolSpec(
+            "desktop_hotkey",
+            "Press a keyboard shortcut such as ctrl+l, ctrl+s, alt+tab, or ctrl+shift+s.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "minItems": 1}}, "required": ["keys"]},
+            _desktop_hotkey,
         ))
 
 
@@ -190,81 +192,87 @@ def _open_application(command: str) -> str:
     return f"Started application: {command} (pid={process.pid})"
 
 
-def _focus_window(title: str) -> str:
+def _window_for_pid(pid: int) -> int | None:
     if os.name != "nt":
-        raise OSError("focus_window is supported on Windows only")
-    if not title.strip():
-        raise ValueError("Window title cannot be empty")
-
-    import ctypes
-    from ctypes import wintypes
-
+        return None
     user32 = ctypes.windll.user32
-    matches: list[tuple[int, str]] = []
-    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    found: list[int] = []
 
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     def callback(hwnd: int, _lparam: int) -> bool:
         if not user32.IsWindowVisible(hwnd):
             return True
-        length = user32.GetWindowTextLengthW(hwnd)
-        if length <= 0:
-            return True
-        buffer = ctypes.create_unicode_buffer(length + 1)
-        user32.GetWindowTextW(hwnd, buffer, length + 1)
-        window_title = buffer.value
-        if title.lower() in window_title.lower():
-            matches.append((hwnd, window_title))
+        window_pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(window_pid))
+        if window_pid.value == pid and user32.GetWindowTextLengthW(hwnd) > 0:
+            found.append(hwnd)
+            return False
         return True
 
-    user32.EnumWindows(EnumWindowsProc(callback), 0)
-    if not matches:
-        raise RuntimeError(f"No visible window matched: {title}")
+    user32.EnumWindows(callback, 0)
+    return found[0] if found else None
 
-    hwnd, matched_title = matches[0]
+
+def _activate_hwnd(hwnd: int) -> None:
+    user32 = ctypes.windll.user32
     SW_RESTORE = 9
     user32.ShowWindow(hwnd, SW_RESTORE)
-    if not user32.SetForegroundWindow(hwnd):
-        raise RuntimeError(f"Windows refused to focus: {matched_title}")
-    return f"Focused window: {matched_title}"
+    user32.SetForegroundWindow(hwnd)
+    time.sleep(0.25)
+    if user32.GetForegroundWindow() != hwnd:
+        # Windows can reject foreground changes across input threads. A brief
+        # Alt key tap is a documented user-input-compatible fallback.
+        import pyautogui
+        pyautogui.keyDown("alt")
+        pyautogui.keyUp("alt")
+        user32.SetForegroundWindow(hwnd)
+        time.sleep(0.25)
+    if user32.GetForegroundWindow() != hwnd:
+        raise RuntimeError("Windows did not allow the target window to become foreground")
 
 
-def _active_window() -> str:
+def _focus_window(title: str) -> str:
     if os.name != "nt":
-        raise OSError("active_window is supported on Windows only")
-
-    import ctypes
-
+        raise RuntimeError("Window focusing is supported on Windows only")
     user32 = ctypes.windll.user32
-    hwnd = user32.GetForegroundWindow()
-    if not hwnd:
-        return "No active window"
-    length = user32.GetWindowTextLengthW(hwnd)
-    buffer = ctypes.create_unicode_buffer(max(1, length + 1))
-    user32.GetWindowTextW(hwnd, buffer, length + 1)
-    title = buffer.value or "Untitled window"
-    return f"Active window: {title}"
+    needle = title.strip().lower()
+    matches: list[int] = []
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def callback(hwnd: int, _lparam: int) -> bool:
+        if user32.IsWindowVisible(hwnd):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                if needle in buf.value.lower():
+                    matches.append(hwnd)
+                    return False
+        return True
+
+    user32.EnumWindows(callback, 0)
+    if not matches:
+        raise RuntimeError(f"No visible window found matching title: {title}")
+    _activate_hwnd(matches[0])
+    return f"Focused window matching: {title}"
 
 
-def _desktop_hotkey(shortcut: str) -> str:
-    import pyautogui
-
-    parts = [part.strip().lower() for part in shortcut.replace("+", " ").split() if part.strip()]
-    if not parts:
-        raise ValueError("Shortcut cannot be empty")
-    if len(parts) > 5:
-        raise ValueError("Shortcut has too many keys")
-    pyautogui.hotkey(*parts)
-    return f"Pressed shortcut: {'+'.join(parts)}"
-
-
-def _desktop_press(key: str) -> str:
-    import pyautogui
-
-    key = key.strip().lower()
-    if not key:
-        raise ValueError("Key cannot be empty")
-    pyautogui.press(key)
-    return f"Pressed key: {key}"
+def _open_application_and_type(command: str, text: str) -> str:
+    if os.name != "nt":
+        raise RuntimeError("Windows application automation is supported on Windows only")
+    process = subprocess.Popen(command, shell=True)
+    deadline = time.time() + 10
+    hwnd = None
+    while time.time() < deadline:
+        hwnd = _window_for_pid(process.pid)
+        if hwnd:
+            break
+        time.sleep(0.2)
+    if hwnd is None:
+        raise RuntimeError(f"Application started but no visible window was found within 10 seconds (pid={process.pid})")
+    _activate_hwnd(hwnd)
+    result = paste_text(text)
+    return f"Started {command}, focused its window, and {result.lower()}"
 
 
 def _open_url(url: str) -> str:
@@ -353,5 +361,15 @@ def _desktop_click(x: int, y: int) -> str:
     return f"Clicked desktop at ({x}, {y})"
 
 
-def _desktop_type(text: str) -> str:
-    return paste_text(text)
+def _desktop_press(key: str) -> str:
+    import pyautogui
+    pyautogui.press(key)
+    return f"Pressed key: {key}"
+
+
+def _desktop_hotkey(keys: list[str]) -> str:
+    import pyautogui
+    if not keys:
+        raise ValueError("At least one key is required")
+    pyautogui.hotkey(*keys)
+    return f"Pressed hotkey: {'+'.join(keys)}"
