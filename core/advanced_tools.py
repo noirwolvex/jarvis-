@@ -82,7 +82,7 @@ def inspect_window(title: str = "") -> str:
     desktop = Desktop(backend="uia")
     if title.strip():
         window = desktop.window(title_re=f".*{re.escape(title.strip())}.*")
-        window.wait("visible", timeout=5)
+        window.wait("visible", timeout=2)
     else:
         hwnd = int(ctypes.windll.user32.GetForegroundWindow())
         if not hwnd:
@@ -282,3 +282,6 @@ def register_advanced_tools(registry: ToolRegistry) -> None:
         {"type": "object", "properties": {}, "additionalProperties": False},
         browser_screenshot,
     ))
+
+    from .dialog_tools import register_dialog_tools
+    register_dialog_tools(registry)
