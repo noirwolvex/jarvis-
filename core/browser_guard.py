@@ -92,18 +92,18 @@ def browser_page_state() -> str:
     page = _page()
     challenge = _challenge_evidence(page)
     controls: list[dict[str, Any]] = page.locator("input, textarea, select, button").evaluate_all(
-        "els => els.slice(0, 200).map((el, i) => ({" 
-        "index:i," 
-        "tag:el.tagName.toLowerCase()," 
-        "type:el.type || ''," 
-        "name:el.getAttribute('name') || ''," 
-        "id:el.id || ''," 
-        "placeholder:el.getAttribute('placeholder') || ''," 
-        "aria_label:el.getAttribute('aria-label') || ''," 
-        "text:(el.innerText || el.textContent || '').trim().slice(0,160)," 
-        "required:!!el.required," 
-        "disabled:!!el.disabled," 
-        "visible:!!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)" 
+        "els => els.slice(0, 200).map((el, i) => ({"
+        "index:i,"
+        "tag:el.tagName.toLowerCase(),"
+        "type:el.type || '',"
+        "name:el.getAttribute('name') || '',"
+        "id:el.id || '',"
+        "placeholder:el.getAttribute('placeholder') || '',"
+        "aria_label:el.getAttribute('aria-label') || '',"
+        "text:(el.innerText || el.textContent || '').trim().slice(0,160),"
+        "required:!!el.required,"
+        "disabled:!!el.disabled,"
+        "visible:!!(el.offsetWidth || el.offsetHeight || el.getClientRects().length)"
         "}))"
     )
     return json.dumps(
@@ -141,3 +141,6 @@ def register_browser_guard_tools(registry) -> None:
             browser_page_state,
         )
     )
+
+    from .chrome_cdp import register_chrome_cdp_tools
+    register_chrome_cdp_tools(registry)
