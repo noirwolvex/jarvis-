@@ -20,9 +20,16 @@ from PySide6.QtWidgets import (
     QWidget,
 )
 
-load_dotenv()
+load_dotenv(override=True)
 
 from core.agent import AgentEvent, JarvisAgent
+
+# Replace the legacy pyautogui-only text function with the reliable
+# clipboard/paste implementation. The ToolRegistry keeps its existing
+# public surface, so this is a compatibility patch at application startup.
+import core.tools as core_tools
+from core.desktop_input import paste_text
+core_tools._desktop_type = paste_text
 
 
 class ApprovalRequest:
@@ -129,6 +136,7 @@ class MainWindow(QMainWindow):
         try:
             self.agent = JarvisAgent(approval=self.approvals.request)
             self.write("JARVIS online. Claude tool calling is ready.")
+            self.write(f"<span style='color:#7388a6'>{self.agent.provider_info()}</span>")
         except Exception as exc:
             self.agent = None
             self.write(f"Startup error: {exc}")
@@ -150,7 +158,7 @@ class MainWindow(QMainWindow):
 
     def send(self) -> None:
         if not self.agent:
-            QMessageBox.critical(self, "JARVIS", "Configure ANTHROPIC_API_KEY first.")
+            QMessageBox.critical(self, "JARVIS", "Configure the API key in .env first.")
             return
         prompt = self.input.text().strip()
         if not prompt:
