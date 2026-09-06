@@ -27,6 +27,8 @@ Execution rules:
 - After every state-changing desktop action, continue to the next requested action unless the tool reports failure.
 - Use desktop_type for text-entry tasks in normal Windows applications when the target is already focused. It uses clipboard paste and supports arbitrary Unicode text.
 - Use desktop_press for keys like enter, tab, escape, and desktop_hotkey for shortcuts such as ctrl+l or ctrl+s.
+- For software projects, inspect git_status and git_diff before making changes when useful, and use vscode_open to open the relevant workspace for the user.
+- Git read tools are safe and should be preferred for understanding repository state. Never claim a Git operation changed anything unless a mutating tool reports success.
 - Never claim an action succeeded unless a tool returned success.
 - Prefer the smallest number of tool calls that safely accomplish the request.
 - Use local tools for Windows, files, applications, URLs, screenshots, browser and desktop automation.
@@ -64,6 +66,9 @@ class JarvisAgent:
         self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "12"))
         self.client = OpenAI(api_key=api_key, base_url=self.base_url)
         self.tools = tools or ToolRegistry()
+        if tools is None:
+            from .dev_tools import register_dev_tools
+            register_dev_tools(self.tools)
         self.approval = approval or (lambda _name, _args: False)
         self.memory = memory or MemoryStore()
         self.messages: list[dict[str, Any]] = []
