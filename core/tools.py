@@ -81,6 +81,20 @@ class ToolRegistry:
             _active_window,
         ))
         self.register(ToolSpec(
+            "desktop_hotkey",
+            "Press a Windows keyboard shortcut in the currently focused application, such as ctrl+l, ctrl+s, alt+tab, or ctrl+shift+esc.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"shortcut": {"type": "string"}}, "required": ["shortcut"]},
+            _desktop_hotkey,
+        ))
+        self.register(ToolSpec(
+            "desktop_press",
+            "Press a single keyboard key in the currently focused Windows application, such as enter, esc, tab, backspace, up, down, left, or right.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+            _desktop_press,
+        ))
+        self.register(ToolSpec(
             "open_url",
             "Open an HTTP(S) URL in the user's default browser.",
             Risk.LOW,
@@ -187,7 +201,6 @@ def _focus_window(title: str) -> str:
 
     user32 = ctypes.windll.user32
     matches: list[tuple[int, str]] = []
-
     EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
 
     def callback(hwnd: int, _lparam: int) -> bool:
@@ -220,7 +233,6 @@ def _active_window() -> str:
         raise OSError("active_window is supported on Windows only")
 
     import ctypes
-    from ctypes import wintypes
 
     user32 = ctypes.windll.user32
     hwnd = user32.GetForegroundWindow()
@@ -231,6 +243,28 @@ def _active_window() -> str:
     user32.GetWindowTextW(hwnd, buffer, length + 1)
     title = buffer.value or "Untitled window"
     return f"Active window: {title}"
+
+
+def _desktop_hotkey(shortcut: str) -> str:
+    import pyautogui
+
+    parts = [part.strip().lower() for part in shortcut.replace("+", " ").split() if part.strip()]
+    if not parts:
+        raise ValueError("Shortcut cannot be empty")
+    if len(parts) > 5:
+        raise ValueError("Shortcut has too many keys")
+    pyautogui.hotkey(*parts)
+    return f"Pressed shortcut: {'+'.join(parts)}"
+
+
+def _desktop_press(key: str) -> str:
+    import pyautogui
+
+    key = key.strip().lower()
+    if not key:
+        raise ValueError("Key cannot be empty")
+    pyautogui.press(key)
+    return f"Pressed key: {key}"
 
 
 def _open_url(url: str) -> str:
