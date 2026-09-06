@@ -18,17 +18,12 @@ def _cdp_url() -> str:
     return os.getenv("JARVIS_CHROME_CDP_URL", "http://127.0.0.1:9222").rstrip("/")
 
 
-def _browser_context():
-    tools = _browser_globals()
-    return tools._BROWSER
-
-
 def _chrome_executable() -> str:
     candidates = [
         os.getenv("JARVIS_CHROME_EXE", "").strip(),
         shutil.which("chrome.exe") or "",
-        os.path.join(os.environ.get("PROGRAMFILES", r"C:\\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
-        os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES", r"C:\Program Files"), "Google", "Chrome", "Application", "chrome.exe"),
+        os.path.join(os.environ.get("PROGRAMFILES(X86)", r"C:\Program Files (x86)"), "Google", "Chrome", "Application", "chrome.exe"),
         os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
     ]
     for candidate in candidates:
@@ -97,27 +92,23 @@ def _attach(endpoint: str) -> tuple[Any, Any, list[Any]]:
     return pw, browser, pages
 
 
-def chrome_connect_cdp(mode: str = "auto") -> str:
-    """Connect to real Chrome CDP, or automatically launch a JARVIS-managed Chrome when unavailable."""
-    if mode not in {"auto", "real", "managed"}:
-        raise ValueError("mode must be one of: auto, real, managed")
-
+def chrome_connect_cdp() -> str:
+    """Connect to CDP Chrome; automatically launch and attach a JARVIS-managed Chrome when unavailable."""
     tools = _browser_globals()
     endpoint = _cdp_url()
 
     if tools._BROWSER is not None:
         try:
-            pages = []
+            pages: list[Any] = []
             for context in tools._BROWSER.contexts:
                 pages.extend(context.pages)
             if pages:
                 tools._PAGE = pages[-1]
-                session_type = getattr(tools, "_JARVIS_CHROME_SESSION_TYPE", "connected")
                 return json.dumps({
                     "connected": True,
                     "reused": True,
                     "endpoint": endpoint,
-                    "session_type": session_type,
+                    "session_type": getattr(tools, "_JARVIS_CHROME_SESSION_TYPE", "connected"),
                     "pages": _page_rows(pages),
                     "active_url": tools._PAGE.url,
                     "active_title": tools._PAGE.title(),
@@ -125,37 +116,29 @@ def chrome_connect_cdp(mode: str = "auto") -> str:
         except Exception:
             tools._BROWSER = None
 
-    if mode in {"auto", "real"}:
-        try:
-            pw, browser, pages = _attach(endpoint)
-            if not pages:
-                context = browser.contexts[0] if browser.contexts else browser.new_context()
-                tools._PAGE = context.new_page()
-                pages = [tools._PAGE]
-            else:
-                tools._PAGE = pages[-1]
-            tools._BROWSER = browser
-            tools._JARVIS_PLAYWRIGHT = pw
-            tools._JARVIS_CHROME_SESSION_TYPE = "real"
-            return json.dumps({
-                "connected": True,
-                "reused": False,
-                "endpoint": endpoint,
-                "session_type": "real",
-                "pages": _page_rows(pages),
-                "active_url": tools._PAGE.url,
-                "active_title": tools._PAGE.title(),
-            }, ensure_ascii=False)
-        except Exception as real_error:
-            if mode == "real":
-                raise RuntimeError(
-                    f"Could not connect to Chrome CDP at {endpoint}. "
-                    "The already-running Chrome was not started with remote debugging. "
-                    f"Use mode='managed' or restart Chrome with --remote-debugging-port={_cdp_port(endpoint)}."
-                ) from real_error
-            real_error_text = str(real_error)
-    else:
-        real_error_text = "real connection skipped"
+    real_error = None
+    try:
+        pw, browser, pages = _attach(endpoint)
+        if not pages:
+            context = browser.contexts[0] if browser.contexts else browser.new_context()
+            tools._PAGE = context.new_page()
+            pages = [tools._PAGE]
+        else:
+            tools._PAGE = pages[-1]
+        tools._BROWSER = browser
+        tools._JARVIS_PLAYWRIGHT = pw
+        tools._JARVIS_CHROME_SESSION_TYPE = "real"
+        return json.dumps({
+            "connected": True,
+            "reused": False,
+            "endpoint": endpoint,
+            "session_type": "real",
+            "pages": _page_rows(pages),
+            "active_url": tools._PAGE.url,
+            "active_title": tools._PAGE.title(),
+        }, ensure_ascii=False)
+    except Exception as exc:
+        real_error = str(exc)
 
     managed = json.loads(chrome_start_managed())
     pw, browser, pages = _attach(endpoint)
@@ -172,7 +155,7 @@ def chrome_connect_cdp(mode: str = "auto") -> str:
         "connected": True,
         "reused": False,
         "fallback_from_real": True,
-        "real_error": real_error_text,
+        "real_error": real_error,
         "endpoint": endpoint,
         "session_type": "managed",
         "managed_pid": managed.get("pid"),
@@ -246,9 +229,9 @@ def register_chrome_cdp_tools(registry) -> None:
     ))
     registry.register(ToolSpec(
         "chrome_connect_cdp",
-        "Connect JARVIS to Chrome through CDP. In auto mode, first try the existing remotely-debuggable Chrome, then automatically launch an isolated JARVIS-managed Chrome if unavailable. The result explicitly identifies real vs managed session type.",
+        "Connect JARVIS to Chrome through CDP. Automatically tries an existing remotely-debuggable Chrome first, then launches an isolated JARVIS-managed real Chrome if unavailable. No mode parameter is required.",
         Risk.MEDIUM,
-        {"type": "object", "properties": {"mode": {"type": "string", "enum": ["auto", "real", "managed"], "default": "auto"}}, "additionalProperties": False},
+        {"type": "object", "properties": {}, "additionalProperties": False},
         chrome_connect_cdp,
     ))
     registry.register(ToolSpec(
