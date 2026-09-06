@@ -15,4 +15,6 @@ jobs:
         with:
           python-version: '3.11'
       - name: Compile Python sources
-        run: python -m compileall -q core app
+        run: python -m compileall -q core app tests
+      - name: Run orchestration tests
+        run: python -m unittest discover -s tests -p 'test_*.py' -v
