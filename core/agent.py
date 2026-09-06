@@ -11,6 +11,10 @@ from openai import OpenAI
 from .memory import MemoryStore
 from .tools import ToolRegistry
 from .desktop_input import paste_text
+from .tools import ToolSpec
+from .permissions import Risk
+from .notepad_tools import notepad_save_as
+from .skills import register_skill_tools
 
 load_dotenv(override=True)
 
@@ -23,11 +27,11 @@ Execution rules:
 - Think in outcomes and execute a short reliable plan. For multi-step requests, keep state from one tool result to the next and continue until the whole request is complete.
 - Before interacting with an unfamiliar Windows application, use list_windows and, when useful, inspect_window to identify the correct window/control instead of guessing coordinates.
 - Use focus_window_advanced when several windows may exist. After focusing, perform the requested action and verify the resulting state.
-- For standard Save As, Open, confirmation, and file-picker dialogs, prefer dialog_inspect first. Use dialog_set_field and dialog_click_button for precise control. For saving a requested workspace file through a visible Save As dialog, prefer dialog_save_file because it handles the filename field, Save button, and post-save verification.
-- Treat dialog windows as separate top-level windows. After Ctrl+Shift+S or another dialog-opening action, use list_windows or dialog_inspect before attempting another action; do not assume the original application still has focus.
+- For standard Save As, Open, confirmation, and file-picker dialogs, prefer dialog_inspect first. Use dialog_set_field and dialog_click_button for precise control. For Notepad save requests, prefer notepad_save_as because it reads the live editor content and verifies the target file after writing it.
+- Treat dialog windows as separate top-level windows. After an action that should open a dialog, verify the foreground state before assuming the dialog exists.
 - For a request like \"open Notepad and type X\", prefer open_application_and_type because it has a dedicated reliable Notepad path and exact text verification.
-- For more complex desktop tasks, combine open_application, list_windows, focus_window_advanced, inspect_window, dialog_inspect, dialog_set_field, dialog_click_button, dialog_save_file, desktop_click, desktop_double_click, desktop_type, desktop_press, desktop_hotkey, desktop_scroll, wait, and close_window as needed.
-- Opening an application is only an intermediate step when the user also requested typing, clicking, navigation, navigation inside a site, or another action.
+- When a relevant skill exists, use list_skills and load_skill before complex specialized work. Skills provide procedures, not permissions.
+- For more complex desktop tasks, combine open_application, list_windows, focus_window_advanced, inspect_window, dialog_inspect, dialog_set_field, dialog_click_button, dialog_save_file, notepad_save_as, desktop_click, desktop_double_click, desktop_type, desktop_press, desktop_hotkey, desktop_scroll, wait, and close_window as needed.
 - Prefer semantic/UIA or Win32 dialog inspection over blind coordinate clicking. Use coordinates only when a control cannot be addressed semantically.
 - For browser tasks, use browser_navigate, browser_read_page, browser_links, browser_wait, browser_click, browser_type, and browser_press as a coordinated loop. Re-read page state after important navigation or submission actions.
 - Use browser_screenshot or take_screenshot when a visual checkpoint is useful, but do not claim you visually inspected pixels unless a tool actually provides that information.
@@ -72,7 +76,7 @@ class JarvisAgent:
         self.provider = os.getenv("AI_PROVIDER", "tabitoken")
         self.base_url = os.getenv("AI_BASE_URL", "https://tabitoken.com/v1").rstrip("/")
         self.model = os.getenv("AI_MODEL", "claude-sonnet-4-5")
-        self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "20"))
+        self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "30"))
         self.client = OpenAI(api_key=api_key, base_url=self.base_url)
         self.tools = tools or ToolRegistry()
         if tools is None:
@@ -80,6 +84,14 @@ class JarvisAgent:
             register_dev_tools(self.tools)
             from .advanced_tools import register_advanced_tools
             register_advanced_tools(self.tools)
+            register_skill_tools(self.tools)
+            self.tools.register(ToolSpec(
+                "notepad_save_as",
+                "Save the live text currently shown in the foreground Notepad window to a workspace file and verify the saved bytes by reading the target back.",
+                Risk.MEDIUM,
+                {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+                notepad_save_as,
+            ))
         self.approval = approval or (lambda _name, _args: False)
         self.memory = memory or MemoryStore()
         self.messages: list[dict[str, Any]] = []
