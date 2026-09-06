@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
+import re
 import time
-import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -43,7 +44,7 @@ def list_windows() -> str:
     rows = []
     for hwnd, title, pid in _windows():
         rows.append({"hwnd": hwnd, "title": title, "pid": pid, "foreground": hwnd == foreground})
-    return __import__("json").dumps(rows[:200], ensure_ascii=False)
+    return json.dumps(rows[:200], ensure_ascii=False)
 
 
 def focus_window_advanced(title: str) -> str:
@@ -80,7 +81,7 @@ def inspect_window(title: str = "") -> str:
 
     desktop = Desktop(backend="uia")
     if title.strip():
-        window = desktop.window(title_re=f".*{__import__('re').escape(title.strip())}.*")
+        window = desktop.window(title_re=f".*{re.escape(title.strip())}.*")
         window.wait("visible", timeout=5)
     else:
         hwnd = int(ctypes.windll.user32.GetForegroundWindow())
@@ -110,7 +111,7 @@ def inspect_window(title: str = "") -> str:
                 })
         except Exception:
             continue
-    return __import__("json").dumps({"window": title or "foreground", "controls": controls}, ensure_ascii=False)
+    return json.dumps({"window": title or "foreground", "controls": controls}, ensure_ascii=False)
 
 
 def desktop_move(x: int, y: int, duration: float = 0.1) -> str:
@@ -138,6 +139,8 @@ def wait_seconds(seconds: float) -> str:
 
 
 def open_path(path: str) -> str:
+    if os.name != "nt":
+        raise RuntimeError("Opening paths is supported on Windows only")
     raw = Path(path).expanduser()
     workspace = Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve()
     resolved = (workspace / raw).resolve() if not raw.is_absolute() else raw.resolve()
@@ -156,7 +159,7 @@ def browser_links() -> str:
     links = _PAGE.locator("a").evaluate_all(
         "els => els.slice(0, 300).map(a => ({text:(a.innerText||a.textContent||'').trim(), href:a.href})).filter(x => x.text || x.href)"
     )
-    return __import__("json").dumps(links, ensure_ascii=False)
+    return json.dumps(links, ensure_ascii=False)
 
 
 def browser_wait(selector: str, timeout_ms: int = 15000) -> str:
@@ -213,7 +216,7 @@ def register_advanced_tools(registry: ToolRegistry) -> None:
         "inspect_window",
         "Inspect the foreground or named Windows window through UI Automation and return visible/enabled controls, names, types, and screen rectangles. Use this before coordinate clicking when possible.",
         Risk.LOW,
-        {"type": "object", "properties": {"title": {"type": "string"}, "additionalProperties": False}, "required": []},
+        {"type": "object", "properties": {"title": {"type": "string"}}, "additionalProperties": False},
         inspect_window,
     ))
     registry.register(ToolSpec(
