@@ -77,7 +77,7 @@ class ToolRegistry:
         ))
         self.register(ToolSpec(
             "open_application_and_type",
-            "Open a Windows application, wait for its window, focus it, and reliably paste the requested text. Use this for requests such as 'open Notepad and type X'.",
+            "Open a Windows application, detect the actual visible window (even when Windows launches it through another process), focus it, and reliably paste the requested text. Use this for requests such as 'open Notepad and type X'.",
             Risk.MEDIUM,
             {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]},
             _open_application_and_type,
@@ -192,6 +192,38 @@ def _open_application(command: str) -> str:
     return f"Started application: {command} (launcher_pid={process.pid})"
 
 
+def _visible_windows() -> dict[int, str]:
+    if os.name != "nt":
+        return {}
+    user32 = ctypes.windll.user32
+    windows: dict[int, str] = {}
+
+    @ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
+    def callback(hwnd: int, _lparam: int) -> bool:
+        if user32.IsWindowVisible(hwnd):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                title = buf.value.strip()
+                if title:
+                    windows[int(hwnd)] = title
+        return True
+
+    user32.EnumWindows(callback, 0)
+    return windows
+
+
+def _window_title(hwnd: int) -> str:
+    user32 = ctypes.windll.user32
+    length = user32.GetWindowTextLengthW(hwnd)
+    if not length:
+        return ""
+    buf = ctypes.create_unicode_buffer(length + 1)
+    user32.GetWindowTextW(hwnd, buf, length + 1)
+    return buf.value.strip()
+
+
 def _window_for_pid(pid: int) -> int | None:
     if os.name != "nt":
         return None
@@ -239,13 +271,13 @@ def _activate_hwnd(hwnd: int) -> None:
     SW_RESTORE = 9
     user32.ShowWindow(hwnd, SW_RESTORE)
     user32.SetForegroundWindow(hwnd)
-    time.sleep(0.25)
+    time.sleep(0.35)
     if user32.GetForegroundWindow() != hwnd:
         import pyautogui
         pyautogui.keyDown("alt")
         pyautogui.keyUp("alt")
         user32.SetForegroundWindow(hwnd)
-        time.sleep(0.25)
+        time.sleep(0.35)
     if user32.GetForegroundWindow() != hwnd:
         raise RuntimeError("Windows did not allow the target window to become foreground")
 
@@ -273,33 +305,58 @@ def _focus_window(title: str) -> str:
     if not matches:
         raise RuntimeError(f"No visible window found matching title: {title}")
     _activate_hwnd(matches[0])
-    return f"Focused window matching: {title}"
+    return f"Focused window matching: {title} (title={_window_title(matches[0])})"
 
 
 def _open_application_and_type(command: str, text: str) -> str:
     if os.name != "nt":
         raise RuntimeError("Windows application automation is supported on Windows only")
+
+    before = _visible_windows()
     process = subprocess.Popen(command, shell=True)
-    deadline = time.time() + 12
+    deadline = time.time() + 15
     hwnd = None
+
+    # Prefer a genuinely new visible window. This handles launchers and apps
+    # that reuse an existing process (Notepad can do this on modern Windows).
     while time.time() < deadline:
+        current = _visible_windows()
+        new_windows = [(candidate, title) for candidate, title in current.items() if candidate not in before]
+        if new_windows:
+            # Prefer a title containing a useful part of the command.
+            tokens = [t.strip('"\' ').lower() for t in command.replace('\\', '/').split('/')[-1].split() if t.strip('"\' ')]
+            preferred = next(
+                (candidate for candidate, title in new_windows if any(token and token in title.lower() for token in tokens)),
+                new_windows[0][0],
+            )
+            hwnd = preferred
+            break
         hwnd = _window_for_process_tree(process.pid)
         if hwnd:
             break
-        if process.poll() is not None:
-            # The shell may exit immediately after handing off to the real app;
-            # its child process can still be running and is checked above.
-            time.sleep(0.15)
-        else:
-            time.sleep(0.2)
+        time.sleep(0.25)
+
+    # If the app reused an existing window, focus a matching title instead of
+    # incorrectly reporting failure. Common app names are matched conservatively.
     if hwnd is None:
-        raise RuntimeError(
-            f"Application started but no visible window was found within 12 seconds "
-            f"(launcher_pid={process.pid})"
-        )
+        command_name = Path(command.strip().strip('"')).stem.lower()
+        if command_name:
+            current = _visible_windows()
+            matches = [candidate for candidate, title in current.items() if command_name in title.lower()]
+            if matches:
+                hwnd = matches[0]
+
+    if hwnd is None:
+        raise RuntimeError(f"Application launched but no usable visible window was detected within 15 seconds (launcher_pid={process.pid})")
+
     _activate_hwnd(hwnd)
+    time.sleep(0.2)
+    title = _window_title(hwnd)
     result = paste_text(text)
-    return f"Started {command}, focused its window, and {result.lower()}"
+    foreground = ctypes.windll.user32.GetForegroundWindow()
+    if foreground != hwnd:
+        raise RuntimeError(f"Target window lost foreground before typing: {title}")
+    return f"Started {command}; focused window '{title}'; {result.lower()}"
 
 
 def _open_url(url: str) -> str:
