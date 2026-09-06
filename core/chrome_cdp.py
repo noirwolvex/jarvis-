@@ -32,6 +32,13 @@ def _chrome_executable() -> str:
     raise FileNotFoundError("Google Chrome executable was not found. Set JARVIS_CHROME_EXE to chrome.exe.")
 
 
+def _managed_runtime_dir() -> Path:
+    workspace = Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve()
+    runtime = workspace / ".jarvis" / "runtime"
+    runtime.mkdir(parents=True, exist_ok=True)
+    return runtime
+
+
 def _managed_profile_dir() -> Path:
     workspace = Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve()
     return workspace / ".jarvis" / "chrome-cdp-profile"
@@ -49,20 +56,57 @@ def chrome_start_managed() -> str:
     endpoint = _cdp_url()
     port = _cdp_port(endpoint)
     exe = _chrome_executable()
+
+    # Use a dedicated JARVIS profile that is never shared with the user's normal Chrome.
+    # Keep it stable across successful runs so the managed session can retain its own state.
     profile = _managed_profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
-    args = [
+
+    runtime = _managed_runtime_dir()
+    log_path = runtime / "chrome-cdp-start.log"
+    command = [
         exe,
         f"--remote-debugging-port={port}",
+        "--remote-debugging-address=127.0.0.1",
         f"--user-data-dir={profile}",
+        "--profile-directory=Default",
         "--no-first-run",
         "--no-default-browser-check",
+        "--disable-background-networking",
+        "--disable-component-update",
         "--start-maximized",
+        "--new-window",
+        "about:blank",
     ]
-    process = subprocess.Popen(args, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    deadline = time.time() + 10
+
+    # Capture Chrome's own startup diagnostics instead of discarding them. This is
+    # particularly useful when chrome.exe exits before exposing the CDP endpoint.
+    with log_path.open("a", encoding="utf-8") as log:
+        log.write("\n=== JARVIS managed Chrome start ===\n")
+        log.write(json.dumps({"exe": exe, "args": command, "profile": str(profile), "endpoint": endpoint}, ensure_ascii=False) + "\n")
+        log.flush()
+        creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.DEVNULL,
+            stdout=log,
+            stderr=subprocess.STDOUT,
+            creationflags=creationflags,
+        )
+
+    deadline = time.time() + 15
     last_error = "unknown error"
     while time.time() < deadline:
+        if process.poll() is not None:
+            try:
+                recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+            except OSError:
+                recent_log = ""
+            raise RuntimeError(
+                f"Chrome exited during managed startup (exit_code={process.returncode}). "
+                f"CDP endpoint {endpoint} never became available. "
+                f"Startup log: {log_path}\n{recent_log}"
+            )
         try:
             import urllib.request
             with urllib.request.urlopen(f"http://127.0.0.1:{port}/json/version", timeout=1.0) as response:
@@ -72,13 +116,22 @@ def chrome_start_managed() -> str:
                         "pid": process.pid,
                         "endpoint": endpoint,
                         "profile": str(profile),
+                        "log": str(log_path),
                         "session_type": "managed",
                         "note": "This is a JARVIS-managed Chrome profile. It is a real Chrome window but does not inherit the already-running personal Chrome session.",
                     }, ensure_ascii=False)
         except Exception as exc:
             last_error = str(exc)
         time.sleep(0.25)
-    raise RuntimeError(f"Chrome started with pid={process.pid}, but CDP did not become available at {endpoint}: {last_error}")
+
+    try:
+        recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
+    except OSError:
+        recent_log = ""
+    raise RuntimeError(
+        f"Chrome started with pid={process.pid}, but CDP did not become available at {endpoint}: {last_error}. "
+        f"Startup log: {log_path}\n{recent_log}"
+    )
 
 
 def _attach(endpoint: str) -> tuple[Any, Any, list[Any]]:
@@ -160,6 +213,7 @@ def chrome_connect_cdp() -> str:
         "session_type": "managed",
         "managed_pid": managed.get("pid"),
         "profile": managed.get("profile"),
+        "startup_log": managed.get("log"),
         "pages": _page_rows(pages),
         "active_url": tools._PAGE.url,
         "active_title": tools._PAGE.title(),
@@ -222,7 +276,7 @@ def register_chrome_cdp_tools(registry) -> None:
 
     registry.register(ToolSpec(
         "chrome_start_managed",
-        "Launch a dedicated visible Google Chrome instance with CDP enabled for JARVIS. Uses an isolated JARVIS profile and does not copy or inherit the already-running personal Chrome session.",
+        "Launch a dedicated visible Google Chrome instance with CDP enabled for JARVIS. Uses an isolated JARVIS profile and does not copy or inherit the already-running personal Chrome session. Startup diagnostics are persisted under .jarvis/runtime.",
         Risk.MEDIUM,
         {"type": "object", "properties": {}, "additionalProperties": False},
         chrome_start_managed,
