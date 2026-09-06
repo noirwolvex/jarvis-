@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable
 
+from .desktop_input import paste_text
 from .permissions import PermissionEngine, Risk
 
 _BROWSER = None
@@ -64,6 +65,20 @@ class ToolRegistry:
             Risk.MEDIUM,
             {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
             _open_application,
+        ))
+        self.register(ToolSpec(
+            "focus_window",
+            "Find a visible Windows window by title and bring it to the foreground before another desktop action.",
+            Risk.MEDIUM,
+            {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
+            _focus_window,
+        ))
+        self.register(ToolSpec(
+            "active_window",
+            "Read the title of the currently focused Windows window.",
+            Risk.LOW,
+            {"type": "object", "properties": {}, "additionalProperties": False},
+            _active_window,
         ))
         self.register(ToolSpec(
             "open_url",
@@ -137,7 +152,7 @@ class ToolRegistry:
         ))
         self.register(ToolSpec(
             "desktop_type",
-            "Type text into the currently focused Windows application.",
+            "Reliably paste arbitrary text into the currently focused Windows application.",
             Risk.MEDIUM,
             {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
             _desktop_type,
@@ -157,8 +172,65 @@ def _run_powershell(command: str) -> str:
 
 
 def _open_application(command: str) -> str:
-    subprocess.Popen(command, shell=True)
-    return f"Started application: {command}"
+    process = subprocess.Popen(command, shell=True)
+    return f"Started application: {command} (pid={process.pid})"
+
+
+def _focus_window(title: str) -> str:
+    if os.name != "nt":
+        raise OSError("focus_window is supported on Windows only")
+    if not title.strip():
+        raise ValueError("Window title cannot be empty")
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    matches: list[tuple[int, str]] = []
+
+    EnumWindowsProc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def callback(hwnd: int, _lparam: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
+        length = user32.GetWindowTextLengthW(hwnd)
+        if length <= 0:
+            return True
+        buffer = ctypes.create_unicode_buffer(length + 1)
+        user32.GetWindowTextW(hwnd, buffer, length + 1)
+        window_title = buffer.value
+        if title.lower() in window_title.lower():
+            matches.append((hwnd, window_title))
+        return True
+
+    user32.EnumWindows(EnumWindowsProc(callback), 0)
+    if not matches:
+        raise RuntimeError(f"No visible window matched: {title}")
+
+    hwnd, matched_title = matches[0]
+    SW_RESTORE = 9
+    user32.ShowWindow(hwnd, SW_RESTORE)
+    if not user32.SetForegroundWindow(hwnd):
+        raise RuntimeError(f"Windows refused to focus: {matched_title}")
+    return f"Focused window: {matched_title}"
+
+
+def _active_window() -> str:
+    if os.name != "nt":
+        raise OSError("active_window is supported on Windows only")
+
+    import ctypes
+    from ctypes import wintypes
+
+    user32 = ctypes.windll.user32
+    hwnd = user32.GetForegroundWindow()
+    if not hwnd:
+        return "No active window"
+    length = user32.GetWindowTextLengthW(hwnd)
+    buffer = ctypes.create_unicode_buffer(max(1, length + 1))
+    user32.GetWindowTextW(hwnd, buffer, length + 1)
+    title = buffer.value or "Untitled window"
+    return f"Active window: {title}"
 
 
 def _open_url(url: str) -> str:
@@ -248,6 +320,4 @@ def _desktop_click(x: int, y: int) -> str:
 
 
 def _desktop_type(text: str) -> str:
-    import pyautogui
-    pyautogui.write(text, interval=0.01)
-    return f"Typed {len(text)} characters into the focused application"
+    return paste_text(text)
