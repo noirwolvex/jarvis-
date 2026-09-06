@@ -16,8 +16,6 @@ class _ChromeRuntime:
 
     def __init__(self) -> None:
         self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any]]] = queue.Queue()
-        self._thread = threading.Thread(target=self._run, name="jarvis-chrome-cdp", daemon=True)
-        self._thread.start()
         self._ready = threading.Event()
         self._startup_error: Exception | None = None
         self._browser: Any = None
@@ -26,6 +24,8 @@ class _ChromeRuntime:
         self._page: Any = None
         self._session_type = "unknown"
         self._endpoint = ""
+        self._thread = threading.Thread(target=self._run, name="jarvis-chrome-cdp", daemon=True)
+        self._thread.start()
 
     def _run(self) -> None:
         try:
@@ -51,7 +51,8 @@ class _ChromeRuntime:
             self._ready.set()
 
     def call(self, command: str, **args: Any) -> Any:
-        self._ready.wait(timeout=5)
+        if not self._ready.wait(timeout=5):
+            raise TimeoutError("Chrome runtime thread did not become ready")
         if self._startup_error is not None:
             raise RuntimeError(f"Chrome runtime thread failed: {self._startup_error}")
         reply: queue.Queue[Any] = queue.Queue(maxsize=1)
