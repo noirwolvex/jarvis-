@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import json
 import os
 import subprocess
@@ -54,135 +55,27 @@ class ToolRegistry:
             return f"ERROR executing {name}: {type(exc).__name__}: {exc}"
 
     def _register_builtin_tools(self) -> None:
-        self.register(ToolSpec(
-            "run_powershell",
-            "Run a non-interactive PowerShell command. Use only when needed to accomplish the user's request.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-            _run_powershell,
-        ))
-        self.register(ToolSpec(
-            "open_application",
-            "Open a Windows application or executable by command/name.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]},
-            _open_application,
-        ))
-        self.register(ToolSpec(
-            "focus_window",
-            "Find a visible Windows window by title text and bring it to the foreground.",
-            Risk.LOW,
-            {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]},
-            _focus_window,
-        ))
-        self.register(ToolSpec(
-            "open_application_and_type",
-            "Open a Windows application, detect the actual visible window (including launcher/reused-process cases), focus it, focus its main content area, and reliably paste the requested text.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]},
-            _open_application_and_type,
-        ))
-        self.register(ToolSpec(
-            "open_url",
-            "Open an HTTP(S) URL in the user's default browser.",
-            Risk.LOW,
-            {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
-            _open_url,
-        ))
-        self.register(ToolSpec(
-            "read_file",
-            "Read a UTF-8 text file inside the configured JARVIS workspace.",
-            Risk.LOW,
-            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-            _read_file,
-        ))
-        self.register(ToolSpec(
-            "write_file",
-            "Write or replace a UTF-8 text file inside the configured JARVIS workspace.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]},
-            _write_file,
-        ))
-        self.register(ToolSpec(
-            "list_directory",
-            "List files and folders in a directory inside the configured workspace.",
-            Risk.SAFE,
-            {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
-            _list_directory,
-        ))
-        self.register(ToolSpec(
-            "take_screenshot",
-            "Capture the primary monitor and save a timestamped screenshot for visual automation.",
-            Risk.LOW,
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            _take_screenshot,
-        ))
-        self.register(ToolSpec(
-            "browser_navigate",
-            "Launch or reuse a visible Chromium browser and navigate to an HTTP(S) URL.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]},
-            _browser_navigate,
-        ))
-        self.register(ToolSpec(
-            "browser_read_page",
-            "Read the current browser page title and visible text.",
-            Risk.LOW,
-            {"type": "object", "properties": {}, "additionalProperties": False},
-            _browser_read_page,
-        ))
-        self.register(ToolSpec(
-            "browser_click",
-            "Click an element on the current browser page using a CSS selector or visible text.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"selector": {"type": "string"}}, "required": ["selector"]},
-            _browser_click,
-        ))
-        self.register(ToolSpec(
-            "browser_type",
-            "Type text into an element on the current browser page using a CSS selector.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"selector": {"type": "string"}, "text": {"type": "string"}}, "required": ["selector", "text"]},
-            _browser_type,
-        ))
-        self.register(ToolSpec(
-            "desktop_click",
-            "Click the Windows desktop at absolute screen coordinates.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]},
-            _desktop_click,
-        ))
-        self.register(ToolSpec(
-            "desktop_type",
-            "Reliably paste arbitrary text into the currently focused Windows application.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
-            paste_text,
-        ))
-        self.register(ToolSpec(
-            "desktop_press",
-            "Press a keyboard key in the currently focused Windows application.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
-            _desktop_press,
-        ))
-        self.register(ToolSpec(
-            "desktop_hotkey",
-            "Press a keyboard shortcut such as ctrl+l, ctrl+s, alt+tab, or ctrl+shift+s.",
-            Risk.MEDIUM,
-            {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "minItems": 1}}, "required": ["keys"]},
-            _desktop_hotkey,
-        ))
+        self.register(ToolSpec("run_powershell", "Run a non-interactive PowerShell command. Use only when needed to accomplish the user's request.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _run_powershell))
+        self.register(ToolSpec("open_application", "Open a Windows application or executable by command/name.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _open_application))
+        self.register(ToolSpec("focus_window", "Find a visible Windows window by title text and bring it to the foreground.", Risk.LOW, {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}, _focus_window))
+        self.register(ToolSpec("open_application_and_type", "Open a Windows application, detect the actual visible window, focus it, focus its main content area, and reliably enter and verify the requested text.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]}, _open_application_and_type))
+        self.register(ToolSpec("open_url", "Open an HTTP(S) URL in the user's default browser.", Risk.LOW, {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, _open_url))
+        self.register(ToolSpec("read_file", "Read a UTF-8 text file inside the configured JARVIS workspace.", Risk.LOW, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, _read_file))
+        self.register(ToolSpec("write_file", "Write or replace a UTF-8 text file inside the configured JARVIS workspace.", Risk.MEDIUM, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}, _write_file))
+        self.register(ToolSpec("list_directory", "List files and folders in a directory inside the configured workspace.", Risk.SAFE, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, _list_directory))
+        self.register(ToolSpec("take_screenshot", "Capture the primary monitor and save a timestamped screenshot for visual automation.", Risk.LOW, {"type": "object", "properties": {}, "additionalProperties": False}, _take_screenshot))
+        self.register(ToolSpec("browser_navigate", "Launch or reuse a visible Chromium browser and navigate to an HTTP(S) URL.", Risk.MEDIUM, {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, _browser_navigate))
+        self.register(ToolSpec("browser_read_page", "Read the current browser page title and visible text.", Risk.LOW, {"type": "object", "properties": {}, "additionalProperties": False}, _browser_read_page))
+        self.register(ToolSpec("browser_click", "Click an element on the current browser page using a CSS selector or visible text.", Risk.MEDIUM, {"type": "object", "properties": {"selector": {"type": "string"}}, "required": ["selector"]}, _browser_click))
+        self.register(ToolSpec("browser_type", "Type text into an element on the current browser page using a CSS selector.", Risk.MEDIUM, {"type": "object", "properties": {"selector": {"type": "string"}, "text": {"type": "string"}}, "required": ["selector", "text"]}, _browser_type))
+        self.register(ToolSpec("desktop_click", "Click the Windows desktop at absolute screen coordinates.", Risk.MEDIUM, {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]}, _desktop_click))
+        self.register(ToolSpec("desktop_type", "Reliably enter arbitrary text into the currently focused Windows application.", Risk.MEDIUM, {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]}, paste_text))
+        self.register(ToolSpec("desktop_press", "Press a keyboard key in the currently focused Windows application.", Risk.MEDIUM, {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]}, _desktop_press))
+        self.register(ToolSpec("desktop_hotkey", "Press a keyboard shortcut such as ctrl+l, ctrl+s, alt+tab, or ctrl+shift+s.", Risk.MEDIUM, {"type": "object", "properties": {"keys": {"type": "array", "items": {"type": "string"}, "minItems": 1}}, "required": ["keys"]}, _desktop_hotkey))
 
 
 def _run_powershell(command: str) -> str:
-    completed = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
-        capture_output=True,
-        text=True,
-        timeout=60,
-        check=False,
-    )
+    completed = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command], capture_output=True, text=True, timeout=60, check=False)
     output = (completed.stdout or "") + (completed.stderr or "")
     return f"exit_code={completed.returncode}\n{output[-12000:]}"
 
@@ -268,8 +161,7 @@ def _window_for_process_tree(pid: int) -> int | None:
 
 def _activate_hwnd(hwnd: int) -> None:
     user32 = ctypes.windll.user32
-    SW_RESTORE = 9
-    user32.ShowWindow(hwnd, SW_RESTORE)
+    user32.ShowWindow(hwnd, 9)
     user32.SetForegroundWindow(hwnd)
     time.sleep(0.35)
     if user32.GetForegroundWindow() != hwnd:
@@ -309,8 +201,8 @@ def _focus_window(title: str) -> str:
 
 
 def _click_window_content(hwnd: int) -> None:
-    """Put the caret/focus into a likely main content area of a foreground window."""
     user32 = ctypes.windll.user32
+
     class RECT(ctypes.Structure):
         _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
 
@@ -322,7 +214,6 @@ def _click_window_content(hwnd: int) -> None:
     point.y = max(30, (rect.bottom - rect.top) // 2)
     if not user32.ClientToScreen(hwnd, ctypes.byref(point)):
         return
-
     import pyautogui
     pyautogui.click(x=point.x, y=point.y)
     time.sleep(0.2)
@@ -342,10 +233,7 @@ def _open_application_and_type(command: str, text: str) -> str:
         new_windows = [(candidate, title) for candidate, title in current.items() if candidate not in before]
         if new_windows:
             tokens = [t.strip('"\' ').lower() for t in command.replace('\\', '/').split('/')[-1].split() if t.strip('"\' ')]
-            preferred = next(
-                (candidate for candidate, title in new_windows if any(token and token in title.lower() for token in tokens)),
-                new_windows[0][0],
-            )
+            preferred = next((candidate for candidate, title in new_windows if any(token and token in title.lower() for token in tokens)), new_windows[0][0])
             hwnd = preferred
             break
         hwnd = _window_for_process_tree(process.pid)
@@ -371,7 +259,7 @@ def _open_application_and_type(command: str, text: str) -> str:
     foreground = ctypes.windll.user32.GetForegroundWindow()
     if foreground != hwnd:
         raise RuntimeError(f"Target window lost foreground before typing: {title}")
-    result = paste_text(text)
+    result = paste_text(text, window_title=title, verify=True)
     return f"Started {command}; focused window '{title}'; clicked its main content; {result.lower()}"
 
 
