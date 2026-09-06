@@ -2,16 +2,185 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 
-def _browser_globals():
-    from . import tools
-    return tools
+class _ChromeRuntime:
+    """Own all Playwright Sync API objects on one dedicated Python thread."""
+
+    def __init__(self) -> None:
+        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any]]] = queue.Queue()
+        self._thread = threading.Thread(target=self._run, name="jarvis-chrome-cdp", daemon=True)
+        self._thread.start()
+        self._ready = threading.Event()
+        self._startup_error: Exception | None = None
+        self._browser: Any = None
+        self._playwright: Any = None
+        self._pages: list[Any] = []
+        self._page: Any = None
+        self._session_type = "unknown"
+        self._endpoint = ""
+
+    def _run(self) -> None:
+        # The loop is created before Playwright starts. Commands are processed here,
+        # keeping every Sync API object thread-affine and isolated from the agent loop.
+        try:
+            self._ready.set()
+            while True:
+                command, args, reply = self._commands.get()
+                if command == "shutdown":
+                    try:
+                        if self._browser is not None:
+                            self._browser.close()
+                    finally:
+                        if self._playwright is not None:
+                            self._playwright.stop()
+                    reply.put(None)
+                    return
+                try:
+                    result = getattr(self, f"_cmd_{command}")(**args)
+                    reply.put((True, result))
+                except Exception as exc:
+                    reply.put((False, exc))
+        except Exception as exc:
+            self._startup_error = exc
+            self._ready.set()
+
+    def call(self, command: str, **args: Any) -> Any:
+        self._ready.wait(timeout=5)
+        if self._startup_error is not None:
+            raise RuntimeError(f"Chrome runtime thread failed: {self._startup_error}")
+        reply: queue.Queue[Any] = queue.Queue(maxsize=1)
+        self._commands.put((command, args, reply))
+        ok, value = reply.get(timeout=60)
+        if ok:
+            return value
+        raise value
+
+    def _cmd_connect(self, endpoint: str, session_type: str = "real") -> dict[str, Any]:
+        from playwright.sync_api import sync_playwright
+
+        if self._browser is not None:
+            try:
+                self._browser.contexts
+            except Exception:
+                self._browser = None
+                self._playwright = None
+
+        if self._browser is None:
+            self._playwright = sync_playwright().start()
+            self._browser = self._playwright.chromium.connect_over_cdp(endpoint, timeout=5000)
+
+        pages: list[Any] = []
+        for context in self._browser.contexts:
+            pages.extend(context.pages)
+        if not pages:
+            context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
+            self._page = context.new_page()
+            pages = [self._page]
+        else:
+            self._page = pages[-1]
+        self._pages = pages
+        self._session_type = session_type
+        self._endpoint = endpoint
+        return {
+            "connected": True,
+            "endpoint": endpoint,
+            "session_type": session_type,
+            "pages": _page_rows(pages),
+            "active_url": self._page.url,
+            "active_title": self._page.title(),
+        }
+
+    def _refresh_pages(self) -> list[Any]:
+        pages: list[Any] = []
+        for context in self._browser.contexts:
+            pages.extend(context.pages)
+        self._pages = pages
+        if self._page not in pages and pages:
+            self._page = pages[-1]
+        return pages
+
+    def _cmd_tabs(self) -> list[dict[str, Any]]:
+        return _page_rows(self._refresh_pages())
+
+    def _cmd_use_tab(self, index: int) -> dict[str, Any]:
+        pages = self._refresh_pages()
+        if index < 0 or index >= len(pages):
+            raise IndexError(f"Tab index {index} is out of range; {len(pages)} tabs are available.")
+        self._page = pages[index]
+        return {
+            "selected": index,
+            "session_type": self._session_type,
+            "title": self._page.title(),
+            "url": self._page.url,
+        }
+
+    def _cmd_current(self) -> dict[str, Any]:
+        if self._page is None:
+            raise RuntimeError("No browser tab is selected.")
+        return {
+            "session_type": self._session_type,
+            "title": self._page.title(),
+            "url": self._page.url,
+        }
+
+    def _cmd_page(self, operation: str, **args: Any) -> Any:
+        if self._page is None:
+            raise RuntimeError("No browser page is open")
+        page = self._page
+        if operation == "goto":
+            page.goto(args["url"], wait_until="domcontentloaded", timeout=30000)
+            return {"title": page.title(), "url": page.url}
+        if operation == "title":
+            return page.title()
+        if operation == "url":
+            return page.url
+        if operation == "body_text":
+            return page.locator("body").inner_text()[:20000]
+        if operation == "links":
+            return page.locator("a").evaluate_all(
+                "els => els.slice(0, 300).map(a => ({text:(a.innerText||a.textContent||'').trim(), href:a.href})).filter(x => x.text || x.href)"
+            )
+        if operation == "click":
+            selector = args["selector"]
+            locator = page.get_by_text(selector, exact=True)
+            if locator.count() == 0:
+                locator = page.locator(selector)
+            locator.first.click(timeout=15000)
+            return True
+        if operation == "fill":
+            page.locator(args["selector"]).first.fill(args["text"], timeout=15000)
+            return True
+        if operation == "wait":
+            page.locator(args["selector"]).first.wait_for(
+                state="visible",
+                timeout=max(500, min(int(args.get("timeout_ms", 15000)), 60000)),
+            )
+            return True
+        if operation == "press":
+            page.keyboard.press(args["key"])
+            return True
+        if operation == "screenshot":
+            page.screenshot(path=args["path"], full_page=False)
+            return True
+        raise ValueError(f"Unsupported Chrome page operation: {operation}")
+
+
+def _runtime() -> _ChromeRuntime:
+    global _RUNTIME
+    if _RUNTIME is None:
+        _RUNTIME = _ChromeRuntime()
+    return _RUNTIME
+
+
+_RUNTIME: _ChromeRuntime | None = None
 
 
 def _cdp_url() -> str:
@@ -40,8 +209,9 @@ def _managed_runtime_dir() -> Path:
 
 
 def _managed_profile_dir() -> Path:
-    workspace = Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve()
-    return workspace / ".jarvis" / "chrome-cdp-profile"
+    temp_root = os.getenv("TEMP") or os.getenv("TMP")
+    base = Path(temp_root).resolve() if temp_root else Path.home() / "AppData" / "Local" / "Temp"
+    return base / "jarvis-cdp-profile"
 
 
 def _cdp_port(endpoint: str) -> int:
@@ -52,16 +222,11 @@ def _cdp_port(endpoint: str) -> int:
 
 
 def chrome_start_managed() -> str:
-    """Start a dedicated visible Google Chrome instance with CDP enabled for JARVIS."""
     endpoint = _cdp_url()
     port = _cdp_port(endpoint)
     exe = _chrome_executable()
-
-    # Use a dedicated JARVIS profile that is never shared with the user's normal Chrome.
-    # Keep it stable across successful runs so the managed session can retain its own state.
     profile = _managed_profile_dir()
     profile.mkdir(parents=True, exist_ok=True)
-
     runtime = _managed_runtime_dir()
     log_path = runtime / "chrome-cdp-start.log"
     command = [
@@ -78,9 +243,6 @@ def chrome_start_managed() -> str:
         "--new-window",
         "about:blank",
     ]
-
-    # Capture Chrome's own startup diagnostics instead of discarding them. This is
-    # particularly useful when chrome.exe exits before exposing the CDP endpoint.
     with log_path.open("a", encoding="utf-8") as log:
         log.write("\n=== JARVIS managed Chrome start ===\n")
         log.write(json.dumps({"exe": exe, "args": command, "profile": str(profile), "endpoint": endpoint}, ensure_ascii=False) + "\n")
@@ -98,14 +260,10 @@ def chrome_start_managed() -> str:
     last_error = "unknown error"
     while time.time() < deadline:
         if process.poll() is not None:
-            try:
-                recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-            except OSError:
-                recent_log = ""
+            recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
             raise RuntimeError(
                 f"Chrome exited during managed startup (exit_code={process.returncode}). "
-                f"CDP endpoint {endpoint} never became available. "
-                f"Startup log: {log_path}\n{recent_log}"
+                f"CDP endpoint {endpoint} never became available. Startup log: {log_path}\n{recent_log}"
             )
         try:
             import urllib.request
@@ -118,107 +276,54 @@ def chrome_start_managed() -> str:
                         "profile": str(profile),
                         "log": str(log_path),
                         "session_type": "managed",
-                        "note": "This is a JARVIS-managed Chrome profile. It is a real Chrome window but does not inherit the already-running personal Chrome session.",
                     }, ensure_ascii=False)
         except Exception as exc:
             last_error = str(exc)
         time.sleep(0.25)
 
-    try:
-        recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
-    except OSError:
-        recent_log = ""
+    recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
     raise RuntimeError(
         f"Chrome started with pid={process.pid}, but CDP did not become available at {endpoint}: {last_error}. "
         f"Startup log: {log_path}\n{recent_log}"
     )
 
 
-def _attach(endpoint: str) -> tuple[Any, Any, list[Any]]:
-    from playwright.sync_api import sync_playwright
-    pw = sync_playwright().start()
-    browser = pw.chromium.connect_over_cdp(endpoint, timeout=5000)
-    contexts = browser.contexts
-    pages: list[Any] = []
-    for context in contexts:
-        pages.extend(context.pages)
-    return pw, browser, pages
-
-
 def chrome_connect_cdp() -> str:
-    """Connect to CDP Chrome; automatically launch and attach a JARVIS-managed Chrome when unavailable."""
-    tools = _browser_globals()
     endpoint = _cdp_url()
-
-    if tools._BROWSER is not None:
-        try:
-            pages: list[Any] = []
-            for context in tools._BROWSER.contexts:
-                pages.extend(context.pages)
-            if pages:
-                tools._PAGE = pages[-1]
-                return json.dumps({
-                    "connected": True,
-                    "reused": True,
-                    "endpoint": endpoint,
-                    "session_type": getattr(tools, "_JARVIS_CHROME_SESSION_TYPE", "connected"),
-                    "pages": _page_rows(pages),
-                    "active_url": tools._PAGE.url,
-                    "active_title": tools._PAGE.title(),
-                }, ensure_ascii=False)
-        except Exception:
-            tools._BROWSER = None
-
-    real_error = None
+    runtime = _runtime()
     try:
-        pw, browser, pages = _attach(endpoint)
-        if not pages:
-            context = browser.contexts[0] if browser.contexts else browser.new_context()
-            tools._PAGE = context.new_page()
-            pages = [tools._PAGE]
-        else:
-            tools._PAGE = pages[-1]
-        tools._BROWSER = browser
-        tools._JARVIS_PLAYWRIGHT = pw
-        tools._JARVIS_CHROME_SESSION_TYPE = "real"
-        return json.dumps({
-            "connected": True,
+        result = runtime.call("connect", endpoint=endpoint, session_type="real")
+        return json.dumps(result, ensure_ascii=False)
+    except Exception as real_error:
+        managed = json.loads(chrome_start_managed())
+        result = runtime.call("connect", endpoint=endpoint, session_type="managed")
+        result.update({
             "reused": False,
-            "endpoint": endpoint,
-            "session_type": "real",
-            "pages": _page_rows(pages),
-            "active_url": tools._PAGE.url,
-            "active_title": tools._PAGE.title(),
-        }, ensure_ascii=False)
-    except Exception as exc:
-        real_error = str(exc)
+            "fallback_from_real": True,
+            "real_error": str(real_error),
+            "managed_pid": managed.get("pid"),
+            "profile": managed.get("profile"),
+            "startup_log": managed.get("log"),
+            "note": "JARVIS could not attach to an existing remotely-debuggable Chrome, so it launched an isolated real Chrome profile.",
+        })
+        return json.dumps(result, ensure_ascii=False)
 
-    managed = json.loads(chrome_start_managed())
-    pw, browser, pages = _attach(endpoint)
-    if not pages:
-        context = browser.contexts[0] if browser.contexts else browser.new_context()
-        tools._PAGE = context.new_page()
-        pages = [tools._PAGE]
-    else:
-        tools._PAGE = pages[-1]
-    tools._BROWSER = browser
-    tools._JARVIS_PLAYWRIGHT = pw
-    tools._JARVIS_CHROME_SESSION_TYPE = "managed"
-    return json.dumps({
-        "connected": True,
-        "reused": False,
-        "fallback_from_real": True,
-        "real_error": real_error,
-        "endpoint": endpoint,
-        "session_type": "managed",
-        "managed_pid": managed.get("pid"),
-        "profile": managed.get("profile"),
-        "startup_log": managed.get("log"),
-        "pages": _page_rows(pages),
-        "active_url": tools._PAGE.url,
-        "active_title": tools._PAGE.title(),
-        "note": "JARVIS could not attach to the already-running personal Chrome, so it launched an isolated real Chrome profile. Personal Chrome cookies and tabs were not inherited.",
-    }, ensure_ascii=False)
+
+def chrome_tabs() -> str:
+    return json.dumps(_runtime().call("tabs"), ensure_ascii=False)
+
+
+def chrome_use_tab(index: int) -> str:
+    return json.dumps(_runtime().call("use_tab", index=index), ensure_ascii=False)
+
+
+def chrome_current_tab() -> str:
+    return json.dumps(_runtime().call("current"), ensure_ascii=False)
+
+
+def chrome_page_operation(operation: str, **args: Any) -> Any:
+    """Run a Playwright page operation on the dedicated Chrome runtime thread."""
+    return _runtime().call("page", operation=operation, **args)
 
 
 def _page_rows(pages: list[Any]) -> list[dict[str, Any]]:
@@ -231,59 +336,20 @@ def _page_rows(pages: list[Any]) -> list[dict[str, Any]]:
     return rows
 
 
-def chrome_tabs() -> str:
-    tools = _browser_globals()
-    if tools._BROWSER is None:
-        raise RuntimeError("Chrome CDP is not connected. Run chrome_connect_cdp first.")
-    pages: list[Any] = []
-    for context in tools._BROWSER.contexts:
-        pages.extend(context.pages)
-    return json.dumps(_page_rows(pages), ensure_ascii=False)
-
-
-def chrome_use_tab(index: int) -> str:
-    tools = _browser_globals()
-    if tools._BROWSER is None:
-        raise RuntimeError("Chrome CDP is not connected. Run chrome_connect_cdp first.")
-    pages: list[Any] = []
-    for context in tools._BROWSER.contexts:
-        pages.extend(context.pages)
-    if index < 0 or index >= len(pages):
-        raise IndexError(f"Tab index {index} is out of range; {len(pages)} tabs are available.")
-    tools._PAGE = pages[index]
-    return json.dumps({
-        "selected": index,
-        "session_type": getattr(tools, "_JARVIS_CHROME_SESSION_TYPE", "unknown"),
-        "title": tools._PAGE.title(),
-        "url": tools._PAGE.url,
-    }, ensure_ascii=False)
-
-
-def chrome_current_tab() -> str:
-    tools = _browser_globals()
-    if tools._PAGE is None:
-        raise RuntimeError("No browser tab is selected.")
-    return json.dumps({
-        "session_type": getattr(tools, "_JARVIS_CHROME_SESSION_TYPE", "unknown"),
-        "title": tools._PAGE.title(),
-        "url": tools._PAGE.url,
-    }, ensure_ascii=False)
-
-
 def register_chrome_cdp_tools(registry) -> None:
     from .tools import ToolSpec
     from .permissions import Risk
 
     registry.register(ToolSpec(
         "chrome_start_managed",
-        "Launch a dedicated visible Google Chrome instance with CDP enabled for JARVIS. Uses an isolated JARVIS profile and does not copy or inherit the already-running personal Chrome session. Startup diagnostics are persisted under .jarvis/runtime.",
+        "Launch a dedicated visible Google Chrome instance with CDP enabled for JARVIS using an isolated TEMP profile. Startup diagnostics are persisted under .jarvis/runtime.",
         Risk.MEDIUM,
         {"type": "object", "properties": {}, "additionalProperties": False},
         chrome_start_managed,
     ))
     registry.register(ToolSpec(
         "chrome_connect_cdp",
-        "Connect JARVIS to Chrome through CDP. Automatically tries an existing remotely-debuggable Chrome first, then launches an isolated JARVIS-managed real Chrome if unavailable. No mode parameter is required.",
+        "Connect JARVIS to Chrome through CDP without exposing Playwright Sync API to the agent asyncio loop. Automatically uses an isolated managed Chrome fallback when needed.",
         Risk.MEDIUM,
         {"type": "object", "properties": {}, "additionalProperties": False},
         chrome_connect_cdp,
