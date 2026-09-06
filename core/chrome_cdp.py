@@ -8,7 +8,7 @@ import subprocess
 import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 
 class _ChromeRuntime:
@@ -28,8 +28,6 @@ class _ChromeRuntime:
         self._endpoint = ""
 
     def _run(self) -> None:
-        # The loop is created before Playwright starts. Commands are processed here,
-        # keeping every Sync API object thread-affine and isolated from the agent loop.
         try:
             self._ready.set()
             while True:
@@ -58,7 +56,10 @@ class _ChromeRuntime:
             raise RuntimeError(f"Chrome runtime thread failed: {self._startup_error}")
         reply: queue.Queue[Any] = queue.Queue(maxsize=1)
         self._commands.put((command, args, reply))
-        ok, value = reply.get(timeout=60)
+        try:
+            ok, value = reply.get(timeout=60)
+        except queue.Empty as exc:
+            raise TimeoutError(f"Chrome runtime command timed out: {command}") from exc
         if ok:
             return value
         raise value
@@ -99,6 +100,8 @@ class _ChromeRuntime:
         }
 
     def _refresh_pages(self) -> list[Any]:
+        if self._browser is None:
+            raise RuntimeError("Chrome CDP is not connected.")
         pages: list[Any] = []
         for context in self._browser.contexts:
             pages.extend(context.pages)
@@ -293,6 +296,7 @@ def chrome_connect_cdp() -> str:
     runtime = _runtime()
     try:
         result = runtime.call("connect", endpoint=endpoint, session_type="real")
+        result["reused"] = False
         return json.dumps(result, ensure_ascii=False)
     except Exception as real_error:
         managed = json.loads(chrome_start_managed())
@@ -319,6 +323,16 @@ def chrome_use_tab(index: int) -> str:
 
 def chrome_current_tab() -> str:
     return json.dumps(_runtime().call("current"), ensure_ascii=False)
+
+
+def chrome_is_connected() -> bool:
+    if _RUNTIME is None:
+        return False
+    try:
+        _RUNTIME.call("current")
+        return True
+    except Exception:
+        return False
 
 
 def chrome_page_operation(operation: str, **args: Any) -> Any:
@@ -349,7 +363,7 @@ def register_chrome_cdp_tools(registry) -> None:
     ))
     registry.register(ToolSpec(
         "chrome_connect_cdp",
-        "Connect JARVIS to Chrome through CDP without exposing Playwright Sync API to the agent asyncio loop. Automatically uses an isolated managed Chrome fallback when needed.",
+        "Connect JARVIS to Chrome through CDP using a dedicated Playwright worker thread, automatically falling back to an isolated managed Chrome when needed.",
         Risk.MEDIUM,
         {"type": "object", "properties": {}, "additionalProperties": False},
         chrome_connect_cdp,
