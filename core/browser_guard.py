@@ -4,6 +4,8 @@ import json
 import re
 from typing import Any
 
+from .chrome_cdp import chrome_current_tab, chrome_is_connected, chrome_page_operation
+
 
 _CHALLENGE_PATTERNS = (
     r"captcha",
@@ -20,6 +22,8 @@ _CHALLENGE_PATTERNS = (
 
 
 def _page():
+    if chrome_is_connected():
+        return "cdp"
     from .tools import _PAGE
     if _PAGE is None:
         raise RuntimeError("No browser page is open")
@@ -29,7 +33,10 @@ def _page():
 def _challenge_evidence(page) -> list[str]:
     evidence: list[str] = []
     try:
-        body = page.locator("body").inner_text(timeout=3000)
+        if page == "cdp":
+            body = chrome_page_operation("body_text")
+        else:
+            body = page.locator("body").inner_text(timeout=3000)
         lowered = body.lower()
         for pattern in _CHALLENGE_PATTERNS:
             if re.search(pattern, lowered, re.IGNORECASE):
@@ -53,7 +60,11 @@ def _challenge_evidence(page) -> list[str]:
     )
     for selector in selectors:
         try:
-            if page.locator(selector).count() > 0:
+            if page == "cdp":
+                count = chrome_page_operation("selector_count", selector=selector)
+            else:
+                count = page.locator(selector).count()
+            if count > 0:
                 evidence.append(f"selector:{selector}")
         except Exception:
             continue
@@ -64,6 +75,13 @@ def browser_check_challenge() -> str:
     """Detect common anti-bot/human-verification challenges without interacting with them."""
     page = _page()
     evidence = _challenge_evidence(page)
+    if page == "cdp":
+        current = json.loads(chrome_current_tab())
+        url = current["url"]
+        title = current["title"]
+    else:
+        url = page.url
+        title = page.title()
     if evidence:
         return json.dumps(
             {
@@ -71,8 +89,8 @@ def browser_check_challenge() -> str:
                 "action": "STOP_AND_REQUEST_USER",
                 "reason": "A human-verification or anti-bot challenge is present. JARVIS must not attempt to solve, bypass, or automate it.",
                 "evidence": evidence,
-                "url": page.url,
-                "title": page.title(),
+                "url": url,
+                "title": title,
             },
             ensure_ascii=False,
         )
@@ -80,8 +98,8 @@ def browser_check_challenge() -> str:
         {
             "challenge_detected": False,
             "action": "CONTINUE",
-            "url": page.url,
-            "title": page.title(),
+            "url": url,
+            "title": title,
         },
         ensure_ascii=False,
     )
@@ -91,6 +109,12 @@ def browser_page_state() -> str:
     """Inspect browser forms and controls without exposing current field values."""
     page = _page()
     challenge = _challenge_evidence(page)
+    if page == "cdp":
+        data: dict[str, Any] = chrome_page_operation("controls")
+        data["challenge_detected"] = bool(challenge)
+        data["challenge_evidence"] = challenge
+        data["note"] = "Field values are intentionally not returned."
+        return json.dumps(data, ensure_ascii=False)
     controls: list[dict[str, Any]] = page.locator("input, textarea, select, button").evaluate_all(
         "els => els.slice(0, 200).map((el, i) => ({"
         "index:i,"
@@ -141,6 +165,3 @@ def register_browser_guard_tools(registry) -> None:
             browser_page_state,
         )
     )
-
-    from .chrome_cdp import register_chrome_cdp_tools
-    register_chrome_cdp_tools(registry)
