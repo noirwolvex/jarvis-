@@ -18,6 +18,7 @@ from .notepad_tools import notepad_save_as
 from .skills import register_skill_tools
 from .orchestrator import TaskOrchestrator, build_execution_context
 from .monitor_tools import register_monitor_tools
+from .browser_guard import register_browser_guard_tools
 
 load_dotenv(override=True)
 
@@ -36,6 +37,9 @@ Execution protocol:
 - For a request like \"open Notepad and type X\", prefer open_application_and_type because it has a dedicated reliable Notepad path and exact source verification.
 - Load a relevant skill with list_skills/load_skill before specialized or complex work. Skills provide procedures, not permissions.
 - Use wait after application launches, dialog transitions, or asynchronous browser changes instead of racing the next action.
+- For browser tasks, inspect browser_page_state before filling unfamiliar forms when practical. Before browser_click, browser_type, or browser_press, use browser_check_challenge when a live page is available. If it reports a challenge, stop automation and ask the user to complete the human-verification step manually; do not solve, bypass, click, or type into the challenge.
+- Ordinary browser navigation, reading pages, opening tabs, and filling normal form fields may continue normally. A human-verification checkpoint is the boundary, not a reason to refuse the whole task.
+- Treat passwords, session tokens, API keys, and other secrets as sensitive input. Never echo them back in responses, traces, logs, or tool descriptions.
 - If any tool returns ERROR or PERMISSION_DENIED, do not repeat the identical action blindly. Inspect state, diagnose the failure, and choose a safer alternate path. After recovery, verify the requested outcome again.
 - For browser work, coordinate browser_navigate, browser_read_page, browser_links, browser_wait, browser_click, browser_type, and browser_press, rereading state after important navigation or submission.
 - Use browser_screenshot or take_screenshot only as a visual checkpoint; never claim pixel-level understanding unless the screenshot is actually available to you through a vision-capable path.
@@ -84,6 +88,7 @@ class JarvisAgent:
             register_advanced_tools(self.tools)
             register_skill_tools(self.tools)
             register_monitor_tools(self.tools)
+            register_browser_guard_tools(self.tools)
             self.tools.register(ToolSpec(
                 "notepad_save_as",
                 "Save the live text currently shown in the foreground Notepad window to a workspace file and verify the saved bytes by reading the target back.",
