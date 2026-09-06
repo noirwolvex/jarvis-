@@ -2,7 +2,41 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import re
 import time
+
+
+def _uia_type_and_verify(title: str, text: str) -> tuple[bool, str]:
+    """Use Windows UI Automation to set an editable document value and verify it."""
+    if not title or not text:
+        return False, ""
+    try:
+        from pywinauto import Desktop
+
+        window = Desktop(backend="uia").window(title_re=re.escape(title))
+        window.wait("visible", timeout=5)
+        window.set_focus()
+
+        # Modern Notepad exposes its document as an Edit control through UIA.
+        edits = window.descendants(control_type="Edit")
+        if not edits:
+            return False, "No UIA Edit control found"
+
+        target = next((edit for edit in edits if edit.is_visible() and edit.is_enabled()), edits[0])
+        target.set_focus()
+        target.set_edit_text(text)
+        time.sleep(0.25)
+
+        try:
+            actual = target.get_value()
+        except Exception:
+            actual = target.window_text()
+
+        if actual == text:
+            return True, f"Verified text in UIA editor ({len(text)} characters)"
+        return False, f"UIA editor value mismatch: expected {len(text)} characters, got {len(actual or '')}"
+    except Exception as exc:
+        return False, f"UIA unavailable: {type(exc).__name__}: {exc}"
 
 
 def _send_unicode_text(text: str) -> None:
@@ -56,26 +90,44 @@ def _send_unicode_text(text: str) -> None:
         raise ctypes.WinError()
 
 
-def paste_text(text: str) -> str:
-    """Enter arbitrary Unicode text into the currently focused Windows application.
+def _clipboard_paste(text: str) -> None:
+    import pyperclip
+    import pyautogui
 
-    Direct Win32 Unicode input is preferred because it does not depend on the
-    clipboard or application-specific paste handling. Clipboard paste remains
-    as a fallback for applications that reject injected Unicode keystrokes.
-    """
+    pyperclip.copy(text)
+    time.sleep(0.15)
+    pyautogui.hotkey("ctrl", "v")
+    time.sleep(max(0.1, min(1.5, len(text) / 500)))
+
+
+def paste_text(text: str, window_title: str | None = None, verify: bool = False) -> str:
+    """Enter arbitrary Unicode text and optionally verify it in the target window."""
     if not text:
-        return "Pasted 0 characters"
+        return "Entered 0 characters"
 
+    if window_title:
+        ok, detail = _uia_type_and_verify(window_title, text)
+        if ok:
+            return f"VERIFIED: {detail}"
+
+    direct_error = None
     try:
         _send_unicode_text(text)
         time.sleep(max(0.08, min(1.5, len(text) / 600)))
-        return f"Entered {len(text)} characters via Windows Unicode input"
-    except Exception:
-        import pyperclip
-        import pyautogui
+        method = "Windows Unicode input"
+    except Exception as exc:
+        direct_error = f"{type(exc).__name__}: {exc}"
+        _clipboard_paste(text)
+        method = "clipboard fallback"
 
-        pyperclip.copy(text)
-        time.sleep(0.15)
-        pyautogui.hotkey("ctrl", "v")
-        time.sleep(max(0.1, min(1.5, len(text) / 500)))
-        return f"Pasted {len(text)} characters into the focused application via clipboard fallback"
+    if verify and window_title:
+        ok, detail = _uia_type_and_verify(window_title, text)
+        if ok:
+            return f"VERIFIED: {detail} after {method}"
+        failure = detail
+    else:
+        failure = "verification not requested"
+
+    if direct_error:
+        return f"Entered {len(text)} characters via {method}; verification: {failure}"
+    return f"Entered {len(text)} characters via {method}; verification: {failure}"
