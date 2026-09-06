@@ -77,7 +77,7 @@ class ToolRegistry:
         ))
         self.register(ToolSpec(
             "open_application_and_type",
-            "Open a Windows application, detect the actual visible window (even when Windows launches it through another process), focus it, and reliably paste the requested text. Use this for requests such as 'open Notepad and type X'.",
+            "Open a Windows application, detect the actual visible window (including launcher/reused-process cases), focus it, focus its main content area, and reliably paste the requested text.",
             Risk.MEDIUM,
             {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]},
             _open_application_and_type,
@@ -308,6 +308,26 @@ def _focus_window(title: str) -> str:
     return f"Focused window matching: {title} (title={_window_title(matches[0])})"
 
 
+def _click_window_content(hwnd: int) -> None:
+    """Put the caret/focus into a likely main content area of a foreground window."""
+    user32 = ctypes.windll.user32
+    class RECT(ctypes.Structure):
+        _fields_ = [("left", ctypes.c_long), ("top", ctypes.c_long), ("right", ctypes.c_long), ("bottom", ctypes.c_long)]
+
+    rect = RECT()
+    if not user32.GetClientRect(hwnd, ctypes.byref(rect)):
+        return
+    point = ctypes.wintypes.POINT()
+    point.x = max(10, (rect.right - rect.left) // 2)
+    point.y = max(30, (rect.bottom - rect.top) // 2)
+    if not user32.ClientToScreen(hwnd, ctypes.byref(point)):
+        return
+
+    import pyautogui
+    pyautogui.click(x=point.x, y=point.y)
+    time.sleep(0.2)
+
+
 def _open_application_and_type(command: str, text: str) -> str:
     if os.name != "nt":
         raise RuntimeError("Windows application automation is supported on Windows only")
@@ -317,13 +337,10 @@ def _open_application_and_type(command: str, text: str) -> str:
     deadline = time.time() + 15
     hwnd = None
 
-    # Prefer a genuinely new visible window. This handles launchers and apps
-    # that reuse an existing process (Notepad can do this on modern Windows).
     while time.time() < deadline:
         current = _visible_windows()
         new_windows = [(candidate, title) for candidate, title in current.items() if candidate not in before]
         if new_windows:
-            # Prefer a title containing a useful part of the command.
             tokens = [t.strip('"\' ').lower() for t in command.replace('\\', '/').split('/')[-1].split() if t.strip('"\' ')]
             preferred = next(
                 (candidate for candidate, title in new_windows if any(token and token in title.lower() for token in tokens)),
@@ -336,8 +353,6 @@ def _open_application_and_type(command: str, text: str) -> str:
             break
         time.sleep(0.25)
 
-    # If the app reused an existing window, focus a matching title instead of
-    # incorrectly reporting failure. Common app names are matched conservatively.
     if hwnd is None:
         command_name = Path(command.strip().strip('"')).stem.lower()
         if command_name:
@@ -352,11 +367,12 @@ def _open_application_and_type(command: str, text: str) -> str:
     _activate_hwnd(hwnd)
     time.sleep(0.2)
     title = _window_title(hwnd)
-    result = paste_text(text)
+    _click_window_content(hwnd)
     foreground = ctypes.windll.user32.GetForegroundWindow()
     if foreground != hwnd:
         raise RuntimeError(f"Target window lost foreground before typing: {title}")
-    return f"Started {command}; focused window '{title}'; {result.lower()}"
+    result = paste_text(text)
+    return f"Started {command}; focused window '{title}'; clicked its main content; {result.lower()}"
 
 
 def _open_url(url: str) -> str:
