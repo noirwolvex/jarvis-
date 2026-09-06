@@ -189,7 +189,7 @@ def _run_powershell(command: str) -> str:
 
 def _open_application(command: str) -> str:
     process = subprocess.Popen(command, shell=True)
-    return f"Started application: {command} (pid={process.pid})"
+    return f"Started application: {command} (launcher_pid={process.pid})"
 
 
 def _window_for_pid(pid: int) -> int | None:
@@ -213,6 +213,27 @@ def _window_for_pid(pid: int) -> int | None:
     return found[0] if found else None
 
 
+def _process_tree_pids(pid: int) -> list[int]:
+    pids = [pid]
+    try:
+        import psutil
+        root = psutil.Process(pid)
+        for child in root.children(recursive=True):
+            if child.pid not in pids:
+                pids.append(child.pid)
+    except Exception:
+        pass
+    return pids
+
+
+def _window_for_process_tree(pid: int) -> int | None:
+    for candidate in _process_tree_pids(pid):
+        hwnd = _window_for_pid(candidate)
+        if hwnd:
+            return hwnd
+    return None
+
+
 def _activate_hwnd(hwnd: int) -> None:
     user32 = ctypes.windll.user32
     SW_RESTORE = 9
@@ -220,8 +241,6 @@ def _activate_hwnd(hwnd: int) -> None:
     user32.SetForegroundWindow(hwnd)
     time.sleep(0.25)
     if user32.GetForegroundWindow() != hwnd:
-        # Windows can reject foreground changes across input threads. A brief
-        # Alt key tap is a documented user-input-compatible fallback.
         import pyautogui
         pyautogui.keyDown("alt")
         pyautogui.keyUp("alt")
@@ -261,15 +280,23 @@ def _open_application_and_type(command: str, text: str) -> str:
     if os.name != "nt":
         raise RuntimeError("Windows application automation is supported on Windows only")
     process = subprocess.Popen(command, shell=True)
-    deadline = time.time() + 10
+    deadline = time.time() + 12
     hwnd = None
     while time.time() < deadline:
-        hwnd = _window_for_pid(process.pid)
+        hwnd = _window_for_process_tree(process.pid)
         if hwnd:
             break
-        time.sleep(0.2)
+        if process.poll() is not None:
+            # The shell may exit immediately after handing off to the real app;
+            # its child process can still be running and is checked above.
+            time.sleep(0.15)
+        else:
+            time.sleep(0.2)
     if hwnd is None:
-        raise RuntimeError(f"Application started but no visible window was found within 10 seconds (pid={process.pid})")
+        raise RuntimeError(
+            f"Application started but no visible window was found within 12 seconds "
+            f"(launcher_pid={process.pid})"
+        )
     _activate_hwnd(hwnd)
     result = paste_text(text)
     return f"Started {command}, focused its window, and {result.lower()}"
