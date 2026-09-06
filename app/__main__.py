@@ -24,12 +24,15 @@ load_dotenv(override=True)
 
 from core.agent import AgentEvent, JarvisAgent
 
-# Replace the legacy pyautogui-only text function with the reliable
-# clipboard/paste implementation. The ToolRegistry keeps its existing
-# public surface, so this is a compatibility patch at application startup.
+# Keep the legacy desktop surface compatible while using robust Windows input.
 import core.tools as core_tools
 from core.desktop_input import paste_text
+from core.notepad_automation import open_application_and_type as notepad_aware_open_application_and_type
+
 core_tools._desktop_type = paste_text
+core_tools._open_application_and_type = lambda command, text: notepad_aware_open_application_and_type(
+    command, text, core_tools._open_application_and_type
+)
 
 
 class ApprovalRequest:
