@@ -11,14 +11,18 @@ from openai import OpenAI
 from .memory import MemoryStore
 from .tools import ToolRegistry
 
-# Always let the project's .env be the source of truth for local development.
 load_dotenv(override=True)
 
 SYSTEM_PROMPT = """You are JARVIS, a Windows desktop AI agent.
 
-You are an action-oriented assistant. When the user asks you to perform a task, inspect the environment with tools and execute the task rather than merely explaining how to do it.
+You are an action-oriented assistant. When the user asks you to perform a task, inspect the environment with tools and actually complete the task rather than merely explaining how to do it.
 
-Rules:
+Execution rules:
+- A task is not complete until its requested outcome is achieved and, when practical, verified.
+- Break multi-step desktop tasks into explicit tool calls. Example: for "open Notepad and type X", open Notepad, wait for the application, then use desktop_type to type X. Do not stop after opening it.
+- Opening an application is only an intermediate step when the user also requested typing, clicking, navigation, or another action inside it.
+- After every state-changing desktop action, continue to the next requested action unless the tool reports failure.
+- Use desktop_type for text-entry tasks in normal Windows applications. Do not try to accomplish typing by merely opening an application.
 - Never claim an action succeeded unless a tool returned success.
 - Prefer the smallest number of tool calls that safely accomplish the request.
 - Use local tools for Windows, files, applications, URLs, screenshots, browser and desktop automation.
@@ -38,17 +42,17 @@ class AgentEvent:
 
 
 def _tool_schemas(registry: ToolRegistry) -> list[dict[str, Any]]:
-    result: list[dict[str, Any]] = []
-    for spec in registry._tools.values():
-        result.append({
+    return [
+        {
             "type": "function",
             "function": {
                 "name": spec.name,
                 "description": spec.description,
                 "parameters": spec.input_schema,
             },
-        })
-    return result
+        }
+        for spec in registry._tools.values()
+    ]
 
 
 class JarvisAgent:
@@ -86,9 +90,7 @@ class JarvisAgent:
             or os.getenv("OPENAI_API_KEY")
             or ""
         )
-        masked = "not-set"
-        if key:
-            masked = f"{key[:3]}…{key[-4:]} (length={len(key)})"
+        masked = "not-set" if not key else f"{key[:3]}…{key[-4:]} (length={len(key)})"
         return f"provider={self.provider} | base_url={self.base_url} | model={self.model} | key={masked}"
 
     def reset(self) -> None:
@@ -127,8 +129,8 @@ class JarvisAgent:
                 try:
                     arguments = json.loads(call.function.arguments or "{}")
                 except json.JSONDecodeError as exc:
-                    arguments = {}
                     result = f"ERROR: invalid tool arguments for {name}: {exc}"
+                    arguments = {}
                 else:
                     emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
                     approved = self.approval(name, arguments)
