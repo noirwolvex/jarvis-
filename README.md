@@ -7,9 +7,10 @@ A Windows-first desktop AI agent powered by Claude.
 - Natural-language desktop control
 - Claude tool calling with an explicit local execution layer
 - Permission-aware actions
-- Windows terminal, process, filesystem, browser, and screen automation
+- Windows terminal, process, filesystem, browser, dialog, UI Automation, and screen automation
 - Persistent local memory
-- Extensible tool registry for VS Code, GitHub, Supabase, and other devices
+- Extensible skills and tool registry
+- Task orchestration with recovery and durable execution traces
 - Desktop UI that exposes agent activity and tool execution
 
 ## Architecture
@@ -18,22 +19,45 @@ A Windows-first desktop AI agent powered by Claude.
 PySide6 Desktop UI
         |
         v
-    Agent Core
+  High-Level Agent
         |
-        +---- Claude API / tool calling
+        +---- Task Orchestrator
+        |       +-- task state
+        |       +-- failure recovery
+        |       +-- execution traces
+        |
+        +---- Claude / tool calling
+        |
+        +---- Skills
+        |       +-- desktop-operator
+        |       +-- browser-operator
+        |       +-- developer
+        |       +-- researcher
+        |       +-- workspace skills
         |
         +---- Permission Engine
         |
         +---- Tool Registry
-                 +-- terminal
-                 +-- filesystem
-                 +-- windows
-                 +-- browser
-                 +-- screen
-                 +-- automation
+        |       +-- terminal
+        |       +-- filesystem
+        |       +-- windows / UIA
+        |       +-- Win32 dialogs
+        |       +-- browser
+        |       +-- screen / input
+        |       +-- Git / VS Code
         |
         +---- SQLite Memory
+        |
+        +---- .jarvis/traces
 ```
+
+## Advanced behavior
+
+JARVIS treats each user request as a tracked task with an identifier, turn count, tool history, failure count, recovery count, elapsed time, final status, and a durable JSON trace. Failed tool calls produce recovery guidance rather than blind repetition.
+
+JARVIS also supports specialized Skills. Skills are procedural guidance layered above permissions, so adding a new skill does not bypass the safety model.
+
+For Windows dialogs, the agent has direct Win32 inspection and control for common Save/Open flows. For Notepad persistence, `notepad_save_as` reads the live editor state and verifies the target file after writing it.
 
 ## Setup
 
@@ -47,8 +71,8 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
-4. Copy `.env.example` to `.env` and add your Anthropic API key.
-5. Start Jarvis:
+4. Copy `.env.example` to `.env` and configure your provider credentials.
+5. Start JARVIS:
 
 ```powershell
 python -m app
@@ -56,8 +80,8 @@ python -m app
 
 ## Safety model
 
-Jarvis does not give Claude unrestricted operating-system access. Every action is mapped to a named local tool. High-risk tools are denied unless explicitly approved by the permission layer.
+JARVIS does not give the model unrestricted operating-system access. Every action is mapped to a named local tool and checked by the centralized permission engine. High-risk actions are blocked unless the configured policy explicitly permits them.
 
 ## Status
 
-This repository starts with the functional agent foundation. Device agents, remote control, voice, and deeper integrations are designed as subsequent modules rather than being hard-wired into the core.
+The foundation now includes Claude tool calling, Windows automation, UI inspection, dialog control, specialized skills, persistent memory, task orchestration, recovery handling, and durable traces. Voice, remote control, broader device agents, and deeper service integrations remain modular next-stage capabilities.
