@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import ctypes.wintypes  # Ensure ctypes.wintypes is registered for Win32 helpers.
 import time
 
 
