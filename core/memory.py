@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import sqlite3
 from pathlib import Path
@@ -10,8 +11,10 @@ from typing import Any
 class MemoryStore:
     """SQLite-backed long-term memory with simple local relevance retrieval."""
 
-    def __init__(self, db_path: str = ".jarvis/memory.db") -> None:
-        self.path = Path(db_path)
+    def __init__(self, db_path: str | None = None) -> None:
+        workspace = Path(os.getenv("JARVIS_WORKSPACE", ".")).expanduser().resolve()
+        self.path = Path(db_path).expanduser() if db_path else workspace / ".jarvis" / "memory.db"
+        self.path = self.path.resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
         with sqlite3.connect(self.path) as db:
             db.execute(
@@ -59,7 +62,10 @@ class MemoryStore:
 
     @staticmethod
     def _tokens(text: str) -> set[str]:
-        return {token for token in re.findall(r"[\w-]{2,}", text.lower()) if token not in {"the", "and", "for", "with", "that", "this"}}
+        return {
+            token for token in re.findall(r"[\w-]{2,}", text.lower())
+            if token not in {"the", "and", "for", "with", "that", "this"}
+        }
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
         query_tokens = self._tokens(query)
@@ -76,6 +82,8 @@ class MemoryStore:
             if overlap == 0:
                 continue
             score = overlap / max(1, len(query_tokens))
+            if kind == "fact":
+                score += 0.15
             scored.append((score, {"id": ident, "kind": kind, "content": content, "created_at": created_at}))
         scored.sort(key=lambda item: (-item[0], -int(item[1]["id"])))
         return [item[1] for item in scored[: max(1, limit)]]
