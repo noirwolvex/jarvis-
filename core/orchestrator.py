@@ -4,9 +4,19 @@ import json
 import os
 import time
 import uuid
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
+
+
+@dataclass
+class PlanStep:
+    id: str
+    description: str
+    depends_on: list[str] = field(default_factory=list)
+    status: str = "pending"
+    result: str = ""
 
 
 @dataclass
@@ -20,6 +30,14 @@ class ToolTrace:
 
 
 @dataclass
+class VerificationRecord:
+    claim: str
+    verified: bool
+    evidence: str = ""
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
 class TaskRun:
     task_id: str
     goal: str
@@ -30,6 +48,8 @@ class TaskRun:
     failures: int = 0
     recoveries: int = 0
     traces: list[ToolTrace] = field(default_factory=list)
+    plan: list[PlanStep] = field(default_factory=list)
+    verifications: list[VerificationRecord] = field(default_factory=list)
     final_result: str = ""
     finished_at: float | None = None
 
@@ -40,11 +60,7 @@ class TaskRun:
 
 
 class TaskOrchestrator:
-    """Small, dependency-free execution layer for reliable agent runs.
-
-    It does not replace the model. It adds durable task state, failure-aware
-    recovery hints, and machine-readable traces around the existing tool loop.
-    """
+    """Execution state, planning, bounded parallel reads, recovery and verification."""
 
     def __init__(self, trace_dir: str | None = None) -> None:
         workspace = Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve()
@@ -59,6 +75,58 @@ class TaskOrchestrator:
             started_at=time.time(),
         )
         return self.current
+
+    def set_plan(self, steps: list[PlanStep | dict[str, Any] | str]) -> list[PlanStep]:
+        if not self.current:
+            return []
+        plan: list[PlanStep] = []
+        for index, raw in enumerate(steps, start=1):
+            if isinstance(raw, PlanStep):
+                plan.append(raw)
+            elif isinstance(raw, str):
+                plan.append(PlanStep(id=f"step-{index}", description=raw))
+            else:
+                plan.append(PlanStep(
+                    id=str(raw.get("id") or f"step-{index}"),
+                    description=str(raw.get("description") or raw.get("goal") or "Unnamed step"),
+                    depends_on=list(raw.get("depends_on") or []),
+                ))
+        self.current.plan = plan
+        return plan
+
+    def update_step(self, step_id: str, status: str, result: str = "") -> None:
+        if not self.current:
+            return
+        for step in self.current.plan:
+            if step.id == step_id:
+                step.status = status
+                step.result = result[:12000]
+                break
+
+    def ready_steps(self) -> list[PlanStep]:
+        if not self.current:
+            return []
+        completed = {step.id for step in self.current.plan if step.status == "completed"}
+        return [
+            step for step in self.current.plan
+            if step.status == "pending" and all(dep in completed for dep in step.depends_on)
+        ]
+
+    def run_independent_reads(
+        self,
+        jobs: list[Callable[[], Any]],
+        max_workers: int = 4,
+    ) -> list[Any]:
+        """Run independent read-only jobs concurrently; callers must guarantee read-only semantics."""
+        if not jobs:
+            return []
+        results: list[Any] = [None] * len(jobs)
+        with ThreadPoolExecutor(max_workers=max(1, min(max_workers, len(jobs))), thread_name_prefix="jarvis-read") as pool:
+            futures = {pool.submit(job): index for index, job in enumerate(jobs)}
+            for future in as_completed(futures):
+                index = futures[future]
+                results[index] = future.result()
+        return results
 
     def start_turn(self, turn: int) -> None:
         if self.current:
@@ -82,8 +150,20 @@ class TaskOrchestrator:
         if not success:
             self.current.failures += 1
 
+    def verify(self, claim: str, verified: bool, evidence: str = "") -> bool:
+        if not self.current:
+            return False
+        self.current.verifications.append(
+            VerificationRecord(claim=claim, verified=verified, evidence=evidence[:12000])
+        )
+        return verified
+
+    def all_required_verifications_passed(self) -> bool:
+        if not self.current:
+            return False
+        return bool(self.current.verifications) and all(item.verified for item in self.current.verifications)
+
     def recovery_hint(self, result: str, tool_name: str) -> str:
-        """Return a compact recovery instruction after an unsuccessful action."""
         if not self.current or not (result.startswith("ERROR") or result.startswith("PERMISSION_DENIED")):
             return ""
         self.current.recoveries += 1
@@ -120,6 +200,10 @@ class TaskOrchestrator:
             "tools_used": self.current.tools_used,
             "failures": self.current.failures,
             "recoveries": self.current.recoveries,
+            "plan_steps": len(self.current.plan),
+            "plan_completed": sum(step.status == "completed" for step in self.current.plan),
+            "verifications": len(self.current.verifications),
+            "verified": self.all_required_verifications_passed() if self.current.verifications else False,
             "elapsed_ms": round(self.current.elapsed_ms, 2),
         }
 
@@ -131,8 +215,13 @@ class TaskOrchestrator:
 def build_execution_context(task: TaskRun | None) -> str:
     if not task:
         return ""
+    plan = "; ".join(f"{step.id}:{step.status}" for step in task.plan) or "none"
+    verification = "; ".join(
+        f"{item.claim}={'yes' if item.verified else 'no'}" for item in task.verifications[-8:]
+    ) or "none"
     return (
         "\n\nExecution state: "
         f"task_id={task.task_id}; turn={task.current_turn}; "
-        f"tools_used={task.tools_used}; failures={task.failures}; recoveries={task.recoveries}."
+        f"tools_used={task.tools_used}; failures={task.failures}; recoveries={task.recoveries}; "
+        f"plan={plan}; verifications={verification}."
     )
