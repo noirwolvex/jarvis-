@@ -12,8 +12,17 @@ def _workspace() -> Path:
     return Path(os.getenv("JARVIS_WORKSPACE", ".")).expanduser().resolve()
 
 
+def _workspace_path(path: str | None = None) -> Path:
+    workspace = _workspace()
+    raw = Path(path or ".").expanduser()
+    resolved = (workspace / raw).resolve() if not raw.is_absolute() else raw.resolve()
+    if resolved != workspace and workspace not in resolved.parents:
+        raise PermissionError(f"Path is outside JARVIS_WORKSPACE: {resolved}")
+    return resolved
+
+
 def _run_git(args: list[str], cwd: str | None = None, timeout: int = 30) -> str:
-    root = Path(cwd).expanduser().resolve() if cwd else _workspace()
+    root = _workspace_path(cwd)
     completed = subprocess.run(
         ["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout, check=False
     )
@@ -76,7 +85,7 @@ def git_remote(path: str = ".") -> str:
 
 
 def project_snapshot(path: str = ".") -> str:
-    root = Path(path).expanduser().resolve() if path else _workspace()
+    root = _workspace_path(path)
     if not root.exists():
         raise FileNotFoundError(root)
     entries = []
@@ -91,9 +100,7 @@ def project_snapshot(path: str = ".") -> str:
 
 
 def vscode_open(path: str = ".") -> str:
-    target = Path(path).expanduser()
-    if not target.is_absolute():
-        target = (_workspace() / target).resolve()
+    target = _workspace_path(path)
     subprocess.Popen(["code", "--reuse-window", str(target)], shell=False)
     return f"Opened VS Code: {target}"
 

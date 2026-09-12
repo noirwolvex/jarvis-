@@ -9,6 +9,31 @@ from pathlib import Path
 from typing import Any
 
 
+_SECRET_ASSIGNMENT = re.compile(
+    r"(?i)\b([A-Z0-9_.-]*(?:api[_-]?key|access[_-]?token|auth[_-]?token|client[_-]?secret|password|passwd|secret))"
+    r"(\s*[:=]\s*)([\"']?)([^\s\"'`,;]+)\3"
+)
+_BEARER_TOKEN = re.compile(r"(?i)\b(authorization\s*:\s*bearer)\s+[^\s,;]+")
+_KNOWN_TOKEN = re.compile(
+    r"\b(?:sk-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|"
+    r"glpat-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16})\b"
+)
+_JWT_TOKEN = re.compile(r"\beyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b")
+
+
+def redact_secrets(value: str) -> str:
+    """Best-effort local secret scrubbing before text is persisted to memory."""
+    text = str(value)
+    text = _BEARER_TOKEN.sub(lambda match: f"{match.group(1)} [REDACTED]", text)
+    text = _SECRET_ASSIGNMENT.sub(
+        lambda match: f"{match.group(1)}{match.group(2)}[REDACTED]",
+        text,
+    )
+    text = _KNOWN_TOKEN.sub("[REDACTED_TOKEN]", text)
+    text = _JWT_TOKEN.sub("[REDACTED_TOKEN]", text)
+    return text
+
+
 class MemoryStore:
     """SQLite-backed long-term memory with simple local relevance retrieval."""
 
@@ -30,7 +55,7 @@ class MemoryStore:
             db.commit()
 
     def add(self, kind: str, content: str) -> None:
-        text = str(content).strip()
+        text = redact_secrets(str(content)).strip()
         if not text:
             return
         with closing(sqlite3.connect(self.path)) as db:
@@ -41,11 +66,12 @@ class MemoryStore:
         self.add("fact", content)
 
     def set_preference(self, key: str, value: str) -> None:
+        safe_value = redact_secrets(value.strip())
         with closing(sqlite3.connect(self.path)) as db:
             db.execute(
                 "INSERT INTO preferences(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
-                (key.strip(), value.strip()),
+                (key.strip(), safe_value),
             )
             db.commit()
 
@@ -69,7 +95,7 @@ class MemoryStore:
         }
 
     def search(self, query: str, limit: int = 8) -> list[dict[str, Any]]:
-        query_tokens = self._tokens(query)
+        query_tokens = self._tokens(redact_secrets(query))
         if not query_tokens:
             return self.recent(limit)
         with closing(sqlite3.connect(self.path)) as db:

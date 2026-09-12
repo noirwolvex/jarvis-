@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+from core.dev_tools import git_status
 from core.memory import MemoryStore
 from core.orchestrator import PlanStep, TaskOrchestrator
 from core.permissions import PermissionEngine, Risk
@@ -23,6 +24,19 @@ class NextGenCoreTests(unittest.TestCase):
             self.assertEqual(matches[0]["kind"], "fact")
             self.assertEqual(memory.preferences()["coding_style"], "focused")
             self.assertIn("Relevant long-term facts", memory.context("active project"))
+
+    def test_memory_redacts_secrets_before_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            memory = MemoryStore(str(Path(tmp) / "memory.db"))
+            api_key = "sk-abcdefghijklmnopqrstuvwxyz012345"
+            bearer = "session-token-that-must-not-be-stored"
+            memory.add("user", f"OPENAI_API_KEY={api_key} Authorization: Bearer {bearer}")
+            stored = memory.recent(1)[0]["content"]
+            self.assertNotIn(api_key, stored)
+            self.assertNotIn(bearer, stored)
+            self.assertIn("[REDACTED]", stored)
+            memory.set_preference("credential_note", "password=hunter2")
+            self.assertEqual(memory.preferences()["credential_note"], "password=[REDACTED]")
 
     def test_workspace_context_persists_project(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -72,6 +86,55 @@ class NextGenCoreTests(unittest.TestCase):
             self.assertIn("Git write", reason)
             ok, _ = engine.check("git_status", Risk.LOW, approved=False)
             self.assertTrue(ok)
+
+    def test_shell_requires_explicit_and_destructive_access(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "JARVIS_ALLOW_SHELL": "false",
+                "JARVIS_ALLOW_DESTRUCTIVE": "true",
+                "JARVIS_REQUIRE_APPROVAL": "false",
+            },
+            clear=False,
+        ):
+            ok, reason = PermissionEngine().check("run_powershell", Risk.MEDIUM, approved=True)
+            self.assertFalse(ok)
+            self.assertIn("PowerShell execution is disabled", reason)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "JARVIS_ALLOW_SHELL": "true",
+                "JARVIS_ALLOW_DESTRUCTIVE": "false",
+                "JARVIS_REQUIRE_APPROVAL": "false",
+            },
+            clear=False,
+        ):
+            ok, reason = PermissionEngine().check("run_powershell", Risk.MEDIUM, approved=True)
+            self.assertFalse(ok)
+            self.assertIn("destructive access is disabled", reason)
+
+        with patch.dict(
+            "os.environ",
+            {
+                "JARVIS_ALLOW_SHELL": "true",
+                "JARVIS_ALLOW_DESTRUCTIVE": "true",
+                "JARVIS_REQUIRE_APPROVAL": "true",
+            },
+            clear=False,
+        ):
+            engine = PermissionEngine()
+            ok, reason = engine.check("run_powershell", Risk.MEDIUM, approved=False)
+            self.assertFalse(ok)
+            self.assertIn("Approval required", reason)
+            ok, _ = engine.check("run_powershell", Risk.MEDIUM, approved=True)
+            self.assertTrue(ok)
+
+    def test_git_tools_cannot_escape_workspace(self) -> None:
+        with tempfile.TemporaryDirectory() as workspace, tempfile.TemporaryDirectory() as outside:
+            with patch.dict("os.environ", {"JARVIS_WORKSPACE": workspace}, clear=False):
+                with self.assertRaises(PermissionError):
+                    git_status(outside)
 
 
 if __name__ == "__main__":
