@@ -131,7 +131,11 @@ fn input_capability_authorizes_click_and_keyboard_but_not_capture() {
     };
     assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_ok());
     req.action = Action::Capture { display_id: 0 };
-    assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_err());
+    assert!(
+        policy
+            .authorize(&"a".repeat(64), &req, now, &latch)
+            .is_err()
+    );
 }
 
 #[test]
@@ -187,24 +191,12 @@ fn stale_frames_out_of_display_coordinates_and_invalid_pixels_are_rejected() {
     let mut frame = SimulationCapture.capture(0, 16_384).unwrap();
     assert!(
         SimulationInput
-            .click(
-                &frame,
-                64,
-                0,
-                &foreground(),
-                &EmergencyLatch::default()
-            )
+            .click(&frame, 64, 0, &foreground(), &EmergencyLatch::default())
             .is_err()
     );
     assert!(
         SimulationInput
-            .click(
-                &frame,
-                -1,
-                0,
-                &foreground(),
-                &EmergencyLatch::default()
-            )
+            .click(&frame, -1, 0, &foreground(), &EmergencyLatch::default())
             .is_err()
     );
     assert!(
@@ -220,13 +212,7 @@ fn stale_frames_out_of_display_coordinates_and_invalid_pixels_are_rejected() {
     frame.captured_at = Instant::now() - Duration::from_secs(2);
     assert!(
         SimulationInput
-            .click(
-                &frame,
-                1,
-                1,
-                &foreground(),
-                &EmergencyLatch::default()
-            )
+            .click(&frame, 1, 1, &foreground(), &EmergencyLatch::default())
             .is_err()
     );
     assert!(Frame::new(frame.display, vec![1], true, 16_384).is_err());
