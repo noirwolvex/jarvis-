@@ -63,9 +63,7 @@ async fn main() -> Result<()> {
         return Err(Error::Denied("listen address must be loopback"));
     }
     if config.native_input && config.simulation {
-        return Err(Error::Denied(
-            "native input requires simulation=false",
-        ));
+        return Err(Error::Denied("native input requires simulation=false"));
     }
     let tls = ipc::tls_config(&config.server_cert, &config.server_key, &config.client_ca)?;
     let policy = Policy::new(config.simulation, config.capabilities, now_ms())?;
