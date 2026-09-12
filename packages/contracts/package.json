@@ -1,0 +1,10 @@
+{
+  "name": "@jarvis/contracts",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts", "./schemas": "./schemas/contracts.schema.json" },
+  "scripts": { "typecheck": "tsc --noEmit", "schemas": "tsx scripts/export-schemas.ts" },
+  "dependencies": { "ajv": "^8.17.1", "ajv-formats": "^3.0.1" },
+  "devDependencies": { "@types/node": "^22.0.0", "tsx": "^4.20.0", "typescript": "^5.9.0" }
+}
