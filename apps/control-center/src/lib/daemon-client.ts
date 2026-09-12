@@ -79,11 +79,11 @@ export function daemonConfigFromEnv(env: NodeJS.ProcessEnv = process.env): Daemo
 }
 
 class FrameReader {
-  private buffer = Buffer.alloc(0);
-  private readonly iterator: AsyncIterator<Buffer>;
+  private buffer: Buffer<ArrayBufferLike> = Buffer.alloc(0);
+  private readonly iterator: AsyncIterator<Buffer<ArrayBufferLike>>;
 
   constructor(socket: TLSSocket) {
-    this.iterator = socket[Symbol.asyncIterator]() as AsyncIterator<Buffer>;
+    this.iterator = socket[Symbol.asyncIterator]() as AsyncIterator<Buffer<ArrayBufferLike>>;
   }
 
   private async ensure(bytes: number) {
