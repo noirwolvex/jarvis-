@@ -1,10 +1,10 @@
 use jarvis_execution_daemon::{
-    capture::{CaptureRing, Frame, ScreenCapture, SimulationCapture},
+    capture::{CaptureRing, Frame, ScreenCapture, SimulationCapture, preview_bmp},
     governance::{Capability, EmergencyLatch, Policy, Scope},
     input::{InputController, SimulationInput},
     ipc::{MAX_WIRE_BYTES, Session, read_frame},
     process::{ProcessManager, validate_argv},
-    types::{Action, Request, now_ms},
+    types::{Action, ForegroundBinding, Request, now_ms},
 };
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -27,6 +27,12 @@ fn grant(now: u64) -> Capability {
         peer_sha256: "a".repeat(64),
         expires_at_ms: now + 1000,
         scope: Scope::Observe { display_id: 0 },
+    }
+}
+fn foreground() -> ForegroundBinding {
+    ForegroundBinding {
+        process_id: 42,
+        title: "Test window".into(),
     }
 }
 
@@ -91,6 +97,48 @@ fn forged_wrong_peer_wrong_scope_and_expired_capabilities_fail_closed() {
 }
 
 #[test]
+fn input_capability_authorizes_click_and_keyboard_but_not_capture() {
+    let now = now_ms();
+    let input = Capability {
+        id: "input".into(),
+        peer_sha256: "a".repeat(64),
+        expires_at_ms: now + 1000,
+        scope: Scope::Input { display_id: 0 },
+    };
+    let policy = Policy::new(true, vec![input], now).unwrap();
+    let latch = EmergencyLatch::default();
+    let mut req = Request {
+        protocol: 1,
+        session: Uuid::new_v4(),
+        seq: 1,
+        expires_at_ms: now + 1000,
+        request_id: Uuid::new_v4(),
+        capability_id: Some("input".into()),
+        action: Action::Click {
+            display_id: 0,
+            frame_id: Uuid::new_v4(),
+            x: 1,
+            y: 1,
+            foreground: foreground(),
+        },
+    };
+    assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_ok());
+    req.action = Action::TypeText {
+        display_id: 0,
+        frame_id: Uuid::new_v4(),
+        text: "hello".into(),
+        foreground: foreground(),
+    };
+    assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_ok());
+    req.action = Action::Capture { display_id: 0 };
+    assert!(
+        policy
+            .authorize(&"a".repeat(64), &req, now, &latch)
+            .is_err()
+    );
+}
+
+#[test]
 fn capability_max_ttl_and_duplicate_identifiers_are_rejected() {
     let now = now_ms();
     let mut cap = grant(now);
@@ -131,7 +179,11 @@ async fn emergency_is_shared_idempotent_and_cancels_waiters() {
         .await
         .unwrap();
     let frame = SimulationCapture.capture(0, 16_384).unwrap();
-    assert!(SimulationInput.click(&frame, 1, 1, &clone).is_err());
+    assert!(
+        SimulationInput
+            .click(&frame, 1, 1, &foreground(), &clone)
+            .is_err()
+    );
 }
 
 #[test]
@@ -139,21 +191,41 @@ fn stale_frames_out_of_display_coordinates_and_invalid_pixels_are_rejected() {
     let mut frame = SimulationCapture.capture(0, 16_384).unwrap();
     assert!(
         SimulationInput
-            .click(&frame, 64, 0, &EmergencyLatch::default())
+            .click(&frame, 64, 0, &foreground(), &EmergencyLatch::default())
             .is_err()
     );
     assert!(
         SimulationInput
-            .click(&frame, -1, 0, &EmergencyLatch::default())
+            .click(&frame, -1, 0, &foreground(), &EmergencyLatch::default())
+            .is_err()
+    );
+    assert!(
+        SimulationInput
+            .type_text(
+                &frame,
+                &"x".repeat(4097),
+                &foreground(),
+                &EmergencyLatch::default()
+            )
             .is_err()
     );
     frame.captured_at = Instant::now() - Duration::from_secs(2);
     assert!(
         SimulationInput
-            .click(&frame, 1, 1, &EmergencyLatch::default())
+            .click(&frame, 1, 1, &foreground(), &EmergencyLatch::default())
             .is_err()
     );
     assert!(Frame::new(frame.display, vec![1], true, 16_384).is_err());
+}
+
+#[test]
+fn capture_preview_is_bounded_browser_renderable_bmp() {
+    let frame = SimulationCapture.capture(0, 16_384).unwrap();
+    let preview = preview_bmp(&frame, 320, 180).unwrap();
+    assert_eq!(preview.mime, "image/bmp");
+    assert!(preview.width <= 320 && preview.height <= 180);
+    assert!(preview.base64.starts_with("Qk"));
+    assert!(preview.base64.len() < MAX_WIRE_BYTES);
 }
 
 #[test]
@@ -192,4 +264,5 @@ fn arbitrary_commands_unknown_json_fields_and_argv_limits_are_rejected() {
     assert!(validate_argv(&["a\0b".into()]).is_err());
     assert!(serde_json::from_str::<Action>(r#"{"kind":"shell","command":"echo hello"}"#).is_err());
     assert!(serde_json::from_str::<Action>(r#"{"kind":"status","admin":true}"#).is_err());
+    assert!(serde_json::from_str::<Action>(r#"{"kind":"type_text","display_id":0,"frame_id":"00000000-0000-0000-0000-000000000000","text":"hello"}"#).is_err());
 }

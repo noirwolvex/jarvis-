@@ -35,6 +35,13 @@ pub fn now_ms() -> u64 {
         .unwrap_or(u64::MAX)
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ForegroundBinding {
+    pub process_id: u32,
+    pub title: String,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
@@ -47,6 +54,13 @@ pub enum Action {
         frame_id: Uuid,
         x: i32,
         y: i32,
+        foreground: ForegroundBinding,
+    },
+    TypeText {
+        display_id: u32,
+        frame_id: Uuid,
+        text: String,
+        foreground: ForegroundBinding,
     },
     RunProcess {
         executable_id: String,

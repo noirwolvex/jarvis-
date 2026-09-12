@@ -72,6 +72,106 @@ impl Frame {
     }
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct CapturePreview {
+    pub mime: &'static str,
+    pub width: u32,
+    pub height: u32,
+    pub base64: String,
+}
+
+pub fn preview_bmp(frame: &Frame, max_width: u32, max_height: u32) -> Result<CapturePreview> {
+    if max_width == 0 || max_height == 0 || max_width > 640 || max_height > 360 {
+        return Err(Error::Limit("preview dimensions"));
+    }
+    let source_width = frame.display.width;
+    let source_height = frame.display.height;
+    let width_scale = max_width as f64 / source_width as f64;
+    let height_scale = max_height as f64 / source_height as f64;
+    let scale = width_scale.min(height_scale).min(1.0);
+    let width = ((source_width as f64 * scale).floor() as u32).max(1);
+    let height = ((source_height as f64 * scale).floor() as u32).max(1);
+    let row_bytes = (width as usize)
+        .checked_mul(3)
+        .ok_or(Error::Limit("preview row bytes"))?;
+    let row_stride = row_bytes
+        .checked_add(3)
+        .map(|value| value & !3)
+        .ok_or(Error::Limit("preview row stride"))?;
+    let pixel_bytes = row_stride
+        .checked_mul(height as usize)
+        .ok_or(Error::Limit("preview bytes"))?;
+    let file_size = 54usize
+        .checked_add(pixel_bytes)
+        .ok_or(Error::Limit("preview bytes"))?;
+    if file_size > 192 * 1024 {
+        return Err(Error::Limit("preview encoded bytes"));
+    }
+
+    let mut bmp = vec![0u8; file_size];
+    bmp[0..2].copy_from_slice(b"BM");
+    bmp[2..6].copy_from_slice(&(file_size as u32).to_le_bytes());
+    bmp[10..14].copy_from_slice(&54u32.to_le_bytes());
+    bmp[14..18].copy_from_slice(&40u32.to_le_bytes());
+    bmp[18..22].copy_from_slice(&(width as i32).to_le_bytes());
+    bmp[22..26].copy_from_slice(&(height as i32).to_le_bytes());
+    bmp[26..28].copy_from_slice(&1u16.to_le_bytes());
+    bmp[28..30].copy_from_slice(&24u16.to_le_bytes());
+    bmp[34..38].copy_from_slice(&(pixel_bytes as u32).to_le_bytes());
+
+    for output_row in 0..height as usize {
+        let display_y = height as usize - 1 - output_row;
+        let source_y = display_y * source_height as usize / height as usize;
+        let row_start = 54 + output_row * row_stride;
+        for output_x in 0..width as usize {
+            let source_x = output_x * source_width as usize / width as usize;
+            let source = (source_y * source_width as usize + source_x) * 4;
+            let target = row_start + output_x * 3;
+            bmp[target] = frame.rgba[source + 2];
+            bmp[target + 1] = frame.rgba[source + 1];
+            bmp[target + 2] = frame.rgba[source];
+        }
+    }
+
+    Ok(CapturePreview {
+        mime: "image/bmp",
+        width,
+        height,
+        base64: encode_base64(&bmp),
+    })
+}
+
+fn encode_base64(bytes: &[u8]) -> String {
+    const TABLE: &[u8; 64] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    let mut output = String::with_capacity(bytes.len().div_ceil(3) * 4);
+    let mut index = 0;
+    while index + 3 <= bytes.len() {
+        let value = ((bytes[index] as u32) << 16)
+            | ((bytes[index + 1] as u32) << 8)
+            | bytes[index + 2] as u32;
+        output.push(TABLE[((value >> 18) & 63) as usize] as char);
+        output.push(TABLE[((value >> 12) & 63) as usize] as char);
+        output.push(TABLE[((value >> 6) & 63) as usize] as char);
+        output.push(TABLE[(value & 63) as usize] as char);
+        index += 3;
+    }
+    let remaining = bytes.len() - index;
+    if remaining == 1 {
+        let value = (bytes[index] as u32) << 16;
+        output.push(TABLE[((value >> 18) & 63) as usize] as char);
+        output.push(TABLE[((value >> 12) & 63) as usize] as char);
+        output.push('=');
+        output.push('=');
+    } else if remaining == 2 {
+        let value = ((bytes[index] as u32) << 16) | ((bytes[index + 1] as u32) << 8);
+        output.push(TABLE[((value >> 18) & 63) as usize] as char);
+        output.push(TABLE[((value >> 12) & 63) as usize] as char);
+        output.push(TABLE[((value >> 6) & 63) as usize] as char);
+        output.push('=');
+    }
+    output
+}
+
 pub trait ScreenCapture: Send + Sync {
     fn displays(&self) -> Result<Vec<Display>>;
     fn capture(&self, display_id: u32, max_bytes: usize) -> Result<Frame>;

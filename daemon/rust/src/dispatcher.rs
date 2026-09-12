@@ -1,8 +1,10 @@
+#[cfg(all(feature = "native", target_os = "windows"))]
+use crate::input::NativeInput;
 use crate::{
     Error, Result,
-    capture::{CaptureRing, ScreenCapture, SimulationCapture},
+    capture::{CaptureRing, ScreenCapture, SimulationCapture, preview_bmp},
     governance::{EmergencyLatch, EventJournal, Policy},
-    input::{InputController, SimulationInput},
+    input::{InputController, SimulationInput, current_foreground_binding},
     process::ProcessManager,
     types::{Action, Reply, Request, now_ms},
 };
@@ -32,7 +34,12 @@ pub struct Dispatcher {
     pub simulation: bool,
 }
 impl Dispatcher {
-    pub fn start(policy: Policy, processes: ProcessManager, native_capture: bool) -> Result<Self> {
+    pub fn start(
+        policy: Policy,
+        processes: ProcessManager,
+        native_capture: bool,
+        native_input: bool,
+    ) -> Result<Self> {
         let capture: Arc<dyn ScreenCapture> = if native_capture {
             #[cfg(feature = "native")]
             {
@@ -47,6 +54,20 @@ impl Dispatcher {
         } else {
             Arc::new(SimulationCapture)
         };
+        let input: Arc<dyn InputController> = if native_input {
+            #[cfg(all(feature = "native", target_os = "windows"))]
+            {
+                Arc::new(NativeInput)
+            }
+            #[cfg(not(all(feature = "native", target_os = "windows")))]
+            {
+                return Err(Error::Unsupported(
+                    "compile with native feature on Windows for input",
+                ));
+            }
+        } else {
+            Arc::new(SimulationInput)
+        };
         let (sender, receiver) = mpsc::channel(DISPATCH_CAPACITY);
         let emergency = EmergencyLatch::default();
         let simulation = policy.simulation;
@@ -54,6 +75,8 @@ impl Dispatcher {
             policy,
             processes,
             capture,
+            input,
+            native_input,
             ring: CaptureRing::new(4, 64 * 1024 * 1024)?,
             journal: EventJournal::new(1024)?,
             emergency: emergency.clone(),
@@ -79,6 +102,8 @@ struct Worker {
     policy: Policy,
     processes: ProcessManager,
     capture: Arc<dyn ScreenCapture>,
+    input: Arc<dyn InputController>,
+    native_input: bool,
     ring: CaptureRing,
     journal: EventJournal,
     emergency: EmergencyLatch,
@@ -121,9 +146,24 @@ impl Worker {
     async fn execute(&mut self, job: &Job) -> Result<serde_json::Value> {
         self.authorize(job)?;
         match &job.request.action {
-            Action::Status {} => Ok(
-                json!({"simulation": self.policy.simulation, "emergency_stopped": self.emergency.check().is_err(), "capture_ring_frames": self.ring.len(), "capture_ring_bytes": self.ring.bytes(), "audit_events_retained": self.journal.entries().len(), "native_input": "disabled_pending_foreground_binding", "accessibility": "unsupported", "sandbox": "none"}),
-            ),
+            Action::Status {} => {
+                let foreground = if self.native_input {
+                    current_foreground_binding()?
+                } else {
+                    None
+                };
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "emergency_stopped": self.emergency.check().is_err(),
+                    "capture_ring_frames": self.ring.len(),
+                    "capture_ring_bytes": self.ring.bytes(),
+                    "audit_events_retained": self.journal.entries().len(),
+                    "native_input": self.native_input,
+                    "foreground": foreground,
+                    "accessibility": "unsupported",
+                    "sandbox": "none"
+                }))
+            }
             Action::EmergencyStop {} => {
                 self.emergency.stop();
                 Ok(json!({"emergency_stopped": true}))
@@ -140,28 +180,55 @@ impl Worker {
                 .map_err(|_| Error::Operation("capture worker failed".into()))??;
                 self.authorize(job)?;
                 let frame = self.ring.push(frame)?;
-                Ok(json!({"frame": frame, "pixels_transport": "metadata_only"}))
+                let preview = preview_bmp(&frame, 320, 180)?;
+                Ok(json!({
+                    "frame": frame,
+                    "preview": preview,
+                    "pixels_transport": "bounded_bmp_preview"
+                }))
             }
             Action::Click {
                 display_id,
                 frame_id,
                 x,
                 y,
+                foreground,
             } => {
                 let frame = self.ring.get(*frame_id)?;
                 if frame.display.id != *display_id {
                     return Err(Error::Denied("frame display mismatch"));
                 }
-                if !self.policy.simulation {
-                    return Err(Error::Unsupported(
-                        "native input requires foreground window and element binding",
-                    ));
+                self.authorize(job)?;
+                self.input
+                    .click(frame, *x, *y, foreground, &self.emergency)?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "click": {"x": x, "y": y},
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::TypeText {
+                display_id,
+                frame_id,
+                text,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
                 }
                 self.authorize(job)?;
-                SimulationInput.click(frame, *x, *y, &self.emergency)?;
-                Ok(
-                    json!({"simulation": true, "executed": false, "verified": false, "planned_click": {"x": x, "y": y}, "verification": "requires_independent_postcondition_evidence"}),
-                )
+                self.input
+                    .type_text(frame, text, foreground, &self.emergency)?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "characters": text.chars().count(),
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
             }
             Action::RunProcess {
                 executable_id,

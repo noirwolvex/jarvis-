@@ -24,7 +24,7 @@ use tokio_rustls::{
 use tokio_util::sync::CancellationToken;
 use uuid::Uuid;
 
-pub const MAX_WIRE_BYTES: usize = 64 * 1024;
+pub const MAX_WIRE_BYTES: usize = 256 * 1024;
 pub const MAX_CONNECTIONS: usize = 4;
 
 pub struct Session {

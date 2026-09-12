@@ -13,7 +13,7 @@ import sys
 import time
 import uuid
 
-MAX_FRAME = 65536
+MAX_FRAME = 256 * 1024
 
 
 def receive_exact(stream, count):
