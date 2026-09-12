@@ -1,9 +1,4 @@
-use crate::{
-    Error, Result,
-    capture::Frame,
-    governance::EmergencyLatch,
-    types::ForegroundBinding,
-};
+use crate::{Error, Result, capture::Frame, governance::EmergencyLatch, types::ForegroundBinding};
 use std::time::{Duration, Instant};
 
 pub trait InputController: Send + Sync {
@@ -122,8 +117,8 @@ pub fn current_foreground_binding() -> Result<Option<ForegroundBinding>> {
 
 fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
     validate_binding(expected)?;
-    let actual = current_foreground_binding()?
-        .ok_or(Error::Denied("foreground window unavailable"))?;
+    let actual =
+        current_foreground_binding()?.ok_or(Error::Denied("foreground window unavailable"))?;
     if actual.process_id != expected.process_id || actual.title != expected.title {
         return Err(Error::Denied("foreground window changed"));
     }
