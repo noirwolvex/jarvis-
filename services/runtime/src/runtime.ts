@@ -167,7 +167,7 @@ export class JarvisRuntime {
   }
   private recoveryFor(node: Node, attempt: number, error: unknown): RecoveryPlan {
     const safeToRetry = ['OBSERVE', 'READ_FILE', 'VERIFY'].includes(node.action.type) && !(error instanceof ExecutionDenied);
-    return parseContract('RecoveryPlan', { id: randomUUID(), taskId: node.action.taskId, actionId: node.action.id, category: error instanceof ExecutionDenied ? 'permission_denied' : 'adapter_error', strategy: safeToRetry && attempt < node.maxRetries ? 'retry_read' : 'escalate', attempt: attempt + 1, maxAttempts: node.maxRetries, backoffMs: Math.min(2000, 100 * 2 ** attempt), requiresApproval: !safeToRetry, reason: error instanceof Error ? error.message.slice(0, 4096) : 'Unknown adapter failure' });
+    return parseContract('RecoveryPlan', { id: randomUUID(), taskId: node.action.taskId, actionId: node.action.id, category: error instanceof ExecutionDenied ? 'permission_denied' : 'adapter_error', strategy: safeToRetry && attempt < node.maxRetries ? 'retry_read' : 'escalate', attempt: Math.min(3, attempt + 1), maxAttempts: node.maxRetries, backoffMs: Math.min(2000, 100 * 2 ** attempt), requiresApproval: !safeToRetry, reason: error instanceof Error ? error.message.slice(0, 4096) : 'Unknown adapter failure' });
   }
   private commit(action: Action, observation: Parameters<typeof verify>[1], result: VerificationResult) {
     if (result.status !== 'passed') throw new ExecutionDenied('Unverified state cannot be committed');

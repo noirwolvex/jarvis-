@@ -12,6 +12,8 @@ export class EventBus {
   #listeners = new Set<(event: AgentEvent) => void>();
   #sequence = 0;
   #lastHash = '0'.repeat(64);
+  #deliveryQueue: AgentEvent[] = [];
+  #delivering = false;
   constructor(readonly capacity = 2048) { if (!Number.isInteger(capacity) || capacity < 1 || capacity > 100000) throw new Error('Invalid event capacity'); }
   emit(type: EventType, taskId: string, message: string, options: { actionId?: string; nodeId?: string; status?: string; evidenceIds?: string[]; revision?: number } = {}): AgentEvent {
     const body = { id: randomUUID(), sequence: this.#sequence + 1, taskId, timestamp: new Date().toISOString(), type, source: 'typescript-simulation-runtime', traceId: taskId, actionId: options.actionId ?? null, payload: { message, nodeId: options.nodeId ?? null, status: options.status ?? null, evidenceIds: options.evidenceIds ?? [], revision: options.revision ?? null }, previousHash: this.#lastHash };
@@ -21,7 +23,12 @@ export class EventBus {
     this.#events.push(event);
     if (this.#events.length > this.capacity) this.#events.shift();
     // A broken telemetry consumer must never alter execution state.
-    for (const listener of this.#listeners) { try { listener(event); } catch { /* isolated observer */ } }
+    this.#deliveryQueue.push(event);
+    if (!this.#delivering) {
+      this.#delivering = true;
+      try { while (this.#deliveryQueue.length) { const next = this.#deliveryQueue.shift()!; for (const listener of this.#listeners) { try { listener(next); } catch { /* isolated observer */ } } } }
+      finally { this.#delivering = false; }
+    }
     return event;
   }
   replay(afterSequence = 0): AgentEvent[] {

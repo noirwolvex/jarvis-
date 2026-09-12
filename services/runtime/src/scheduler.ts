@@ -36,7 +36,7 @@ export async function runDAG(value: unknown, execute: (node: Node, signal: Abort
           if (active.size >= dag.maxConcurrency) break;
           if (!node.dependsOn.every(dependency => completed.has(dependency))) continue;
           pending.delete(id);
-          const work = Promise.resolve().then(() => { controller.signal.throwIfAborted(); return execute(node, controller.signal); }).then(() => { if (!controller.signal.aborted) completed.add(id); }, () => { failed.add(id); controller.abort(new Error(`Node ${id} failed`)); }).finally(() => { active.delete(id); });
+          const work = Promise.resolve().then(() => { controller.signal.throwIfAborted(); return execute(node, controller.signal); }).then(() => { completed.add(id); }, () => { failed.add(id); controller.abort(new Error(`Node ${id} failed`)); }).finally(() => { active.delete(id); });
           active.set(id, work);
         }
       }
