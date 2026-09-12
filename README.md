@@ -2,6 +2,29 @@
 
 A Windows-first desktop AI agent powered by Claude.
 
+## JARVIS X reference implementation
+
+The repository now also includes a separate Next.js/TypeScript/Rust foundation for the expanded JARVIS X specification. The existing Python application below remains available. The new control center runs a **deterministic, in-memory workspace simulation**: it does not claim to operate the real desktop or call a model.
+
+```powershell
+rtk proxy npm.cmd ci
+rtk proxy npm.cmd run db:generate
+rtk proxy npm.cmd run dev
+```
+
+Open [Mission Control](http://127.0.0.1:3000). Use **Run simulation** to follow four verified actions through the task graph, timeline and memory. Ctrl+K opens the command palette. The UI includes pause/resume, a simulation stop latch, JSON event export, dark/light themes and responsive monitoring. Node 22.12+ is required; use `npm` in non-Windows shells.
+
+- [Complete 28-section engineering architecture](docs/architecture.md): topology, trust boundaries, all matrices, resource budgets, security and deployment decisions.
+- [Implementation map and limitations](docs/requirements-traceability.md).
+- [TypeScript and control-center runbook](docs/typescript-implementation.md).
+- [Rust mTLS daemon and platform runbook](docs/rust-implementation.md).
+- [PostgreSQL schema and migration runbook](database/README.md).
+- [Stage 0–13 acceptance roadmap](docs/implementation-roadmap.md).
+
+Validate with `npm test`, `npm run typecheck`, `npm run build`, `npm run db:validate`, and `cargo test --manifest-path daemon/rust/Cargo.toml`. Use `npm run demo` for a headless simulation. CI definitions cover the TypeScript build/tests and Rust portable tests on Windows/Linux. See [validation evidence](docs/validation.md) for checks actually executed in this workspace.
+
+This is a tested **reference foundation**, not a production release. The browser simulation, standalone WebSocket gateway, Rust daemon and Prisma storage are distinct surfaces. Durable orchestration integration, native target binding, hostile-plugin/OS sandboxing, real model providers and hardware kill-switch qualification remain explicit roadmap work.
+
 ## Goals
 
 - Natural-language desktop control

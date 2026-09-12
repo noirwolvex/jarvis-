@@ -11,10 +11,14 @@
     "start": "npm run start --workspace @jarvis/control-center",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
-    "demo": "npm run demo --workspace @jarvis/runtime",
+    "demo": "npm run simulate --workspace @jarvis/runtime",
     "db:validate": "npm run validate --workspace @jarvis/database",
     "db:generate": "npm run generate --workspace @jarvis/database",
     "rust:test": "cargo test --manifest-path daemon/rust/Cargo.toml"
+  },
+  "overrides": {
+    "@prisma/config": { "deepmerge-ts": "8.0.2" },
+    "prisma": { "mysql2": "3.24.4" }
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

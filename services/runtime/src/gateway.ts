@@ -1,8 +1,8 @@
 import { timingSafeEqual } from 'node:crypto';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { WebSocketServer, WebSocket } from 'ws';
-import { ReplayGapError } from './events.js';
-import { createRuntime, type JarvisRuntime } from './runtime.js';
+import { ReplayGapError } from './events.ts';
+import { createRuntime, type JarvisRuntime } from './runtime.ts';
 
 export interface GatewayOptions { token: string; runtime?: JarvisRuntime; allowedOrigins?: string[]; maxClients?: number; requestsPerMinute?: number }
 class HttpError extends Error { constructor(readonly status: number, message: string) { super(message); } }

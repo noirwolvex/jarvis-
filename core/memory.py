@@ -4,6 +4,7 @@ import json
 import os
 import re
 import sqlite3
+from contextlib import closing
 from pathlib import Path
 from typing import Any
 
@@ -16,7 +17,7 @@ class MemoryStore:
         self.path = Path(db_path).expanduser() if db_path else workspace / ".jarvis" / "memory.db"
         self.path = self.path.resolve()
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             db.execute(
                 "CREATE TABLE IF NOT EXISTS memories ("
                 "id INTEGER PRIMARY KEY, kind TEXT NOT NULL, content TEXT NOT NULL, "
@@ -32,7 +33,7 @@ class MemoryStore:
         text = str(content).strip()
         if not text:
             return
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             db.execute("INSERT INTO memories(kind, content) VALUES (?, ?)", (kind, text))
             db.commit()
 
@@ -40,7 +41,7 @@ class MemoryStore:
         self.add("fact", content)
 
     def set_preference(self, key: str, value: str) -> None:
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             db.execute(
                 "INSERT INTO preferences(key, value, updated_at) VALUES (?, ?, CURRENT_TIMESTAMP) "
                 "ON CONFLICT(key) DO UPDATE SET value=excluded.value, updated_at=CURRENT_TIMESTAMP",
@@ -49,12 +50,12 @@ class MemoryStore:
             db.commit()
 
     def preferences(self) -> dict[str, str]:
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             rows = db.execute("SELECT key, value FROM preferences ORDER BY key").fetchall()
         return {key: value for key, value in rows}
 
     def recent(self, limit: int = 20) -> list[dict[str, str]]:
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             rows = db.execute(
                 "SELECT kind, content, created_at FROM memories ORDER BY id DESC LIMIT ?", (limit,)
             ).fetchall()
@@ -71,7 +72,7 @@ class MemoryStore:
         query_tokens = self._tokens(query)
         if not query_tokens:
             return self.recent(limit)
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             rows = db.execute(
                 "SELECT id, kind, content, created_at FROM memories ORDER BY id DESC LIMIT 1000"
             ).fetchall()
@@ -109,7 +110,7 @@ class MemoryStore:
         return "\n".join(lines)
 
     def export(self) -> str:
-        with sqlite3.connect(self.path) as db:
+        with closing(sqlite3.connect(self.path)) as db:
             memories = db.execute(
                 "SELECT kind, content, created_at FROM memories ORDER BY id ASC"
             ).fetchall()

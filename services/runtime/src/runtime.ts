@@ -1,12 +1,12 @@
 import { randomUUID } from 'node:crypto';
 import { parseContract, type Action, type AgentStatus, type Node, type Plan, type RecoveryPlan, type TaskResult, type VerificationResult, type WorldState } from '@jarvis/contracts';
-import { EventBus } from './events.js';
-import { CapabilityIssuer, ExecutionDenied, PolicyEngine, StopLatch, policyConfiguration, scopeFor } from './governance.js';
-import { MemoryService, ModelRouter } from './memory-models.js';
-import { ResourceGovernor } from './resources.js';
-import { abortableDelay, runDAG, validateDAG } from './scheduler.js';
-import { SimulationAdapter, createSimulationPlan, initialWorld, matches, verify, type ExecutionAdapter } from './simulation.js';
-import type { RuntimeState, TaskRecord } from './state.js';
+import { EventBus } from './events.ts';
+import { CapabilityIssuer, ExecutionDenied, PolicyEngine, StopLatch, policyConfiguration, scopeFor } from './governance.ts';
+import { MemoryService, ModelRouter } from './memory-models.ts';
+import { ResourceGovernor } from './resources.ts';
+import { abortableDelay, runDAG, validateDAG } from './scheduler.ts';
+import { SimulationAdapter, createSimulationPlan, initialWorld, matches, verify, type ExecutionAdapter } from './simulation.ts';
+import type { RuntimeState, TaskRecord } from './state.ts';
 
 export interface RuntimeOptions { adapter?: ExecutionAdapter; stepDelayMs?: number; eventCapacity?: number; maxTasks?: number }
 /** Reference runtime. Durable storage and a real daemon transport are separate integration work. */

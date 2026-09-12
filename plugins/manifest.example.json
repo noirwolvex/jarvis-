@@ -1,0 +1,12 @@
+{
+  "name": "workspace-observer",
+  "version": "0.1.0",
+  "protocol_version": 1,
+  "platforms": ["windows", "linux"],
+  "capabilities_requested": ["filesystem.read"],
+  "permissions_requested": ["workspace.read"],
+  "scope_requested": ["operator-selected-workspace"],
+  "resources": { "memory_mb": 128, "cpu_ms": 500, "timeout_ms": 2000, "max_output_bytes": 65536 },
+  "network_access": "deny",
+  "status": "DESIGN_EXAMPLE_NOT_INSTALLABLE"
+}

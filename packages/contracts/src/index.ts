@@ -1,9 +1,9 @@
 import { Ajv2020 } from 'ajv/dist/2020.js';
 import addFormatsModule from 'ajv-formats';
-import type { ContractTypes } from './types.js';
-import { contractNames, schemaFor } from './schemas.js';
-export * from './types.js';
-export * from './schemas.js';
+import type { ContractTypes } from './types.ts';
+import { contractNames, schemaFor } from './schemas.ts';
+export * from './types.ts';
+export * from './schemas.ts';
 
 const ajv = new Ajv2020({ allErrors: true, strict: true, allowUnionTypes: true });
 // CommonJS interop differs between NodeNext and browser bundlers.

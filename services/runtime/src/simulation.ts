@@ -1,6 +1,6 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { parseContract, type Action, type Condition, type FactValue, type Observation, type Plan, type VerificationResult, type WorldState } from '@jarvis/contracts';
-import { abortableDelay } from './scheduler.js';
+import { abortableDelay } from './scheduler.ts';
 
 export function matches(condition: Condition, facts: Record<string, FactValue>): boolean {
   const exists = Object.prototype.hasOwnProperty.call(facts, condition.key);

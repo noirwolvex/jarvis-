@@ -3,8 +3,12 @@
   "version": "0.1.0",
   "private": true,
   "type": "module",
-  "exports": { ".": "./src/client.ts" },
+  "exports": {
+    ".": "./src/client.ts"
+  },
   "scripts": {
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc --noEmit",
     "validate": "prisma validate --config prisma.config.ts",
     "generate": "prisma generate --config prisma.config.ts",
     "migrate:dev": "prisma migrate dev --config prisma.config.ts",
@@ -16,5 +20,8 @@
     "dotenv": "^17.2.3",
     "pg": "^8.16.3"
   },
-  "devDependencies": { "prisma": "7.10.0" }
+  "devDependencies": {
+    "@electric-sql/pglite": "0.5.8",
+    "prisma": "7.10.0"
+  }
 }

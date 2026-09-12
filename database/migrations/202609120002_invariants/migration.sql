@@ -40,7 +40,7 @@ ALTER TABLE "PolicyDecision" ADD CONSTRAINT decision_lifetime CHECK ("expiresAt"
 ALTER TABLE "Approval" ADD CONSTRAINT approval_lifetime CHECK ("expiresAt" > "createdAt");
 ALTER TABLE "Approval" ADD CONSTRAINT approval_identity CHECK (status <> 'APPROVED' OR ("reviewerId" IS NOT NULL AND "decidedAt" IS NOT NULL));
 ALTER TABLE "Memory" ADD CONSTRAINT memory_scores CHECK (confidence BETWEEN 0 AND 1 AND importance BETWEEN 0 AND 1 AND freshness BETWEEN 0 AND 1);
-ALTER TABLE "MemoryEmbedding" ADD CONSTRAINT embedding_dimensions CHECK (dimensions BETWEEN 1 AND 8192 AND cardinality(values) = dimensions);
+ALTER TABLE "MemoryEmbedding" ADD CONSTRAINT embedding_dimensions CHECK (dimensions BETWEEN 1 AND 8192 AND cardinality("values") = dimensions);
 ALTER TABLE "Recovery" ADD CONSTRAINT recovery_attempts CHECK (attempt BETWEEN 1 AND 10 AND "deadlineAt" > "createdAt");
 ALTER TABLE "ModelInvocation" ADD CONSTRAINT invocation_costs CHECK ("inputTokens" >= 0 AND "outputTokens" >= 0 AND ("costUsd" IS NULL OR "costUsd" >= 0) AND ("latencyMs" IS NULL OR "latencyMs" >= 0));
 ALTER TABLE "ResourceSnapshot" ADD CONSTRAINT resource_ranges CHECK ("cpuPercent" BETWEEN 0 AND 100 AND ("gpuPercent" IS NULL OR "gpuPercent" BETWEEN 0 AND 100) AND "ramUsedBytes" >= 0 AND "ramTotalBytes" > 0 AND "diskFreeBytes" >= 0 AND "networkBytes" >= 0);

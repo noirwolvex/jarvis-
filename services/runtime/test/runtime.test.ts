@@ -3,8 +3,8 @@ import { once } from 'node:events';
 import test from 'node:test';
 import { WebSocket } from 'ws';
 import { parseContract, contractNames, schemaFor, type Action, type Observation } from '@jarvis/contracts';
-import { createRuntime, createSimulationPlan, SimulationAdapter, verify, EventBus, ReplayGapError, PolicyEngine, CapabilityIssuer, validateDAG, runDAG, abortableDelay, FrameRingBuffer, ResourceGovernor, MemoryService, ModelRouter, simulatedResources } from '../src/index.js';
-import { createGateway } from '../src/gateway.js';
+import { createRuntime, createSimulationPlan, SimulationAdapter, verify, EventBus, ReplayGapError, PolicyEngine, CapabilityIssuer, validateDAG, runDAG, abortableDelay, FrameRingBuffer, ResourceGovernor, MemoryService, ModelRouter, simulatedResources } from '../src/index.ts';
+import { createGateway } from '../src/gateway.ts';
 
 const signal = () => new AbortController().signal;
 async function fixture() {

@@ -1,0 +1,42 @@
+name: JARVIS X reference checks
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  typescript:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run db:validate
+      - run: npm run db:generate
+      - run: npm run typecheck
+      - run: npm test
+      - run: npm run build
+      - run: npm audit --audit-level=high
+  rust:
+    strategy:
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install stable Rust
+        run: rustup update stable --no-self-update
+      - name: Format
+        run: cargo +stable fmt --manifest-path daemon/rust/Cargo.toml --check
+      - name: Test portable execution and mTLS boundaries
+        run: cargo +stable test --locked --manifest-path daemon/rust/Cargo.toml
+      - name: Compile native Windows adapters without running desktop input
+        if: runner.os == 'Windows'
+        run: cargo +stable check --locked --manifest-path daemon/rust/Cargo.toml --features native

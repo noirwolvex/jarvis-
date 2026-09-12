@@ -1,5 +1,5 @@
 import { mkdir, writeFile } from 'node:fs/promises';
-import { contractNames, schemaDocument, schemaFor } from '../src/schemas.js';
+import { contractNames, schemaDocument, schemaFor } from '../src/schemas.ts';
 const directory = new URL('../schemas/', import.meta.url);
 await mkdir(directory, { recursive: true });
 await writeFile(new URL('contracts.schema.json', directory), JSON.stringify(schemaDocument, null, 2) + '\n');

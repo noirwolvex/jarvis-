@@ -1,4 +1,4 @@
-import type { ContractTypes } from './types.js';
+import type { ContractTypes } from './types.ts';
 
 type Schema = Record<string, unknown>;
 const str = (maxLength = 4096): Schema => ({ type: 'string', minLength: 1, maxLength });

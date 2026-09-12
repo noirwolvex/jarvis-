@@ -2,7 +2,7 @@ export type PageId = "mission" | "vision" | "graph" | "timeline" | "memory" | "m
 export type NodeView = { id: string; title: string; status: string; action: string; dependencies: string[] };
 export type TaskView = { id: string; title: string; status: string; createdAt: string; nodes: NodeView[]; summary: string };
 export type EventView = { sequence: number; id: string; type: string; timestamp: string; taskId: string; summary: string };
-export type MemoryView = { id: string; kind: string; content: string; confidence: number; createdAt: string };
+export type MemoryView = { id: string; kind: string; content: string; confidence: number | null; createdAt: string };
 export type ModelView = { id: string; name: string; tier: string; available: boolean; summary: string };
 export type Snapshot = {
   mode: "simulation";

@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import type { Privacy, ResourceSnapshot } from '@jarvis/contracts';
-import type { MemoryEntry, ModelDescriptor } from './state.js';
+import type { MemoryEntry, ModelDescriptor } from './state.ts';
 
 export class MemoryService {
   #entries: MemoryEntry[] = [];

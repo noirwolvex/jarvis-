@@ -1,4 +1,4 @@
-import { createGateway } from './gateway.js';
+import { createGateway } from './gateway.ts';
 const token = process.env.JARVIS_GATEWAY_TOKEN;
 if (!token) throw new Error('Set JARVIS_GATEWAY_TOKEN to a random secret of at least 32 characters. The gateway fails closed without it.');
 const gateway = createGateway({ token });

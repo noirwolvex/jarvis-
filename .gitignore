@@ -17,6 +17,7 @@ node_modules/
 daemon/rust/target/
 database/generated/
 .jarvis-x/
+.jarvis-x-pki/
 *.pem
 *.key
 playwright-report/

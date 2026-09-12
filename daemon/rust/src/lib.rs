@@ -7,6 +7,7 @@ pub mod input;
 pub mod ipc;
 pub mod plugin;
 pub mod process;
+pub mod resources;
 pub mod types;
 
 pub use types::{Error, Result};
