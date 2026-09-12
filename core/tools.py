@@ -8,7 +8,7 @@ import subprocess
 import time
 import webbrowser
 from dataclasses import dataclass
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 
 from .desktop_input import paste_text
@@ -55,10 +55,10 @@ class ToolRegistry:
             return f"ERROR executing {name}: {type(exc).__name__}: {exc}"
 
     def _register_builtin_tools(self) -> None:
-        self.register(ToolSpec("run_powershell", "Run a non-interactive PowerShell command. Use only when needed to accomplish the user's request.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _run_powershell))
-        self.register(ToolSpec("open_application", "Open a Windows application or executable by command/name.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _open_application))
+        self.register(ToolSpec("run_powershell", "Run a non-interactive PowerShell command. Use only when needed to accomplish the user's request.", Risk.HIGH, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _run_powershell))
+        self.register(ToolSpec("open_application", "Open a Windows application or executable directly without invoking a command shell.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _open_application))
         self.register(ToolSpec("focus_window", "Find a visible Windows window by title text and bring it to the foreground.", Risk.LOW, {"type": "object", "properties": {"title": {"type": "string"}}, "required": ["title"]}, _focus_window))
-        self.register(ToolSpec("open_application_and_type", "Open a Windows application, detect the actual visible window, focus it, focus its main content area, and reliably enter and verify the requested text.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]}, _open_application_and_type))
+        self.register(ToolSpec("open_application_and_type", "Open a Windows application without a command shell, detect the actual visible window, focus it, focus its main content area, and reliably enter and verify the requested text.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]}, _open_application_and_type))
         self.register(ToolSpec("open_url", "Open an HTTP(S) URL in the user's default browser.", Risk.LOW, {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, _open_url))
         self.register(ToolSpec("read_file", "Read a UTF-8 text file inside the configured JARVIS workspace.", Risk.LOW, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, _read_file))
         self.register(ToolSpec("write_file", "Write or replace a UTF-8 text file inside the configured JARVIS workspace.", Risk.MEDIUM, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}, _write_file))
@@ -80,8 +80,42 @@ def _run_powershell(command: str) -> str:
     return f"exit_code={completed.returncode}\n{output[-12000:]}"
 
 
+_BLOCKED_DIRECT_LAUNCHERS = {
+    "cmd", "powershell", "pwsh", "sh", "bash", "zsh", "dash",
+    "python", "python3", "node", "ruby", "perl", "wscript", "cscript", "mshta",
+}
+
+
+def _application_executable(command: str) -> str:
+    value = str(command).strip()
+    if not value:
+        raise ValueError("Application command cannot be empty")
+    if len(value) > 8192 or "\0" in value:
+        raise ValueError("Application command exceeds safety limits")
+    if value[0] in {'"', "'"}:
+        quote = value[0]
+        end = value.find(quote, 1)
+        if end < 0:
+            raise ValueError("Application path has an unmatched quote")
+        executable = value[1:end]
+    else:
+        executable = value.split(maxsplit=1)[0]
+    name = PureWindowsPath(executable).stem.lower()
+    if name in _BLOCKED_DIRECT_LAUNCHERS:
+        raise PermissionError(
+            f"Direct launch of interpreter '{name}' is blocked; use the dedicated permission-gated execution tool instead."
+        )
+    return value
+
+
+def _launch_application(command: str) -> subprocess.Popen:
+    # On Windows a string command line is accepted directly by CreateProcess.
+    # shell=False keeps operators such as &, |, > and && from becoming shell syntax.
+    return subprocess.Popen(_application_executable(command), shell=False)
+
+
 def _open_application(command: str) -> str:
-    process = subprocess.Popen(command, shell=True)
+    process = _launch_application(command)
     return f"Started application: {command} (launcher_pid={process.pid})"
 
 
@@ -224,7 +258,7 @@ def _open_application_and_type(command: str, text: str) -> str:
         raise RuntimeError("Windows application automation is supported on Windows only")
 
     before = _visible_windows()
-    process = subprocess.Popen(command, shell=True)
+    process = _launch_application(command)
     deadline = time.time() + 15
     hwnd = None
 
