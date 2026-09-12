@@ -21,6 +21,8 @@ struct Config {
     #[serde(default)]
     native_capture: bool,
     #[serde(default)]
+    native_input: bool,
+    #[serde(default)]
     allow_uncontained_processes: bool,
     #[serde(default)]
     capabilities: Vec<Capability>,
@@ -60,10 +62,20 @@ async fn main() -> Result<()> {
     if !config.listen.ip().is_loopback() {
         return Err(Error::Denied("listen address must be loopback"));
     }
+    if config.native_input && config.simulation {
+        return Err(Error::Denied(
+            "native input requires simulation=false",
+        ));
+    }
     let tls = ipc::tls_config(&config.server_cert, &config.server_key, &config.client_ca)?;
     let policy = Policy::new(config.simulation, config.capabilities, now_ms())?;
     let processes = ProcessManager::new(config.executables, config.allow_uncontained_processes)?;
-    let dispatcher = Dispatcher::start(policy, processes, config.native_capture)?;
+    let dispatcher = Dispatcher::start(
+        policy,
+        processes,
+        config.native_capture,
+        config.native_input,
+    )?;
     let stop = dispatcher.emergency.clone();
     // Local Ctrl-C stops work without consulting a model, planner or dispatch queue.
     tokio::spawn(async move {
@@ -72,8 +84,8 @@ async fn main() -> Result<()> {
         }
     });
     eprintln!(
-        "JARVIS reference daemon: {} simulation={} native_capture={} sandbox=none",
-        config.listen, config.simulation, config.native_capture
+        "JARVIS reference daemon: {} simulation={} native_capture={} native_input={} sandbox=none",
+        config.listen, config.simulation, config.native_capture, config.native_input
     );
     ipc::serve(config.listen, tls, dispatcher).await
 }
