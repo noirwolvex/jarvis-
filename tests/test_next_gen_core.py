@@ -76,6 +76,7 @@ class NextGenCoreTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
+                "JARVIS_ACCESS_MODE": "standard",
                 "JARVIS_REQUIRE_APPROVAL": "false",
                 "JARVIS_ALLOW_GIT_WRITE": "false",
             },
@@ -88,10 +89,77 @@ class NextGenCoreTests(unittest.TestCase):
             ok, _ = engine.check("git_status", Risk.LOW, approved=False)
             self.assertTrue(ok)
 
+    def test_access_mode_profiles(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "JARVIS_ACCESS_MODE": "restricted",
+                "JARVIS_REQUIRE_APPROVAL": "false",
+                "JARVIS_ALLOW_NETWORK": "true",
+                "JARVIS_ALLOW_GIT_WRITE": "true",
+                "JARVIS_ALLOW_FILESYSTEM_WRITE": "true",
+                "JARVIS_ALLOW_BROWSER_WRITE": "true",
+                "JARVIS_ALLOW_SHELL": "true",
+                "JARVIS_ALLOW_DESTRUCTIVE": "true",
+                "JARVIS_FULL_ACCESS_REQUIRE_APPROVAL": "true",
+            },
+            clear=False,
+        ):
+            engine = PermissionEngine()
+            restricted = engine.summary()
+            self.assertEqual(restricted["mode"], "restricted")
+            self.assertTrue(restricted["require_approval"])
+            self.assertFalse(restricted["allow_network"])
+            self.assertFalse(restricted["allow_filesystem_write"])
+            self.assertFalse(restricted["allow_shell"])
+
+            full = engine.set_access_mode("full")
+            self.assertEqual(full["mode"], "full")
+            self.assertTrue(full["allow_network"])
+            self.assertTrue(full["allow_filesystem_write"])
+            self.assertTrue(full["allow_git_write"])
+            self.assertTrue(full["allow_browser_write"])
+            self.assertTrue(full["allow_shell"])
+            self.assertTrue(full["allow_destructive"])
+            self.assertTrue(full["require_approval"])
+
+            standard = engine.set_access_mode("standard")
+            self.assertEqual(standard["mode"], "standard")
+            self.assertTrue(standard["allow_network"])
+            self.assertTrue(standard["allow_shell"])
+            self.assertTrue(standard["allow_destructive"])
+            self.assertFalse(standard["require_approval"])
+
+    def test_full_access_preserves_explicit_deny_list(self) -> None:
+        with patch.dict(
+            "os.environ",
+            {
+                "JARVIS_ACCESS_MODE": "full",
+                "JARVIS_FULL_ACCESS_REQUIRE_APPROVAL": "false",
+                "JARVIS_DENY_TOOLS": "git_push,run_powershell",
+            },
+            clear=False,
+        ):
+            engine = PermissionEngine()
+            self.assertFalse(engine.require_approval)
+            ok, reason = engine.check("git_push", Risk.HIGH, approved=True)
+            self.assertFalse(ok)
+            self.assertIn("explicitly denied", reason)
+            ok, reason = engine.check("run_powershell", Risk.HIGH, approved=True)
+            self.assertFalse(ok)
+            self.assertIn("explicitly denied", reason)
+
+    def test_unknown_access_mode_is_rejected(self) -> None:
+        with patch.dict("os.environ", {"JARVIS_ACCESS_MODE": "standard"}, clear=False):
+            engine = PermissionEngine()
+            with self.assertRaises(ValueError):
+                engine.set_access_mode("unlimited-root")
+
     def test_shell_requires_explicit_and_destructive_access(self) -> None:
         with patch.dict(
             "os.environ",
             {
+                "JARVIS_ACCESS_MODE": "standard",
                 "JARVIS_ALLOW_SHELL": "false",
                 "JARVIS_ALLOW_DESTRUCTIVE": "true",
                 "JARVIS_REQUIRE_APPROVAL": "false",
@@ -105,6 +173,7 @@ class NextGenCoreTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
+                "JARVIS_ACCESS_MODE": "standard",
                 "JARVIS_ALLOW_SHELL": "true",
                 "JARVIS_ALLOW_DESTRUCTIVE": "false",
                 "JARVIS_REQUIRE_APPROVAL": "false",
@@ -118,6 +187,7 @@ class NextGenCoreTests(unittest.TestCase):
         with patch.dict(
             "os.environ",
             {
+                "JARVIS_ACCESS_MODE": "standard",
                 "JARVIS_ALLOW_SHELL": "true",
                 "JARVIS_ALLOW_DESTRUCTIVE": "true",
                 "JARVIS_REQUIRE_APPROVAL": "true",
