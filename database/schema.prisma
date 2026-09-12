@@ -1,0 +1,1028 @@
+// PostgreSQL reference data model. Cross-row invariants are in hardening SQL.
+// IDs are UUIDs; JSON columns contain versioned, validated contract payloads.
+generator client {
+  provider = "prisma-client"
+  output   = "./generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum Platform {
+  WINDOWS
+  LINUX
+}
+
+enum AgentStatus {
+  IDLE
+  THINKING
+  PLANNING
+  WAITING_FOR_APPROVAL
+  EXECUTING
+  VERIFYING
+  RECOVERING
+  PAUSED
+  RESOURCE_LIMITED
+  ERROR
+  EMERGENCY_STOP
+  COMPLETED
+}
+
+enum TaskStatus {
+  CREATED
+  PLANNING
+  READY
+  RUNNING
+  WAITING_FOR_APPROVAL
+  PAUSED
+  RECOVERING
+  COMPLETED
+  FAILED
+  CANCELLED
+  EMERGENCY_STOP
+}
+
+enum ExecutionStatus {
+  QUEUED
+  RUNNING
+  VERIFYING
+  SUCCEEDED
+  PARTIAL_SUCCESS
+  FAILED
+  UNKNOWN
+  CANCELLED
+}
+
+enum NodeKind {
+  ACTION
+  CONDITION
+  APPROVAL
+  JOIN
+  COMPENSATION
+}
+
+enum ActionKind {
+  OBSERVE
+  CLICK
+  DOUBLE_CLICK
+  MOVE_MOUSE
+  TYPE
+  KEY_PRESS
+  SCROLL
+  DRAG
+  CLIPBOARD_READ
+  CLIPBOARD_WRITE
+  NAVIGATE
+  BROWSER_READ
+  BROWSER_SCRIPT
+  READ_FILE
+  WRITE_FILE
+  DELETE_FILE
+  START_PROCESS
+  STOP_PROCESS
+  TERMINAL_COMMAND
+  NETWORK_REQUEST
+  SYSTEM_SHUTDOWN
+  WAIT
+  REQUEST_APPROVAL
+  VERIFY
+}
+
+enum Reversibility {
+  REVERSIBLE
+  PARTIALLY_REVERSIBLE
+  IRREVERSIBLE
+  UNKNOWN
+}
+
+enum VerificationOutcome {
+  SUCCESS
+  PARTIAL_SUCCESS
+  FAILED
+  UNKNOWN
+  UNSAFE
+}
+
+enum DataClassification {
+  PUBLIC
+  INTERNAL
+  PRIVATE
+  SENSITIVE
+  RESTRICTED
+}
+
+enum ObservationSource {
+  SCREEN
+  OCR
+  ACCESSIBILITY
+  DOM
+  PROCESS
+  FILESYSTEM
+  NETWORK
+  INPUT
+  AUDIO
+  SIMULATION
+}
+
+enum PolicyEffect {
+  ALLOW
+  DENY
+  REQUIRE_APPROVAL
+}
+
+enum ApprovalStatus {
+  PENDING
+  APPROVED
+  DENIED
+  EXPIRED
+  REVOKED
+}
+
+enum MemoryKind {
+  WORKING
+  EPISODIC
+  SEMANTIC
+  PROCEDURAL
+  FAILURE
+  USER_PREFERENCE
+}
+
+enum RecoveryStatus {
+  DETECTED
+  FROZEN
+  CLASSIFIED
+  EVIDENCE_COLLECTED
+  OPTIONS_RANKED
+  POLICY_CHECKED
+  EXECUTING
+  VERIFYING
+  RESUMED
+  ESCALATED
+  EXHAUSTED
+}
+
+enum ModelTier {
+  LOCAL_FAST
+  LOCAL_ADVANCED
+  CLOUD_FRONTIER
+  RULE_BASED
+}
+
+enum OutboxStatus {
+  PENDING
+  LEASED
+  DELIVERED
+  DEAD_LETTER
+}
+
+enum HealthMode {
+  NORMAL
+  DEGRADED
+  SAFE_MODE
+  OBSERVATION_ONLY
+}
+
+enum PluginStatus {
+  STAGED
+  VERIFIED
+  ENABLED
+  DISABLED
+  QUARANTINED
+}
+
+model User {
+  id              String            @id @default(uuid()) @db.Uuid
+  externalSubject String            @unique @db.VarChar(255)
+  displayName     String            @db.VarChar(120)
+  createdAt       DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt       DateTime          @updatedAt @db.Timestamptz(3)
+  disabledAt      DateTime?         @db.Timestamptz(3)
+  sessions        Session[]
+  devices         Device[]
+  tasks           Task[]
+  permissions     Permission[]
+  approvals       Approval[]
+  memories        Memory[]
+  auditEvents     AuditEvent[]
+  capabilities    Capability[]
+  secrets         SecretReference[]
+}
+
+model Session {
+  id           String       @id @default(uuid()) @db.Uuid
+  userId       String       @db.Uuid
+  deviceId     String?      @db.Uuid
+  tokenDigest  String       @unique @db.VarChar(128)
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(3)
+  expiresAt    DateTime     @db.Timestamptz(3)
+  revokedAt    DateTime?    @db.Timestamptz(3)
+  user         User         @relation(fields: [userId], references: [id], onDelete: Restrict)
+  device       Device?      @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  tasks        Task[]
+  capabilities Capability[]
+  auditEvents  AuditEvent[]
+
+  @@index([userId, expiresAt])
+  @@index([deviceId])
+}
+
+model Device {
+  id             String               @id @default(uuid()) @db.Uuid
+  ownerId        String               @db.Uuid
+  name           String               @db.VarChar(120)
+  platform       Platform
+  publicKey      String               @db.Text
+  bootId         String               @db.VarChar(128)
+  emergencyEpoch Int                  @default(0)
+  healthMode     HealthMode           @default(OBSERVATION_ONLY)
+  createdAt      DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime             @updatedAt @db.Timestamptz(3)
+  lastSeenAt     DateTime?            @db.Timestamptz(3)
+  owner          User                 @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  sessions       Session[]
+  agents         Agent[]
+  tasks          Task[]
+  executions     Execution[]
+  worldStates    WorldState[]
+  resources      ResourceSnapshot[]
+  capabilities   Capability[]
+  applications   Application[]
+  installations  PluginInstallation[]
+  auditEvents    AuditEvent[]
+
+  @@index([ownerId, lastSeenAt])
+}
+
+model Agent {
+  id            String            @id @default(uuid()) @db.Uuid
+  deviceId      String            @db.Uuid
+  role          String            @db.VarChar(64)
+  status        AgentStatus       @default(IDLE)
+  configuration Json
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime          @updatedAt @db.Timestamptz(3)
+  device        Device            @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  invocations   ModelInvocation[]
+  events        AgentEvent[]
+
+  @@unique([deviceId, role])
+}
+
+model Task {
+  id             String             @id @default(uuid()) @db.Uuid
+  ownerId        String             @db.Uuid
+  deviceId       String             @db.Uuid
+  sessionId      String?            @db.Uuid
+  title          String             @db.VarChar(240)
+  intent         Json
+  classification DataClassification @default(PRIVATE)
+  status         TaskStatus         @default(CREATED)
+  priority       Int                @default(0)
+  revision       Int                @default(0)
+  budget         Json
+  createdAt      DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime           @updatedAt @db.Timestamptz(3)
+  deadlineAt     DateTime?          @db.Timestamptz(3)
+  completedAt    DateTime?          @db.Timestamptz(3)
+  owner          User               @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  device         Device             @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  session        Session?           @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  versions       TaskVersion[]
+  executions     Execution[]
+  capabilities   Capability[]
+  memories       Memory[]
+  events         AgentEvent[]
+  auditEvents    AuditEvent[]
+
+  @@index([ownerId, createdAt(sort: Desc)])
+  @@index([deviceId, status, priority(sort: Desc), createdAt])
+  @@index([sessionId])
+}
+
+model TaskVersion {
+  id              String           @id @default(uuid()) @db.Uuid
+  taskId          String           @db.Uuid
+  version         Int
+  contractVersion String           @db.VarChar(32)
+  plan            Json
+  contentHash     String           @db.Char(64)
+  createdAt       DateTime         @default(now()) @db.Timestamptz(3)
+  task            Task             @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  nodes           TaskNode[]
+  dependencies    TaskDependency[]
+  executions      Execution[]
+
+  @@unique([taskId, version])
+}
+
+model TaskNode {
+  id            String           @id @default(uuid()) @db.Uuid
+  taskVersionId String           @db.Uuid
+  key           String           @db.VarChar(128)
+  kind          NodeKind
+  contract      Json
+  maxAttempts   Int              @default(1)
+  timeoutMs     Int
+  createdAt     DateTime         @default(now()) @db.Timestamptz(3)
+  taskVersion   TaskVersion      @relation(fields: [taskVersionId], references: [id], onDelete: Restrict)
+  outgoing      TaskDependency[] @relation("DependencyFrom")
+  incoming      TaskDependency[] @relation("DependencyTo")
+  executions    NodeExecution[]
+
+  @@unique([taskVersionId, key])
+  @@unique([id, taskVersionId])
+}
+
+model TaskDependency {
+  id            String      @id @default(uuid()) @db.Uuid
+  taskVersionId String      @db.Uuid
+  fromNodeId    String      @db.Uuid
+  toNodeId      String      @db.Uuid
+  condition     Json?
+  createdAt     DateTime    @default(now()) @db.Timestamptz(3)
+  taskVersion   TaskVersion @relation(fields: [taskVersionId], references: [id], onDelete: Restrict)
+  fromNode      TaskNode    @relation("DependencyFrom", fields: [fromNodeId], references: [id], onDelete: Restrict)
+  toNode        TaskNode    @relation("DependencyTo", fields: [toNodeId], references: [id], onDelete: Restrict)
+
+  @@unique([taskVersionId, fromNodeId, toNodeId])
+  @@index([fromNodeId])
+  @@index([toNodeId])
+}
+
+model Execution {
+  id             String            @id @default(uuid()) @db.Uuid
+  taskId         String            @db.Uuid
+  taskVersionId  String            @db.Uuid
+  deviceId       String            @db.Uuid
+  status         ExecutionStatus   @default(QUEUED)
+  traceId        String            @db.VarChar(64)
+  leaseOwner     String?           @db.VarChar(128)
+  fence          BigInt            @default(0)
+  leaseExpiresAt DateTime?         @db.Timestamptz(3)
+  createdAt      DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime          @updatedAt @db.Timestamptz(3)
+  startedAt      DateTime?         @db.Timestamptz(3)
+  completedAt    DateTime?         @db.Timestamptz(3)
+  task           Task              @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  taskVersion    TaskVersion       @relation(fields: [taskVersionId], references: [id], onDelete: Restrict)
+  device         Device            @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  nodes          NodeExecution[]
+  actions        Action[]
+  observations   Observation[]
+  snapshots      StateSnapshot[]
+  failures       Failure[]
+  checkpoints    Checkpoint[]
+  invocations    ModelInvocation[]
+  events         AgentEvent[]
+
+  @@index([taskId, createdAt(sort: Desc)])
+  @@index([taskVersionId])
+  @@index([deviceId, status, leaseExpiresAt])
+  @@index([traceId])
+}
+
+model NodeExecution {
+  id          String          @id @default(uuid()) @db.Uuid
+  executionId String          @db.Uuid
+  nodeId      String          @db.Uuid
+  attempt     Int             @default(1)
+  status      ExecutionStatus @default(QUEUED)
+  createdAt   DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime        @updatedAt @db.Timestamptz(3)
+  completedAt DateTime?       @db.Timestamptz(3)
+  execution   Execution       @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  node        TaskNode        @relation(fields: [nodeId], references: [id], onDelete: Restrict)
+  actions     Action[]
+
+  @@unique([executionId, nodeId, attempt])
+  @@index([nodeId])
+  @@index([executionId, status])
+}
+
+model Action {
+  id                String          @id @default(uuid()) @db.Uuid
+  executionId       String          @db.Uuid
+  nodeExecutionId   String          @db.Uuid
+  idempotencyKey    String          @db.VarChar(128)
+  kind              ActionKind
+  status            ExecutionStatus @default(QUEUED)
+  riskLevel         Int
+  reversibility     Reversibility
+  contract          Json
+  contentHash       String          @db.Char(64)
+  policyDecisionId  String          @db.Uuid
+  observedStateHash String          @db.Char(64)
+  timeoutMs         Int
+  createdAt         DateTime        @default(now()) @db.Timestamptz(3)
+  updatedAt         DateTime        @updatedAt @db.Timestamptz(3)
+  startedAt         DateTime?       @db.Timestamptz(3)
+  completedAt       DateTime?       @db.Timestamptz(3)
+  execution         Execution       @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  nodeExecution     NodeExecution   @relation(fields: [nodeExecutionId], references: [id], onDelete: Restrict)
+  policyDecision    PolicyDecision  @relation(fields: [policyDecisionId], references: [id], onDelete: Restrict)
+  results           ActionResult[]
+  observations      Observation[]
+  verifications     Verification[]
+  capabilityUses    CapabilityUse[]
+  approvals         Approval[]
+  failures          Failure[]
+  auditEvents       AuditEvent[]
+  events            AgentEvent[]
+
+  @@unique([executionId, idempotencyKey])
+  @@index([nodeExecutionId, createdAt])
+  @@index([policyDecisionId])
+  @@index([executionId, status])
+}
+
+model ActionResult {
+  id         String              @id @default(uuid()) @db.Uuid
+  actionId   String              @db.Uuid
+  attempt    Int
+  outcome    VerificationOutcome
+  exitCode   Int?
+  durationMs Int
+  result     Json
+  createdAt  DateTime            @default(now()) @db.Timestamptz(3)
+  action     Action              @relation(fields: [actionId], references: [id], onDelete: Restrict)
+
+  @@unique([actionId, attempt])
+}
+
+model Observation {
+  id                  String            @id @default(uuid()) @db.Uuid
+  executionId         String            @db.Uuid
+  actionId            String?           @db.Uuid
+  worldStateId        String            @db.Uuid
+  artifactId          String?           @db.Uuid
+  source              ObservationSource
+  frameId             String?           @db.VarChar(128)
+  bootId              String            @db.VarChar(128)
+  stateVersion        BigInt
+  observedMonotonicNs BigInt
+  confidence          Float
+  observedAt          DateTime          @db.Timestamptz(3)
+  expiresAt           DateTime          @db.Timestamptz(3)
+  createdAt           DateTime          @default(now()) @db.Timestamptz(3)
+  payload             Json
+  execution           Execution         @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  action              Action?           @relation(fields: [actionId], references: [id], onDelete: Restrict)
+  worldState          WorldState        @relation(fields: [worldStateId], references: [id], onDelete: Restrict)
+  artifact            EvidenceArtifact? @relation(fields: [artifactId], references: [id], onDelete: Restrict)
+  vision              VisionSnapshot?
+  verifications       Verification[]
+
+  @@index([executionId, observedAt(sort: Desc)])
+  @@index([actionId])
+  @@index([worldStateId, stateVersion])
+  @@index([artifactId])
+}
+
+model Verification {
+  id            String              @id @default(uuid()) @db.Uuid
+  actionId      String              @db.Uuid
+  observationId String              @db.Uuid
+  outcome       VerificationOutcome
+  method        String              @db.VarChar(64)
+  predicate     Json
+  measured      Json
+  confidence    Float
+  createdAt     DateTime            @default(now()) @db.Timestamptz(3)
+  action        Action              @relation(fields: [actionId], references: [id], onDelete: Restrict)
+  observation   Observation         @relation(fields: [observationId], references: [id], onDelete: Restrict)
+
+  @@index([actionId, createdAt])
+  @@index([observationId])
+}
+
+model WorldState {
+  id            String          @id @default(uuid()) @db.Uuid
+  deviceId      String          @db.Uuid
+  version       BigInt
+  bootId        String          @db.VarChar(128)
+  contentHash   String          @db.Char(64)
+  schemaVersion String          @db.VarChar(32)
+  state         Json
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+  observedAt    DateTime        @db.Timestamptz(3)
+  device        Device          @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  observations  Observation[]
+  snapshots     StateSnapshot[]
+
+  @@unique([deviceId, bootId, version])
+  @@index([deviceId, observedAt(sort: Desc)])
+}
+
+model StateSnapshot {
+  id           String            @id @default(uuid()) @db.Uuid
+  executionId  String            @db.Uuid
+  worldStateId String            @db.Uuid
+  artifactId   String?           @db.Uuid
+  contentHash  String            @db.Char(64)
+  createdAt    DateTime          @default(now()) @db.Timestamptz(3)
+  execution    Execution         @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  worldState   WorldState        @relation(fields: [worldStateId], references: [id], onDelete: Restrict)
+  artifact     EvidenceArtifact? @relation(fields: [artifactId], references: [id], onDelete: Restrict)
+  checkpoints  Checkpoint[]
+
+  @@index([executionId, createdAt(sort: Desc)])
+  @@index([worldStateId])
+  @@index([artifactId])
+}
+
+model EvidenceArtifact {
+  id               String             @id @default(uuid()) @db.Uuid
+  objectKey        String             @unique @db.VarChar(512)
+  contentHash      String             @db.Char(64)
+  byteLength       BigInt
+  mediaType        String             @db.VarChar(128)
+  classification   DataClassification
+  redactionVersion String             @db.VarChar(64)
+  encrypted        Boolean            @default(true)
+  encryptionKeyRef String             @db.VarChar(255)
+  createdAt        DateTime           @default(now()) @db.Timestamptz(3)
+  expiresAt        DateTime?          @db.Timestamptz(3)
+  deletedAt        DateTime?          @db.Timestamptz(3)
+  observations     Observation[]
+  snapshots        StateSnapshot[]
+  visions          VisionSnapshot[]
+  memories         Memory[]
+
+  @@index([expiresAt])
+  @@index([contentHash])
+}
+
+model VisionSnapshot {
+  id            String           @id @default(uuid()) @db.Uuid
+  observationId String           @unique @db.Uuid
+  artifactId    String           @db.Uuid
+  displayId     String           @db.VarChar(128)
+  width         Int
+  height        Int
+  scale         Float
+  roi           Json
+  detections    Json
+  createdAt     DateTime         @default(now()) @db.Timestamptz(3)
+  observation   Observation      @relation(fields: [observationId], references: [id], onDelete: Restrict)
+  artifact      EvidenceArtifact @relation(fields: [artifactId], references: [id], onDelete: Restrict)
+
+  @@index([artifactId])
+}
+
+model Policy {
+  id           String           @id @default(uuid()) @db.Uuid
+  name         String           @db.VarChar(128)
+  version      Int
+  effect       PolicyEffect
+  rules        Json
+  contentHash  String           @db.Char(64)
+  enabled      Boolean          @default(false)
+  createdAt    DateTime         @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime         @updatedAt @db.Timestamptz(3)
+  decisions    PolicyDecision[]
+  capabilities Capability[]
+  permissions  Permission[]
+
+  @@unique([name, version])
+}
+
+model Permission {
+  id             String    @id @default(uuid()) @db.Uuid
+  userId         String    @db.Uuid
+  policyId       String    @db.Uuid
+  capabilityName String    @db.VarChar(128)
+  scope          Json
+  createdAt      DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime  @updatedAt @db.Timestamptz(3)
+  expiresAt      DateTime? @db.Timestamptz(3)
+  revokedAt      DateTime? @db.Timestamptz(3)
+  user           User      @relation(fields: [userId], references: [id], onDelete: Restrict)
+  policy         Policy    @relation(fields: [policyId], references: [id], onDelete: Restrict)
+
+  @@index([userId, capabilityName])
+  @@index([policyId])
+}
+
+model PolicyDecision {
+  id             String       @id @default(uuid()) @db.Uuid
+  policyId       String       @db.Uuid
+  effect         PolicyEffect
+  actionHash     String       @db.Char(64)
+  stateHash      String       @db.Char(64)
+  evaluatedInput Json
+  reasons        Json
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  expiresAt      DateTime     @db.Timestamptz(3)
+  policy         Policy       @relation(fields: [policyId], references: [id], onDelete: Restrict)
+  actions        Action[]
+  capabilities   Capability[]
+
+  @@index([policyId, createdAt(sort: Desc)])
+}
+
+model Capability {
+  id               String          @id @default(uuid()) @db.Uuid
+  userId           String          @db.Uuid
+  sessionId        String          @db.Uuid
+  deviceId         String          @db.Uuid
+  taskId           String          @db.Uuid
+  policyId         String          @db.Uuid
+  policyDecisionId String          @db.Uuid
+  name             String          @db.VarChar(128)
+  scope            Json
+  issuerKeyId      String          @db.VarChar(128)
+  tokenDigest      String          @unique @db.VarChar(128)
+  actionHash       String          @db.Char(64)
+  emergencyEpoch   Int
+  maxUses          Int             @default(1)
+  createdAt        DateTime        @default(now()) @db.Timestamptz(3)
+  expiresAt        DateTime        @db.Timestamptz(3)
+  revokedAt        DateTime?       @db.Timestamptz(3)
+  user             User            @relation(fields: [userId], references: [id], onDelete: Restrict)
+  session          Session         @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  device           Device          @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  task             Task            @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  policy           Policy          @relation(fields: [policyId], references: [id], onDelete: Restrict)
+  policyDecision   PolicyDecision  @relation(fields: [policyDecisionId], references: [id], onDelete: Restrict)
+  uses             CapabilityUse[]
+
+  @@index([taskId, expiresAt])
+  @@index([userId])
+  @@index([sessionId])
+  @@index([deviceId, emergencyEpoch])
+  @@index([policyId])
+  @@index([policyDecisionId])
+}
+
+model CapabilityUse {
+  id           String     @id @default(uuid()) @db.Uuid
+  capabilityId String     @db.Uuid
+  actionId     String     @db.Uuid
+  nonceDigest  String     @unique @db.Char(64)
+  createdAt    DateTime   @default(now()) @db.Timestamptz(3)
+  capability   Capability @relation(fields: [capabilityId], references: [id], onDelete: Restrict)
+  action       Action     @relation(fields: [actionId], references: [id], onDelete: Restrict)
+
+  @@unique([capabilityId, actionId])
+  @@index([actionId])
+}
+
+model Approval {
+  id           String         @id @default(uuid()) @db.Uuid
+  actionId     String         @db.Uuid
+  reviewerId   String?        @db.Uuid
+  status       ApprovalStatus @default(PENDING)
+  actionHash   String         @db.Char(64)
+  policyHash   String         @db.Char(64)
+  stateHash    String         @db.Char(64)
+  presentation Json
+  decision     Json?
+  createdAt    DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime       @updatedAt @db.Timestamptz(3)
+  decidedAt    DateTime?      @db.Timestamptz(3)
+  expiresAt    DateTime       @db.Timestamptz(3)
+  action       Action         @relation(fields: [actionId], references: [id], onDelete: Restrict)
+  reviewer     User?          @relation(fields: [reviewerId], references: [id], onDelete: Restrict)
+
+  @@index([actionId, status])
+  @@index([reviewerId, status, expiresAt])
+}
+
+model Memory {
+  id             String             @id @default(uuid()) @db.Uuid
+  ownerId        String             @db.Uuid
+  taskId         String?            @db.Uuid
+  artifactId     String?            @db.Uuid
+  kind           MemoryKind
+  classification DataClassification
+  content        Json
+  source         String             @db.VarChar(255)
+  confidence     Float
+  importance     Float
+  freshness      Float
+  createdAt      DateTime           @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime           @updatedAt @db.Timestamptz(3)
+  verifiedAt     DateTime?          @db.Timestamptz(3)
+  expiresAt      DateTime?          @db.Timestamptz(3)
+  tombstonedAt   DateTime?          @db.Timestamptz(3)
+  owner          User               @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+  task           Task?              @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  artifact       EvidenceArtifact?  @relation(fields: [artifactId], references: [id], onDelete: Restrict)
+  embeddings     MemoryEmbedding[]
+
+  @@index([ownerId, kind, updatedAt(sort: Desc)])
+  @@index([taskId])
+  @@index([artifactId])
+  @@index([expiresAt])
+}
+
+model MemoryEmbedding {
+  id          String   @id @default(uuid()) @db.Uuid
+  memoryId    String   @db.Uuid
+  modelId     String   @db.Uuid
+  dimensions  Int
+  // Portable float-array baseline, bounded by CHECK. pgvector is optional.
+  values      Float[]
+  contentHash String   @db.Char(64)
+  createdAt   DateTime @default(now()) @db.Timestamptz(3)
+  memory      Memory   @relation(fields: [memoryId], references: [id], onDelete: Restrict)
+  model       Model    @relation(fields: [modelId], references: [id], onDelete: Restrict)
+
+  @@unique([memoryId, modelId])
+  @@index([modelId])
+}
+
+model Failure {
+  id          String     @id @default(uuid()) @db.Uuid
+  executionId String     @db.Uuid
+  actionId    String?    @db.Uuid
+  category    String     @db.VarChar(64)
+  severity    Int
+  evidence    Json
+  summary     String     @db.VarChar(1024)
+  createdAt   DateTime   @default(now()) @db.Timestamptz(3)
+  execution   Execution  @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  action      Action?    @relation(fields: [actionId], references: [id], onDelete: Restrict)
+  recoveries  Recovery[]
+
+  @@index([executionId, createdAt(sort: Desc)])
+  @@index([actionId])
+}
+
+model Recovery {
+  id          String         @id @default(uuid()) @db.Uuid
+  failureId   String         @db.Uuid
+  attempt     Int
+  status      RecoveryStatus @default(DETECTED)
+  plan        Json
+  budget      Json
+  outcome     Json?
+  createdAt   DateTime       @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime       @updatedAt @db.Timestamptz(3)
+  deadlineAt  DateTime       @db.Timestamptz(3)
+  completedAt DateTime?      @db.Timestamptz(3)
+  failure     Failure        @relation(fields: [failureId], references: [id], onDelete: Restrict)
+
+  @@unique([failureId, attempt])
+  @@index([status, deadlineAt])
+}
+
+model Model {
+  id            String            @id @default(uuid()) @db.Uuid
+  provider      String            @db.VarChar(128)
+  name          String            @db.VarChar(128)
+  version       String            @db.VarChar(128)
+  tier          ModelTier
+  capabilities  Json
+  configuration Json
+  artifactHash  String?           @db.Char(64)
+  enabled       Boolean           @default(false)
+  createdAt     DateTime          @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime          @updatedAt @db.Timestamptz(3)
+  invocations   ModelInvocation[]
+  embeddings    MemoryEmbedding[]
+
+  @@unique([provider, name, version])
+  @@index([tier, enabled])
+}
+
+model ModelInvocation {
+  id             String             @id @default(uuid()) @db.Uuid
+  modelId        String             @db.Uuid
+  executionId    String             @db.Uuid
+  agentId        String?            @db.Uuid
+  requestHash    String             @db.Char(64)
+  response       Json?
+  classification DataClassification
+  inputTokens    Int                @default(0)
+  outputTokens   Int                @default(0)
+  costUsd        Decimal?           @db.Decimal(16, 8)
+  latencyMs      Int?
+  peakRamBytes   BigInt?
+  peakVramBytes  BigInt?
+  successful     Boolean?
+  createdAt      DateTime           @default(now()) @db.Timestamptz(3)
+  completedAt    DateTime?          @db.Timestamptz(3)
+  model          Model              @relation(fields: [modelId], references: [id], onDelete: Restrict)
+  execution      Execution          @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  agent          Agent?             @relation(fields: [agentId], references: [id], onDelete: Restrict)
+
+  @@index([executionId, createdAt])
+  @@index([modelId, createdAt(sort: Desc)])
+  @@index([agentId])
+}
+
+model ResourceSnapshot {
+  id             String       @id @default(uuid()) @db.Uuid
+  deviceId       String       @db.Uuid
+  cpuPercent     Float
+  gpuPercent     Float?
+  ramUsedBytes   BigInt
+  ramTotalBytes  BigInt
+  vramUsedBytes  BigInt?
+  vramTotalBytes BigInt?
+  diskFreeBytes  BigInt
+  networkBytes   BigInt
+  temperatureC   Float?
+  mode           HealthMode
+  observedAt     DateTime     @db.Timestamptz(3)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  device         Device       @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  checkpoints    Checkpoint[]
+
+  @@index([deviceId, observedAt(sort: Desc)])
+}
+
+model AuditEvent {
+  id           String   @id @default(uuid()) @db.Uuid
+  sequence     BigInt   @unique @default(autoincrement())
+  userId       String?  @db.Uuid
+  sessionId    String?  @db.Uuid
+  deviceId     String?  @db.Uuid
+  taskId       String?  @db.Uuid
+  actionId     String?  @db.Uuid
+  type         String   @db.VarChar(96)
+  actor        String   @db.VarChar(128)
+  previousHash String?  @db.Char(64)
+  eventHash    String   @db.Char(64)
+  payload      Json
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  user         User?    @relation(fields: [userId], references: [id], onDelete: Restrict)
+  session      Session? @relation(fields: [sessionId], references: [id], onDelete: Restrict)
+  device       Device?  @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  task         Task?    @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  action       Action?  @relation(fields: [actionId], references: [id], onDelete: Restrict)
+
+  @@index([taskId, sequence])
+  @@index([userId, createdAt(sort: Desc)])
+  @@index([sessionId])
+  @@index([deviceId, createdAt(sort: Desc)])
+  @@index([actionId])
+}
+
+model AgentEvent {
+  id            String          @id @default(uuid()) @db.Uuid
+  taskId        String          @db.Uuid
+  executionId   String?         @db.Uuid
+  actionId      String?         @db.Uuid
+  agentId       String?         @db.Uuid
+  sequence      BigInt
+  type          String          @db.VarChar(96)
+  schemaVersion String          @db.VarChar(32)
+  traceId       String          @db.VarChar(64)
+  payload       Json
+  occurredAt    DateTime        @db.Timestamptz(3)
+  createdAt     DateTime        @default(now()) @db.Timestamptz(3)
+  task          Task            @relation(fields: [taskId], references: [id], onDelete: Restrict)
+  execution     Execution?      @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  action        Action?         @relation(fields: [actionId], references: [id], onDelete: Restrict)
+  agent         Agent?          @relation(fields: [agentId], references: [id], onDelete: Restrict)
+  outbox        OutboxMessage[]
+  consumers     EventConsumer[]
+
+  @@unique([taskId, sequence])
+  @@index([executionId, createdAt])
+  @@index([actionId])
+  @@index([agentId])
+  @@index([createdAt])
+}
+
+model OutboxMessage {
+  id             String       @id @default(uuid()) @db.Uuid
+  eventId        String       @db.Uuid
+  destination    String       @db.VarChar(128)
+  status         OutboxStatus @default(PENDING)
+  attempts       Int          @default(0)
+  maxAttempts    Int          @default(5)
+  availableAt    DateTime     @default(now()) @db.Timestamptz(3)
+  leaseOwner     String?      @db.VarChar(128)
+  leaseExpiresAt DateTime?    @db.Timestamptz(3)
+  lastError      String?      @db.VarChar(1024)
+  createdAt      DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt      DateTime     @updatedAt @db.Timestamptz(3)
+  deliveredAt    DateTime?    @db.Timestamptz(3)
+  event          AgentEvent   @relation(fields: [eventId], references: [id], onDelete: Restrict)
+
+  @@unique([eventId, destination])
+  @@index([status, availableAt, leaseExpiresAt])
+}
+
+model EventConsumer {
+  id        String     @id @default(uuid()) @db.Uuid
+  eventId   String     @db.Uuid
+  consumer  String     @db.VarChar(128)
+  createdAt DateTime   @default(now()) @db.Timestamptz(3)
+  event     AgentEvent @relation(fields: [eventId], references: [id], onDelete: Restrict)
+
+  @@unique([eventId, consumer])
+}
+
+model Checkpoint {
+  id                 String            @id @default(uuid()) @db.Uuid
+  executionId        String            @db.Uuid
+  stateSnapshotId    String            @db.Uuid
+  resourceSnapshotId String?           @db.Uuid
+  sequence           Int
+  worldHash          String            @db.Char(64)
+  state              Json
+  // Stores references and policy versions, never reusable live tokens.
+  permissionSnapshot Json
+  createdAt          DateTime          @default(now()) @db.Timestamptz(3)
+  execution          Execution         @relation(fields: [executionId], references: [id], onDelete: Restrict)
+  snapshot           StateSnapshot     @relation(fields: [stateSnapshotId], references: [id], onDelete: Restrict)
+  resource           ResourceSnapshot? @relation(fields: [resourceSnapshotId], references: [id], onDelete: Restrict)
+
+  @@unique([executionId, sequence])
+  @@index([stateSnapshotId])
+  @@index([resourceSnapshotId])
+}
+
+model Application {
+  id          String               @id @default(uuid()) @db.Uuid
+  deviceId    String               @db.Uuid
+  fingerprint String               @db.VarChar(255)
+  name        String               @db.VarChar(128)
+  version     String               @db.VarChar(128)
+  metadata    Json
+  createdAt   DateTime             @default(now()) @db.Timestamptz(3)
+  updatedAt   DateTime             @updatedAt @db.Timestamptz(3)
+  device      Device               @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+  adapters    ApplicationAdapter[]
+
+  @@unique([deviceId, fingerprint])
+}
+
+model ApplicationAdapter {
+  id            String      @id @default(uuid()) @db.Uuid
+  applicationId String      @db.Uuid
+  pluginId      String      @db.Uuid
+  contract      Json
+  createdAt     DateTime    @default(now()) @db.Timestamptz(3)
+  updatedAt     DateTime    @updatedAt @db.Timestamptz(3)
+  application   Application @relation(fields: [applicationId], references: [id], onDelete: Restrict)
+  plugin        Plugin      @relation(fields: [pluginId], references: [id], onDelete: Restrict)
+
+  @@unique([applicationId, pluginId])
+  @@index([pluginId])
+}
+
+model Plugin {
+  id            String               @id @default(uuid()) @db.Uuid
+  name          String               @db.VarChar(128)
+  version       String               @db.VarChar(64)
+  manifest      Json
+  contentHash   String               @db.Char(64)
+  signerKeyId   String               @db.VarChar(128)
+  signature     String               @db.Text
+  createdAt     DateTime             @default(now()) @db.Timestamptz(3)
+  installations PluginInstallation[]
+  adapters      ApplicationAdapter[]
+  tools         Tool[]
+
+  @@unique([name, version])
+}
+
+model PluginInstallation {
+  id           String       @id @default(uuid()) @db.Uuid
+  pluginId     String       @db.Uuid
+  deviceId     String       @db.Uuid
+  status       PluginStatus @default(STAGED)
+  grantedScope Json
+  createdAt    DateTime     @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime     @updatedAt @db.Timestamptz(3)
+  plugin       Plugin       @relation(fields: [pluginId], references: [id], onDelete: Restrict)
+  device       Device       @relation(fields: [deviceId], references: [id], onDelete: Restrict)
+
+  @@unique([pluginId, deviceId])
+  @@index([deviceId, status])
+}
+
+model Tool {
+  id           String   @id @default(uuid()) @db.Uuid
+  pluginId     String   @db.Uuid
+  name         String   @db.VarChar(128)
+  version      String   @db.VarChar(64)
+  inputSchema  Json
+  outputSchema Json
+  capabilities Json
+  createdAt    DateTime @default(now()) @db.Timestamptz(3)
+  plugin       Plugin   @relation(fields: [pluginId], references: [id], onDelete: Restrict)
+
+  @@unique([pluginId, name, version])
+}
+
+model SecretReference {
+  id           String    @id @default(uuid()) @db.Uuid
+  ownerId      String    @db.Uuid
+  name         String    @db.VarChar(128)
+  vaultLocator String    @db.VarChar(512)
+  allowedScope Json
+  createdAt    DateTime  @default(now()) @db.Timestamptz(3)
+  updatedAt    DateTime  @updatedAt @db.Timestamptz(3)
+  rotatedAt    DateTime? @db.Timestamptz(3)
+  owner        User      @relation(fields: [ownerId], references: [id], onDelete: Restrict)
+
+  @@unique([ownerId, name])
+}

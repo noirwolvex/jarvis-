@@ -1,0 +1,3543 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://jarvis.local/schemas/DAG.schema.json",
+  "$defs": {
+    "Condition": {
+      "type": "object",
+      "properties": {
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "operator": {
+          "type": "string",
+          "enum": [
+            "equals",
+            "exists",
+            "absent"
+          ]
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ],
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "key",
+        "operator",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "SemanticTarget": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "semantic",
+          "type": "string"
+        },
+        "application": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "elementId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        }
+      },
+      "required": [
+        "kind",
+        "application",
+        "elementId",
+        "label"
+      ],
+      "additionalProperties": false
+    },
+    "CoordinateTarget": {
+      "type": "object",
+      "properties": {
+        "kind": {
+          "const": "coordinates",
+          "type": "string"
+        },
+        "displayId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "x": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "y": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 65535
+        },
+        "dpiScale": {
+          "type": "number",
+          "minimum": 0.25,
+          "maximum": 8
+        },
+        "frameId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      },
+      "required": [
+        "kind",
+        "displayId",
+        "x",
+        "y",
+        "dpiScale",
+        "frameId"
+      ],
+      "additionalProperties": false
+    },
+    "Target": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/SemanticTarget"
+        },
+        {
+          "$ref": "#/$defs/CoordinateTarget"
+        }
+      ]
+    },
+    "VerificationSpec": {
+      "type": "object",
+      "properties": {
+        "method": {
+          "type": "string",
+          "enum": [
+            "FILE_STATE",
+            "UI_TREE_DIFF",
+            "DOM_DIFF",
+            "PROCESS_STATE",
+            "NETWORK_STATE",
+            "COMPOSITE"
+          ]
+        },
+        "minEvidence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 16
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 120000
+        }
+      },
+      "required": [
+        "method",
+        "minEvidence",
+        "timeoutMs"
+      ],
+      "additionalProperties": false
+    },
+    "Action": {
+      "oneOf": [
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "OBSERVE",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "scope": {
+                  "type": "string",
+                  "enum": [
+                    "desktop",
+                    "window",
+                    "browser"
+                  ]
+                },
+                "application": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 256
+                }
+              },
+              "required": [
+                "scope",
+                "application"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "CLICK",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "$ref": "#/$defs/Target"
+                },
+                "button": {
+                  "type": "string",
+                  "enum": [
+                    "left",
+                    "right",
+                    "middle"
+                  ]
+                }
+              },
+              "required": [
+                "target",
+                "button"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "DOUBLE_CLICK",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "$ref": "#/$defs/Target"
+                },
+                "button": {
+                  "type": "string",
+                  "enum": [
+                    "left",
+                    "right",
+                    "middle"
+                  ]
+                }
+              },
+              "required": [
+                "target",
+                "button"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "TYPE",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "$ref": "#/$defs/SemanticTarget"
+                },
+                "text": {
+                  "type": "string",
+                  "maxLength": 16384
+                }
+              },
+              "required": [
+                "target",
+                "text"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "KEY_PRESS",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "keys": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": 32
+                  },
+                  "minItems": 1,
+                  "maxItems": 8
+                }
+              },
+              "required": [
+                "keys"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "SCROLL",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "target": {
+                  "$ref": "#/$defs/Target"
+                },
+                "deltaX": {
+                  "type": "integer",
+                  "minimum": -10000,
+                  "maximum": 10000
+                },
+                "deltaY": {
+                  "type": "integer",
+                  "minimum": -10000,
+                  "maximum": 10000
+                }
+              },
+              "required": [
+                "target",
+                "deltaX",
+                "deltaY"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "DRAG",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "from": {
+                  "$ref": "#/$defs/Target"
+                },
+                "to": {
+                  "$ref": "#/$defs/Target"
+                }
+              },
+              "required": [
+                "from",
+                "to"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "NAVIGATE",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "url": {
+                  "type": "string",
+                  "format": "uri",
+                  "pattern": "^https?://",
+                  "maxLength": 4096
+                },
+                "tabId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "url",
+                "tabId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "READ_FILE",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "maxBytes": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 1048576
+                }
+              },
+              "required": [
+                "path",
+                "maxBytes"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "WRITE_FILE",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "path": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "content": {
+                  "type": "string",
+                  "maxLength": 1048576
+                },
+                "overwrite": {
+                  "type": "boolean"
+                }
+              },
+              "required": [
+                "path",
+                "content",
+                "overwrite"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "START_PROCESS",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "executable": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "argv": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "minItems": 0,
+                  "maxItems": 64
+                },
+                "cwd": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "executable",
+                "argv",
+                "cwd"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "STOP_PROCESS",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "processId": {
+                  "type": "integer",
+                  "minimum": 1,
+                  "maximum": 9007199254740991
+                },
+                "expectedExecutable": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                }
+              },
+              "required": [
+                "processId",
+                "expectedExecutable"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "TERMINAL_COMMAND",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "executable": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "argv": {
+                  "type": "array",
+                  "items": {
+                    "type": "string",
+                    "maxLength": 4096
+                  },
+                  "minItems": 0,
+                  "maxItems": 64
+                },
+                "cwd": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "environmentPolicy": {
+                  "const": "clean",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "executable",
+                "argv",
+                "cwd",
+                "environmentPolicy"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "WAIT",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "durationMs": {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 30000
+                }
+              },
+              "required": [
+                "durationMs"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "REQUEST_APPROVAL",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 4096
+                },
+                "permissionRequestId": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                }
+              },
+              "required": [
+                "reason",
+                "permissionRequestId"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        },
+        {
+          "type": "object",
+          "properties": {
+            "id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "taskId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "observationId": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            "confidence": {
+              "type": "number",
+              "minimum": 0,
+              "maximum": 1
+            },
+            "riskLevel": {
+              "type": "integer",
+              "minimum": 0,
+              "maximum": 5
+            },
+            "preconditions": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 0,
+              "maxItems": 256
+            },
+            "expectedState": {
+              "type": "array",
+              "items": {
+                "$ref": "#/$defs/Condition"
+              },
+              "minItems": 1,
+              "maxItems": 256
+            },
+            "verification": {
+              "$ref": "#/$defs/VerificationSpec"
+            },
+            "timeoutMs": {
+              "type": "integer",
+              "minimum": 1,
+              "maximum": 120000
+            },
+            "requiredCapabilities": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 1,
+              "maxItems": 32,
+              "uniqueItems": true
+            },
+            "rollback": {
+              "type": "object",
+              "properties": {
+                "strategy": {
+                  "type": "string",
+                  "enum": [
+                    "none",
+                    "restore_snapshot"
+                  ]
+                },
+                "snapshotId": {
+                  "anyOf": [
+                    {
+                      "type": "string",
+                      "minLength": 1,
+                      "maxLength": 128
+                    },
+                    {
+                      "type": "null"
+                    }
+                  ]
+                }
+              },
+              "required": [
+                "strategy",
+                "snapshotId"
+              ],
+              "additionalProperties": false
+            },
+            "type": {
+              "const": "VERIFY",
+              "type": "string"
+            },
+            "args": {
+              "type": "object",
+              "properties": {
+                "conditions": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/$defs/Condition"
+                  },
+                  "minItems": 1,
+                  "maxItems": 256
+                }
+              },
+              "required": [
+                "conditions"
+              ],
+              "additionalProperties": false
+            }
+          },
+          "required": [
+            "id",
+            "taskId",
+            "observationId",
+            "confidence",
+            "riskLevel",
+            "preconditions",
+            "expectedState",
+            "verification",
+            "timeoutMs",
+            "requiredCapabilities",
+            "rollback",
+            "type",
+            "args"
+          ],
+          "additionalProperties": false
+        }
+      ]
+    },
+    "AgentIntent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "goal": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "privacy": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "restricted"
+          ]
+        },
+        "requestedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "constraints": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "minItems": 0,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "goal",
+        "privacy",
+        "requestedBy",
+        "createdAt",
+        "constraints"
+      ],
+      "additionalProperties": false
+    },
+    "Node": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "label": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "dependsOn": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "action": {
+          "$ref": "#/$defs/Action"
+        },
+        "maxRetries": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        }
+      },
+      "required": [
+        "id",
+        "label",
+        "dependsOn",
+        "action",
+        "maxRetries"
+      ],
+      "additionalProperties": false
+    },
+    "DAG": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "nodes": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Node"
+          },
+          "minItems": 1,
+          "maxItems": 64
+        },
+        "maxConcurrency": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4
+        }
+      },
+      "required": [
+        "id",
+        "nodes",
+        "maxConcurrency"
+      ],
+      "additionalProperties": false
+    },
+    "Plan": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "intentId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "version": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "dag": {
+          "$ref": "#/$defs/DAG"
+        },
+        "maxDurationMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 600000
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "intentId",
+        "version",
+        "createdAt",
+        "summary",
+        "dag",
+        "maxDurationMs"
+      ],
+      "additionalProperties": false
+    },
+    "Evidence": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "simulation",
+            "accessibility",
+            "dom",
+            "file",
+            "process",
+            "network",
+            "vision"
+          ]
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "key": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 256
+        },
+        "value": {
+          "type": [
+            "string",
+            "number",
+            "boolean",
+            "null"
+          ],
+          "maxLength": 16384
+        }
+      },
+      "required": [
+        "id",
+        "source",
+        "observedAt",
+        "key",
+        "value"
+      ],
+      "additionalProperties": false
+    },
+    "Observation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "simulation",
+            "accessibility",
+            "dom",
+            "file",
+            "process",
+            "network",
+            "vision"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "validForMs": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30000
+        },
+        "stability": {
+          "type": "string",
+          "enum": [
+            "UI_STABLE",
+            "UI_TRANSITIONING",
+            "UI_UNKNOWN"
+          ]
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "facts": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.:/-]{1,256}$"
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "maxLength": 16384
+          },
+          "maxProperties": 256
+        },
+        "evidence": {
+          "type": "array",
+          "items": {
+            "$ref": "#/$defs/Evidence"
+          },
+          "minItems": 0,
+          "maxItems": 256
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "observedAt",
+        "source",
+        "confidence",
+        "validForMs",
+        "stability",
+        "revision",
+        "facts",
+        "evidence"
+      ],
+      "additionalProperties": false
+    },
+    "WorldState": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "simulation",
+            "accessibility",
+            "dom",
+            "file",
+            "process",
+            "network",
+            "vision"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "stalenessMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "dependencies": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "revision": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "facts": {
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-zA-Z0-9_.:/-]{1,256}$"
+          },
+          "additionalProperties": {
+            "type": [
+              "string",
+              "number",
+              "boolean",
+              "null"
+            ],
+            "maxLength": 16384
+          },
+          "maxProperties": 256
+        },
+        "committedActionIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 4096
+        }
+      },
+      "required": [
+        "id",
+        "observedAt",
+        "source",
+        "confidence",
+        "stalenessMs",
+        "dependencies",
+        "revision",
+        "facts",
+        "committedActionIds"
+      ],
+      "additionalProperties": false
+    },
+    "VerificationResult": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observationId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "passed",
+            "failed",
+            "inconclusive"
+          ]
+        },
+        "confidence": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 1
+        },
+        "checkedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "checks": {
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "condition": {
+                "$ref": "#/$defs/Condition"
+              },
+              "passed": {
+                "type": "boolean"
+              },
+              "evidenceIds": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                "minItems": 0,
+                "maxItems": 256,
+                "uniqueItems": true
+              }
+            },
+            "required": [
+              "condition",
+              "passed",
+              "evidenceIds"
+            ],
+            "additionalProperties": false
+          },
+          "minItems": 0,
+          "maxItems": 256
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "actionId",
+        "observationId",
+        "status",
+        "confidence",
+        "checkedAt",
+        "checks",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "RecoveryPlan": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "category": {
+          "type": "string",
+          "enum": [
+            "stale_observation",
+            "verification_failed",
+            "adapter_error",
+            "timeout",
+            "resource_exhaustion",
+            "permission_denied"
+          ]
+        },
+        "strategy": {
+          "type": "string",
+          "enum": [
+            "reobserve",
+            "retry_read",
+            "escalate"
+          ]
+        },
+        "attempt": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "maxAttempts": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 3
+        },
+        "backoffMs": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 30000
+        },
+        "requiresApproval": {
+          "type": "boolean"
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "actionId",
+        "category",
+        "strategy",
+        "attempt",
+        "maxAttempts",
+        "backoffMs",
+        "requiresApproval",
+        "reason"
+      ],
+      "additionalProperties": false
+    },
+    "Capability": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "issuer": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "subject": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actionTypes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "enum": [
+              "OBSERVE",
+              "CLICK",
+              "DOUBLE_CLICK",
+              "TYPE",
+              "KEY_PRESS",
+              "SCROLL",
+              "DRAG",
+              "NAVIGATE",
+              "READ_FILE",
+              "WRITE_FILE",
+              "START_PROCESS",
+              "STOP_PROCESS",
+              "TERMINAL_COMMAND",
+              "WAIT",
+              "REQUEST_APPROVAL",
+              "VERIFY"
+            ]
+          },
+          "minItems": 1,
+          "maxItems": 16,
+          "uniqueItems": true
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 32,
+          "uniqueItems": true
+        },
+        "issuedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "maxUses": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 128
+        },
+        "signature": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "issuer",
+        "subject",
+        "taskId",
+        "actionTypes",
+        "scopes",
+        "issuedAt",
+        "expiresAt",
+        "maxUses",
+        "signature"
+      ],
+      "additionalProperties": false
+    },
+    "PermissionRequest": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "requestedBy": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "scopes": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "reason": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        },
+        "riskLevel": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 5
+        },
+        "expiresAt": {
+          "type": "string",
+          "format": "date-time"
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "actionId",
+        "requestedBy",
+        "scopes",
+        "reason",
+        "riskLevel",
+        "expiresAt"
+      ],
+      "additionalProperties": false
+    },
+    "PolicyDecision": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actionId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "decision": {
+          "type": "string",
+          "enum": [
+            "allow",
+            "deny",
+            "approval_required"
+          ]
+        },
+        "reasons": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4096
+          },
+          "minItems": 1,
+          "maxItems": 32
+        },
+        "requiredCapabilities": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 32
+        },
+        "evaluatedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "policyVersion": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "actionId",
+        "decision",
+        "reasons",
+        "requiredCapabilities",
+        "evaluatedAt",
+        "policyVersion"
+      ],
+      "additionalProperties": false
+    },
+    "AgentEvent": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "sequence": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "timestamp": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "type": {
+          "type": "string",
+          "enum": [
+            "TASK_CREATED",
+            "PLAN_CREATED",
+            "PLAN_APPROVED",
+            "ACTION_STARTED",
+            "ACTION_EXECUTED",
+            "OBSERVATION_CAPTURED",
+            "ACTION_VERIFIED",
+            "STATE_CHANGED",
+            "ERROR_DETECTED",
+            "RECOVERY_STARTED",
+            "RECOVERY_COMPLETED",
+            "RESOURCE_WARNING",
+            "PERMISSION_REQUESTED",
+            "USER_APPROVAL_REQUIRED",
+            "TASK_COMPLETED",
+            "TASK_FAILED",
+            "TASK_CANCELLED",
+            "EMERGENCY_STOP",
+            "RUNTIME_PAUSED",
+            "RUNTIME_RESUMED"
+          ]
+        },
+        "source": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "traceId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "actionId": {
+          "anyOf": [
+            {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 128
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "payload": {
+          "type": "object",
+          "properties": {
+            "message": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 4096
+            },
+            "nodeId": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "status": {
+              "anyOf": [
+                {
+                  "type": "string",
+                  "minLength": 1,
+                  "maxLength": 128
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            },
+            "evidenceIds": {
+              "type": "array",
+              "items": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 128
+              },
+              "minItems": 0,
+              "maxItems": 256,
+              "uniqueItems": true
+            },
+            "revision": {
+              "anyOf": [
+                {
+                  "type": "integer",
+                  "minimum": 0,
+                  "maximum": 9007199254740991
+                },
+                {
+                  "type": "null"
+                }
+              ]
+            }
+          },
+          "required": [
+            "message",
+            "nodeId",
+            "status",
+            "evidenceIds",
+            "revision"
+          ],
+          "additionalProperties": false
+        },
+        "previousHash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        },
+        "hash": {
+          "type": "string",
+          "pattern": "^[a-f0-9]{64}$"
+        }
+      },
+      "required": [
+        "id",
+        "sequence",
+        "taskId",
+        "timestamp",
+        "type",
+        "source",
+        "traceId",
+        "actionId",
+        "payload",
+        "previousHash",
+        "hash"
+      ],
+      "additionalProperties": false
+    },
+    "TaskResult": {
+      "type": "object",
+      "properties": {
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "completed",
+            "failed",
+            "cancelled"
+          ]
+        },
+        "startedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "finishedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "completedNodeIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "failedNodeIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "verificationIds": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 128
+          },
+          "minItems": 0,
+          "maxItems": 256,
+          "uniqueItems": true
+        },
+        "summary": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4096
+        }
+      },
+      "required": [
+        "taskId",
+        "status",
+        "startedAt",
+        "finishedAt",
+        "completedNodeIds",
+        "failedNodeIds",
+        "verificationIds",
+        "summary"
+      ],
+      "additionalProperties": false
+    },
+    "ModelInvocation": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "taskId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "modelId": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "role": {
+          "type": "string",
+          "enum": [
+            "commander",
+            "planner",
+            "research",
+            "vision",
+            "grounding",
+            "executor",
+            "verifier",
+            "security",
+            "recovery",
+            "memory",
+            "critic",
+            "resource"
+          ]
+        },
+        "privacy": {
+          "type": "string",
+          "enum": [
+            "public",
+            "internal",
+            "restricted"
+          ]
+        },
+        "locality": {
+          "type": "string",
+          "enum": [
+            "local",
+            "cloud"
+          ]
+        },
+        "inputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "outputTokens": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1000000
+        },
+        "durationMs": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 600000
+        },
+        "costUsd": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 10000
+        },
+        "status": {
+          "type": "string",
+          "enum": [
+            "pending",
+            "completed",
+            "failed",
+            "rejected"
+          ]
+        }
+      },
+      "required": [
+        "id",
+        "taskId",
+        "modelId",
+        "role",
+        "privacy",
+        "locality",
+        "inputTokens",
+        "outputTokens",
+        "durationMs",
+        "costUsd",
+        "status"
+      ],
+      "additionalProperties": false
+    },
+    "ResourceSnapshot": {
+      "type": "object",
+      "properties": {
+        "id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "observedAt": {
+          "type": "string",
+          "format": "date-time"
+        },
+        "source": {
+          "type": "string",
+          "enum": [
+            "simulated",
+            "measured"
+          ]
+        },
+        "cpuPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "ramUsedMb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "ramTotalMb": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "vramUsedMb": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "vramTotalMb": {
+          "type": "number",
+          "minimum": 1,
+          "maximum": 9007199254740991
+        },
+        "gpuPercent": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 100
+        },
+        "networkHealthy": {
+          "type": "boolean"
+        },
+        "thermalPressure": {
+          "type": "boolean"
+        },
+        "frameBufferBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 9007199254740991
+        },
+        "inferenceQueueDepth": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 1024
+        }
+      },
+      "required": [
+        "id",
+        "observedAt",
+        "source",
+        "cpuPercent",
+        "ramUsedMb",
+        "ramTotalMb",
+        "vramUsedMb",
+        "vramTotalMb",
+        "gpuPercent",
+        "networkHealthy",
+        "thermalPressure",
+        "frameBufferBytes",
+        "inferenceQueueDepth"
+      ],
+      "additionalProperties": false
+    },
+    "AgentPlan": {
+      "$ref": "#/$defs/Plan"
+    },
+    "DAGNode": {
+      "$ref": "#/$defs/Node"
+    }
+  },
+  "title": "DAG",
+  "$ref": "#/$defs/DAG"
+}

@@ -1,0 +1,11 @@
+{
+  "listen": "127.0.0.1:7443",
+  "server_cert": "local-pki/server.pem",
+  "server_key": "local-pki/server-key.pem",
+  "client_ca": "local-pki/ca.pem",
+  "simulation": true,
+  "native_capture": false,
+  "allow_uncontained_processes": false,
+  "capabilities": [],
+  "executables": []
+}
