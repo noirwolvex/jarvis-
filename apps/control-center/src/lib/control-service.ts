@@ -94,6 +94,7 @@ function nativeFacts(status: DaemonStatus) {
     { key: "daemon.simulation", value: String(status.simulation) },
     { key: "daemon.native_input", value: String(status.native_input) },
     { key: "daemon.capture_ring_frames", value: String(status.capture_ring_frames) },
+    { key: "daemon.capture_ring_bytes", value: String(status.capture_ring_bytes) },
     { key: "daemon.audit_events_retained", value: String(status.audit_events_retained) },
     { key: "daemon.sandbox", value: status.sandbox },
     { key: "foreground.process_id", value: foreground ? String(foreground.process_id) : "unavailable" },
@@ -219,9 +220,9 @@ export async function parseControlBody(request: Request): Promise<ControlInput> 
     return { action: "run", title: value.title.trim() };
   }
   if (value.action === "click") {
-    if (!Number.isInteger(value.x) || !Number.isInteger(value.y)) throw new Error("Click requires integer x and y coordinates");
+    if (typeof value.x !== "number" || !Number.isInteger(value.x) || typeof value.y !== "number" || !Number.isInteger(value.y)) throw new Error("Click requires integer x and y coordinates");
     if (value.title !== undefined || value.text !== undefined) throw new Error("Click accepts only x and y");
-    return { action: "click", x: value.x as number, y: value.y as number };
+    return { action: "click", x: value.x, y: value.y };
   }
   if (value.action === "type") {
     if (typeof value.text !== "string" || !value.text || value.text.length > 4096 || value.text.includes("\0")) throw new Error("Type requires 1–4096 characters");
