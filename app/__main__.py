@@ -8,6 +8,7 @@ from dotenv import load_dotenv
 from PySide6.QtCore import QObject, QThread, QTimer, Signal
 from PySide6.QtWidgets import (
     QApplication,
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -103,9 +104,11 @@ class MainWindow(QMainWindow):
         self.setStyleSheet("""
             QMainWindow { background: #080b12; color: #eaf2ff; }
             QLabel { color: #9fb6d8; }
-            QTextEdit, QLineEdit { background: #0e1420; color: #eef6ff; border: 1px solid #243249; border-radius: 12px; padding: 10px; }
+            QTextEdit, QLineEdit, QComboBox { background: #0e1420; color: #eef6ff; border: 1px solid #243249; border-radius: 12px; padding: 10px; }
+            QComboBox::drop-down { border: none; width: 28px; }
             QPushButton { background: #84c8ff; color: #06101c; border: none; border-radius: 10px; padding: 10px 16px; font-weight: 700; }
             QPushButton:hover { background: #a5d7ff; }
+            QPushButton:disabled, QComboBox:disabled { color: #66768d; background: #0b1019; }
         """)
 
         root = QWidget()
@@ -117,6 +120,22 @@ class MainWindow(QMainWindow):
         subtitle = QLabel("Claude-powered Windows AI agent")
         layout.addWidget(title)
         layout.addWidget(subtitle)
+
+        access_row = QHBoxLayout()
+        access_label = QLabel("Access mode")
+        access_label.setStyleSheet("font-weight: 700; color: #c8dcf7;")
+        self.access_mode = QComboBox()
+        self.access_mode.addItem("Restricted", "restricted")
+        self.access_mode.addItem("Standard", "standard")
+        self.access_mode.addItem("Full Access", "full")
+        self.access_mode.setMinimumWidth(190)
+        self.access_mode.setEnabled(False)
+        self.access_mode.currentIndexChanged.connect(self.change_access_mode)
+        self.access_detail = QLabel("Permission engine not initialized")
+        access_row.addWidget(access_label)
+        access_row.addWidget(self.access_mode)
+        access_row.addWidget(self.access_detail, 1)
+        layout.addLayout(access_row)
 
         self.log = QTextEdit()
         self.log.setReadOnly(True)
@@ -139,8 +158,11 @@ class MainWindow(QMainWindow):
 
         try:
             self.agent = JarvisAgent(approval=self.approvals.request)
+            self.sync_access_mode()
+            self.access_mode.setEnabled(True)
             self.write("JARVIS online. Claude tool calling is ready.")
             self.write(f"<span style='color:#7388a6'>{self.agent.provider_info()}</span>")
+            self.write_access_summary()
         except Exception as exc:
             self.agent = None
             self.write(f"Startup error: {exc}")
@@ -150,6 +172,85 @@ class MainWindow(QMainWindow):
 
     def write(self, text: str) -> None:
         self.log.append(text)
+
+    def sync_access_mode(self) -> None:
+        if not self.agent:
+            return
+        mode = self.agent.tools.permissions.access_mode
+        index = self.access_mode.findData(mode)
+        self.access_mode.blockSignals(True)
+        if index >= 0:
+            self.access_mode.setCurrentIndex(index)
+        self.access_mode.blockSignals(False)
+        self.update_access_detail()
+
+    def update_access_detail(self) -> None:
+        if not self.agent:
+            self.access_detail.setText("Permission engine not initialized")
+            return
+        policy = self.agent.tools.permissions.summary()
+        if policy["mode"] == "restricted":
+            detail = "Observe/read oriented · writes and network disabled"
+        elif policy["mode"] == "full":
+            approval = "approval required" if policy["require_approval"] else "unattended approvals disabled"
+            detail = f"All capability categories enabled · {approval}"
+        else:
+            detail = "Configured policy · scoped write permissions"
+        self.access_detail.setText(detail)
+
+    def write_access_summary(self) -> None:
+        if not self.agent:
+            return
+        policy = self.agent.tools.permissions.summary()
+        enabled = [
+            name for name, key in [
+                ("network", "allow_network"),
+                ("filesystem-write", "allow_filesystem_write"),
+                ("git-write", "allow_git_write"),
+                ("browser-write", "allow_browser_write"),
+                ("shell", "allow_shell"),
+                ("destructive", "allow_destructive"),
+            ] if policy[key]
+        ]
+        self.write(
+            f"<span style='color:#84c8ff'><b>Access:</b> {policy['mode']} · "
+            f"enabled={', '.join(enabled) if enabled else 'read/observe only'} · "
+            f"approval={'on' if policy['require_approval'] else 'off'}</span>"
+        )
+
+    def change_access_mode(self, index: int) -> None:
+        if not self.agent or index < 0:
+            return
+        requested = self.access_mode.itemData(index)
+        permissions = self.agent.tools.permissions
+        if requested == permissions.access_mode:
+            self.update_access_detail()
+            return
+
+        if requested == "full":
+            response = QMessageBox.question(
+                self,
+                "Enable Full Access?",
+                "Full Access enables network, filesystem writes, Git writes, browser interaction, "
+                "PowerShell, and destructive-capability categories for this JARVIS session.\n\n"
+                "The deny-list, workspace path boundaries, browser challenge guard, and other hard "
+                "safety checks remain active. High-impact actions still require approval by default.\n\n"
+                "Enable Full Access?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+                QMessageBox.StandardButton.No,
+            )
+            if response != QMessageBox.StandardButton.Yes:
+                self.sync_access_mode()
+                return
+
+        try:
+            permissions.set_access_mode(requested)
+        except ValueError as exc:
+            QMessageBox.critical(self, "JARVIS", str(exc))
+            self.sync_access_mode()
+            return
+        self.update_access_detail()
+        self.write_access_summary()
 
     def process_approval_requests(self) -> None:
         try:
@@ -170,6 +271,7 @@ class MainWindow(QMainWindow):
         self.input.clear()
         self.write(f"<b>You:</b> {prompt}")
         self.send_button.setEnabled(False)
+        self.access_mode.setEnabled(False)
         self.thread = QThread()
         self.worker = Worker(self.agent, prompt)
         self.worker.moveToThread(self.thread)
@@ -179,8 +281,12 @@ class MainWindow(QMainWindow):
         self.worker.failed.connect(self.on_failed)
         self.worker.finished.connect(self.thread.quit)
         self.worker.failed.connect(self.thread.quit)
-        self.thread.finished.connect(lambda: self.send_button.setEnabled(True))
+        self.thread.finished.connect(self.on_thread_finished)
         self.thread.start()
+
+    def on_thread_finished(self) -> None:
+        self.send_button.setEnabled(True)
+        self.access_mode.setEnabled(self.agent is not None)
 
     def on_event(self, event: AgentEvent) -> None:
         if event.kind == "tool_result":
