@@ -1,3 +1,5 @@
+#[cfg(all(feature = "native", target_os = "windows"))]
+use crate::input::NativeInput;
 use crate::{
     Error, Result,
     capture::{CaptureRing, ScreenCapture, SimulationCapture, preview_bmp},
@@ -6,8 +8,6 @@ use crate::{
     process::ProcessManager,
     types::{Action, Reply, Request, now_ms},
 };
-#[cfg(all(feature = "native", target_os = "windows"))]
-use crate::input::NativeInput;
 use serde_json::json;
 use std::{
     sync::Arc,
