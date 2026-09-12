@@ -60,6 +60,7 @@ async fn mtls_status_capture_stop_and_replay_close_connection() {
         Policy::new(true, vec![cap], now_ms()).unwrap(),
         ProcessManager::new(vec![], false).unwrap(),
         false,
+        false,
     )
     .unwrap();
     let latch = dispatcher.emergency.clone();
