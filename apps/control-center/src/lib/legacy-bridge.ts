@@ -2,29 +2,51 @@ import { execFile } from "node:child_process";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 
-export type LegacyApplication = "discord";
+export type LegacyApplication = "discord" | "notepad" | "chrome" | "vscode";
 export type LegacyLaunchResult = {
   ok: true;
   action: "launch_application";
   app: LegacyApplication;
-  launcher_pid: number;
+  launcher_pid: number | null;
+  process_id: number;
+  process_name: string;
   window_title: string;
   window_handle: number;
   visible_window_verified: true;
+  process_identity_verified: true;
   focused: boolean;
 };
 
-export function parseLegacyLaunchMission(title: string): LegacyApplication | null {
-  const normalized = title
+const aliases: Array<{ app: LegacyApplication; names: string[] }> = [
+  { app: "discord", names: ["discord", "ديسكورد", "دسكورد"] },
+  { app: "notepad", names: ["notepad", "notepad app", "المفكرة", "المفكره", "نوت باد"] },
+  { app: "chrome", names: ["chrome", "google chrome", "كروم", "قوقل كروم", "جوجل كروم"] },
+  { app: "vscode", names: ["vscode", "vs code", "visual studio code", "فيجوال ستوديو كود"] },
+];
+
+function normalizeMission(title: string) {
+  return title
     .normalize("NFKC")
     .toLowerCase()
     .replace(/[.,!?؟،:;]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
+}
 
-  const english = /^(?:please )?(?:open|launch|start) (?:the )?discord(?: app| application)?$/;
-  const arabic = /^(?:افتح|فتح|شغل|شغّل) (?:برنامج )?(?:ديسكورد|دسكورد)$/;
-  return english.test(normalized) || arabic.test(normalized) ? "discord" : null;
+export function parseLegacyLaunchMission(title: string): LegacyApplication | null {
+  const normalized = normalizeMission(title);
+  const englishPrefix = /^(?:please )?(?:open|launch|start) (?:the )?/;
+  const arabicPrefix = /^(?:افتح|فتح|شغل|شغّل) (?:برنامج )?/;
+  const target = normalized.replace(englishPrefix, "").replace(arabicPrefix, "").trim();
+  if (target === normalized) return null;
+  for (const entry of aliases) {
+    if (entry.names.includes(target)) return entry.app;
+  }
+  return null;
+}
+
+export function supportedLegacyApplications(): LegacyApplication[] {
+  return aliases.map(entry => entry.app);
 }
 
 function repoRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -66,8 +88,15 @@ export async function launchLegacyApplication(app: LegacyApplication, signal?: A
           rejectPromise(new Error(message));
           return;
         }
-        if (result.app !== app || result.action !== "launch_application" || result.visible_window_verified !== true) {
-          rejectPromise(new Error("Legacy bridge did not return a verified launch result"));
+        if (
+          result.app !== app ||
+          result.action !== "launch_application" ||
+          result.visible_window_verified !== true ||
+          result.process_identity_verified !== true ||
+          !Number.isInteger(result.process_id) ||
+          !result.window_title
+        ) {
+          rejectPromise(new Error("Legacy bridge did not return a verified application launch result"));
           return;
         }
         resolvePromise(result);
