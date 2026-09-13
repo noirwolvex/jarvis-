@@ -18,7 +18,7 @@ export type LegacyLaunchResult = {
 };
 
 const aliases: Array<{ app: LegacyApplication; names: string[] }> = [
-  { app: "discord", names: ["discord", "ديسكورد", "دسكورد"] },
+  { app: "discord", names: ["discord", "discord app", "discord application", "ديسكورد", "دسكورد"] },
   { app: "notepad", names: ["notepad", "notepad app", "المفكرة", "المفكره", "نوت باد"] },
   { app: "chrome", names: ["chrome", "google chrome", "كروم", "قوقل كروم", "جوجل كروم"] },
   { app: "vscode", names: ["vscode", "vs code", "visual studio code", "فيجوال ستوديو كود"] },
