@@ -60,10 +60,18 @@ def run_agent_mission(agent, goal: str) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
 
+    from .desktop_control_tools import release_held_inputs
+
     # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
     # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
     agent.reset()
-    result = agent.run(goal)
+    try:
+        result = agent.run(goal)
+    finally:
+        # Synthetic held keys/buttons are useful inside a multi-step gesture, but must never
+        # survive mission completion, failure, CAPTCHA pause, or model/tool exceptions.
+        release_held_inputs()
+
     summary = agent.orchestrator.summary()
     current = agent.orchestrator.current
     status = str(summary.get("status", "unknown"))
