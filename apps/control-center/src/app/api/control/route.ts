@@ -7,6 +7,12 @@ import {
   simulationRuntime,
   snapshotForView,
 } from "@/lib/control-service";
+import {
+  assertHybridMutation,
+  hybridModeEnabled,
+  hybridSnapshot,
+  submitHybridMission,
+} from "@/lib/hybrid-control";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -16,6 +22,7 @@ export async function GET(request: Request) {
   try { assertLocalRequest(request); }
   catch { return Response.json({ error: "Local same-origin access required" }, { status: 403, headers }); }
   try {
+    if (hybridModeEnabled()) return Response.json(hybridSnapshot(), { headers });
     const mode = controlMode();
     const snapshot = mode === "native" ? await nativeSnapshot() : snapshotForView(simulationRuntime());
     return Response.json(snapshot, { headers });
@@ -25,12 +32,22 @@ export async function GET(request: Request) {
 }
 
 export async function POST(request: Request) {
-  let mode: "simulation" | "native";
-  try { mode = controlMode(); }
-  catch (error) { return Response.json({ error: error instanceof Error ? error.message : "Invalid control mode" }, { status: 500, headers }); }
-  try { assertLocalRequest(request, true, mode); }
-  catch { return Response.json({ error: `Local same-origin ${mode} control required` }, { status: 403, headers }); }
   try {
+    if (hybridModeEnabled()) {
+      assertLocalRequest(request);
+      assertHybridMutation(request);
+      const input = await parseControlBody(request);
+      if (input.action !== "run") throw new Error(`${input.action} is not available in hybrid bridge mode yet`);
+      const result = submitHybridMission(input.title);
+      return Response.json({ ok: true, ...result }, { status: 202, headers });
+    }
+
+    let mode: "simulation" | "native";
+    try { mode = controlMode(); }
+    catch (error) { return Response.json({ error: error instanceof Error ? error.message : "Invalid control mode" }, { status: 500, headers }); }
+    try { assertLocalRequest(request, true, mode); }
+    catch { return Response.json({ error: `Local same-origin ${mode} control required` }, { status: 403, headers }); }
+
     const input = await parseControlBody(request);
     if (mode === "native") {
       const result = await executeNativeControl(input);
