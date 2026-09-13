@@ -65,6 +65,74 @@ def _wait_for_page_target(timeout: float = 5.0) -> list[dict[str, Any]]:
         time.sleep(0.1)
 
 
+def _settle_page_targets(timeout: float = 1.2, stable_polls: int = 3) -> list[dict[str, Any]]:
+    """Wait briefly for Chrome's startup target list to stop changing."""
+    deadline = time.monotonic() + max(0.0, timeout)
+    previous_ids: tuple[str, ...] | None = None
+    stable = 0
+    latest: list[dict[str, Any]] = []
+    while True:
+        latest = _page_targets()
+        current_ids = tuple(sorted(str(row.get("id") or "") for row in latest))
+        if latest and current_ids == previous_ids:
+            stable += 1
+        else:
+            stable = 0
+            previous_ids = current_ids
+        if latest and stable >= max(1, stable_polls):
+            return latest
+        if time.monotonic() >= deadline:
+            return latest
+        time.sleep(0.1)
+
+
+def _close_page_target(target_id: str, timeout: float = 1.0) -> bool:
+    port = _loopback_port()
+    if port is None or not target_id:
+        return False
+    encoded = urllib.parse.quote(str(target_id), safe="")
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/close/{encoded}",
+            timeout=timeout,
+        ) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def _dedupe_startup_blank_targets(targets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    """Keep one fresh managed about:blank target and close only duplicate startup blanks."""
+    blanks = [
+        row for row in targets
+        if str(row.get("url") or "").strip().lower() == "about:blank"
+        and str(row.get("id") or "").strip()
+    ]
+    if len(blanks) <= 1:
+        return targets, 0
+
+    keep_id = str(blanks[0].get("id") or "")
+    closed = 0
+    for row in blanks[1:]:
+        target_id = str(row.get("id") or "")
+        if target_id and target_id != keep_id and _close_page_target(target_id):
+            closed += 1
+
+    if closed:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            remaining = _page_targets()
+            remaining_blanks = [
+                row for row in remaining
+                if str(row.get("url") or "").strip().lower() == "about:blank"
+            ]
+            if len(remaining_blanks) <= 1:
+                return remaining, closed
+            time.sleep(0.1)
+
+    return _page_targets(), closed
+
+
 def ensure_managed_chrome() -> str:
     """Ensure one managed Chrome/CDP session exists instead of opening another about:blank window."""
     existing = _probe_cdp()
@@ -81,8 +149,6 @@ def ensure_managed_chrome() -> str:
             ensure_ascii=False,
         )
 
-    # Re-check after entering the lock so repeated/concurrent tool calls in the same
-    # Full Access process cannot race and launch multiple blank Chrome windows.
     with _START_LOCK:
         existing = _probe_cdp()
         if existing is not None:
@@ -105,24 +171,39 @@ def ensure_managed_chrome() -> str:
 
 
 def ensure_chrome_connection() -> str:
-    """Connect only after Chrome has published its startup page, avoiding duplicate about:blank tabs."""
+    """Connect after Chrome's startup targets stabilize, keeping one managed blank page."""
     endpoint = _cdp_url()
     existed_before = _probe_cdp() is not None
     startup: dict[str, Any] = {}
+    duplicates_closed = 0
 
     if not existed_before:
         startup = json.loads(ensure_managed_chrome())
 
-    # A fresh managed Chrome is launched with one about:blank page. /json/version can
-    # become ready before that page appears in /json/list. If Playwright connects in
-    # that gap, chrome_cdp._cmd_connect creates another page. Wait for the real startup
-    # page instead of racing it.
     targets = _wait_for_page_target(timeout=5.0 if not existed_before else 1.5)
     if not existed_before and not targets:
         raise RuntimeError(
             "Managed Chrome CDP became available but its startup page target did not appear; "
             "refusing to create a second fallback about:blank page."
         )
+
+    if not existed_before:
+        # Chrome can publish a second about:blank shortly after the first even from one
+        # managed startup invocation. Let the target list settle, then close only extra
+        # about:blank targets in this fresh isolated JARVIS session before Playwright attaches.
+        settled = _settle_page_targets(timeout=1.2, stable_polls=3)
+        if settled:
+            targets = settled
+        targets, duplicates_closed = _dedupe_startup_blank_targets(targets)
+        startup_blanks = [
+            row for row in targets
+            if str(row.get("url") or "").strip().lower() == "about:blank"
+        ]
+        if len(startup_blanks) > 1:
+            raise RuntimeError(
+                "Managed Chrome still exposed multiple about:blank startup targets after deduplication; "
+                "refusing to attach until the session is unambiguous."
+            )
 
     session_type = "managed" if not existed_before else "real"
     result = _runtime().call("connect", endpoint=endpoint, session_type=session_type)
@@ -132,6 +213,7 @@ def ensure_chrome_connection() -> str:
             "startup_guard": True,
             "page_target_ready": bool(targets),
             "startup_target_count": len(targets),
+            "startup_blank_duplicates_closed": duplicates_closed,
         }
     )
     if startup:
@@ -142,8 +224,6 @@ def ensure_chrome_connection() -> str:
 
 
 def register_chrome_session_tools(registry: ToolRegistry) -> None:
-    # Replace both original Chrome entry points. Full Access must never call the raw
-    # fallback connector because it can race Chrome startup and create a second blank tab.
     registry.register(
         ToolSpec(
             "chrome_start_managed",
@@ -156,7 +236,7 @@ def register_chrome_session_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "chrome_connect_cdp",
-            "Safely connect JARVIS to Chrome CDP. If managed Chrome must start, wait for its real startup page target before attaching so Playwright cannot create a duplicate about:blank tab.",
+            "Safely connect JARVIS to Chrome CDP. Fresh managed startup waits for page targets to stabilize, removes duplicate about:blank startup targets, and only then attaches Playwright.",
             Risk.MEDIUM,
             {"type": "object", "properties": {}, "additionalProperties": False},
             ensure_chrome_connection,
