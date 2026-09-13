@@ -8,6 +8,8 @@ from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
 
 _MOUSE_BUTTONS = {"left", "right", "middle"}
+_HELD_MOUSE_BUTTONS: set[str] = set()
+_HELD_KEYS: set[str] = set()
 
 
 def _windows_only() -> None:
@@ -20,6 +22,13 @@ def _button(value: str) -> Literal["left", "right", "middle"]:
     if normalized not in _MOUSE_BUTTONS:
         raise ValueError("Mouse button must be left, right, or middle")
     return normalized  # type: ignore[return-value]
+
+
+def _key(value: str) -> str:
+    normalized = str(value or "").strip().lower()
+    if not normalized or len(normalized) > 32 or "\0" in normalized:
+        raise ValueError("Keyboard key is invalid")
+    return normalized
 
 
 def desktop_cursor() -> str:
@@ -71,6 +80,7 @@ def desktop_mouse_down(button: str = "left") -> str:
 
     chosen = _button(button)
     pyautogui.mouseDown(button=chosen)
+    _HELD_MOUSE_BUTTONS.add(chosen)
     return f"Mouse {chosen} button down"
 
 
@@ -80,6 +90,7 @@ def desktop_mouse_up(button: str = "left") -> str:
 
     chosen = _button(button)
     pyautogui.mouseUp(button=chosen)
+    _HELD_MOUSE_BUTTONS.discard(chosen)
     return f"Mouse {chosen} button up"
 
 
@@ -87,10 +98,9 @@ def desktop_key_down(key: str) -> str:
     _windows_only()
     import pyautogui
 
-    value = str(key or "").strip().lower()
-    if not value or len(value) > 32 or "\0" in value:
-        raise ValueError("Keyboard key is invalid")
+    value = _key(key)
     pyautogui.keyDown(value)
+    _HELD_KEYS.add(value)
     return f"Key down: {value}"
 
 
@@ -98,11 +108,34 @@ def desktop_key_up(key: str) -> str:
     _windows_only()
     import pyautogui
 
-    value = str(key or "").strip().lower()
-    if not value or len(value) > 32 or "\0" in value:
-        raise ValueError("Keyboard key is invalid")
+    value = _key(key)
     pyautogui.keyUp(value)
+    _HELD_KEYS.discard(value)
     return f"Key up: {value}"
+
+
+def release_held_inputs() -> None:
+    """Best-effort fail-safe so an interrupted mission never leaves synthetic input held down."""
+    if os.name != "nt" or (not _HELD_MOUSE_BUTTONS and not _HELD_KEYS):
+        _HELD_MOUSE_BUTTONS.clear()
+        _HELD_KEYS.clear()
+        return
+    try:
+        import pyautogui
+
+        for key in list(_HELD_KEYS):
+            try:
+                pyautogui.keyUp(key)
+            except Exception:
+                pass
+        for button in list(_HELD_MOUSE_BUTTONS):
+            try:
+                pyautogui.mouseUp(button=button)
+            except Exception:
+                pass
+    finally:
+        _HELD_KEYS.clear()
+        _HELD_MOUSE_BUTTONS.clear()
 
 
 def register_desktop_control_tools(registry: ToolRegistry) -> None:
@@ -151,7 +184,7 @@ def register_desktop_control_tools(registry: ToolRegistry) -> None:
         desktop_drag,
     ))
     for name, description, handler in (
-        ("desktop_mouse_down", "Hold a mouse button down for a controlled multi-step gesture.", desktop_mouse_down),
+        ("desktop_mouse_down", "Hold a mouse button down for a controlled multi-step gesture. Any unreleased synthetic button is automatically released when the mission ends.", desktop_mouse_down),
         ("desktop_mouse_up", "Release a mouse button previously held down.", desktop_mouse_up),
     ):
         registry.register(ToolSpec(
@@ -162,7 +195,7 @@ def register_desktop_control_tools(registry: ToolRegistry) -> None:
             handler,
         ))
     for name, description, handler in (
-        ("desktop_key_down", "Hold a keyboard key down for a controlled multi-step shortcut or gesture.", desktop_key_down),
+        ("desktop_key_down", "Hold a keyboard key down for a controlled multi-step shortcut or gesture. Any unreleased synthetic key is automatically released when the mission ends.", desktop_key_down),
         ("desktop_key_up", "Release a keyboard key previously held down.", desktop_key_up),
     ):
         registry.register(ToolSpec(
