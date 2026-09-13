@@ -5,17 +5,37 @@ import time
 from typing import Callable
 
 from .agent import AgentEvent, JarvisAgent, _tool_schemas
+from .browser_mission_contract import (
+    google_search_result_count,
+    minimum_tab_count,
+    required_google_searches,
+    required_new_tabs,
+)
+
+
+def _chrome_tab_rows() -> list[dict]:
+    try:
+        from .chrome_cdp import chrome_is_connected, chrome_tabs
+
+        if not chrome_is_connected():
+            return []
+        payload = json.loads(chrome_tabs())
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
 
 
 class FullAccessJarvisAgent(JarvisAgent):
-    """Full Access execution profile with a hard human-verification pause boundary."""
+    """Full Access execution profile with hard browser-completion and human-verification boundaries."""
 
     def _system_prompt(self, user_text: str = "") -> str:
         base = super()._system_prompt(user_text)
         return base + """
 
 Full Access browser routing:
-- For browser, tab, Google, or web-search requests, do not launch Chrome through launch_installed_app or open_application. Use chrome_connect_cdp and chrome_new_tab so JARVIS controls the exact selected tab.
+- For browser, tab, Google, or web-search requests, do not launch Chrome through launch_installed_app or open_application. Use chrome_connect_cdp and the guarded Chrome tools so JARVIS controls the exact selected tab.
+- If the user explicitly says "new tab" or "another tab", that is a structural requirement: call chrome_new_tab for that step. browser_navigate/open_url on the current tab does NOT satisfy a new-tab request.
+- Preserve earlier result tabs when the user asks for a later search in a new tab. Complete every clause in order before returning a final answer.
 - If a guarded browser action encounters CAPTCHA, anti-bot, or human verification, stop the current run immediately. Leave the current Chrome window and tab open and unchanged. Do not close it, switch away, navigate elsewhere, launch another browser, or attempt an alternate automation path. The user must complete that checkpoint manually before JARVIS continues.
 """
 
@@ -24,6 +44,12 @@ Full Access browser routing:
         self.workspace_context.save_snapshot()
         self.messages.append({"role": "user", "content": user_text})
         self.memory.add("user", user_text)
+
+        requested_new_tab_count = required_new_tabs(user_text)
+        requested_google_search_count = required_google_searches(user_text)
+        initial_tab_count = len(_chrome_tab_rows())
+        minimum_required_tabs = minimum_tab_count(initial_tab_count, requested_new_tab_count)
+
         try:
             for turn in range(self.max_turns):
                 self.orchestrator.start_turn(turn + 1)
@@ -38,6 +64,38 @@ Full Access browser routing:
                 self.messages.append(message.model_dump(exclude_none=True))
                 tool_calls = getattr(message, "tool_calls", None) or []
                 if not tool_calls:
+                    rows = _chrome_tab_rows()
+                    actual_tab_count = len(rows)
+                    actual_google_search_count = google_search_result_count(rows)
+
+                    unmet: list[str] = []
+                    if requested_new_tab_count and actual_tab_count < minimum_required_tabs:
+                        unmet.append(
+                            f"the user requested {requested_new_tab_count} additional browser tab(s), "
+                            f"but only {actual_tab_count} tab(s) are currently verified; "
+                            f"at least {minimum_required_tabs} are required"
+                        )
+                    if (
+                        requested_google_search_count
+                        and actual_google_search_count < requested_google_search_count
+                    ):
+                        unmet.append(
+                            f"the user requested {requested_google_search_count} Google search(es), "
+                            f"but only {actual_google_search_count} Google search-result tab(s) are verified"
+                        )
+
+                    if unmet:
+                        contract_hint = (
+                            "The original browser mission is not complete: "
+                            + "; ".join(unmet)
+                            + ". Continue executing the original request. For every explicit new-tab step, "
+                            "use chrome_new_tab, keep previous result tabs open, perform the requested search/action "
+                            "inside the newly selected tab, and verify the resulting tab/URL before finishing."
+                        )
+                        emit and emit(AgentEvent("status", contract_hint))
+                        self.messages.append({"role": "user", "content": contract_hint})
+                        continue
+
                     result = (message.content or "Done.").strip()
                     if self.orchestrator.current and self.orchestrator.current.plan:
                         pending = [
