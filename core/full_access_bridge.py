@@ -10,34 +10,40 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
-def run_mission(goal: str) -> dict[str, Any]:
-    if not goal.strip():
-        return {"ok": False, "error": "Mission cannot be empty"}
-
-    # Import first so .env loading completes, then configure this dedicated child
-    # process for the explicit Full Access desktop profile.
+def build_full_access_agent():
+    """Build one fully routed Full Access agent. Persistent workers may safely reuse it between missions."""
+    # Import first so .env loading completes, then configure this dedicated local profile.
+    from .app_discovery_cache import enable_app_discovery_cache
     from .app_tools import register_app_tools
+    from .browser_fast_tools import register_browser_fast_tools
     from .browser_tab_tools import register_browser_tab_tools
     from .chrome_session_tools import register_chrome_session_tools
+    from .desktop_control_tools import register_desktop_control_tools
     from .full_access_agent import FullAccessJarvisAgent
     from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
+    from .vision_tools import register_vision_tools
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
     os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
+
+    # The cache becomes materially useful when build_full_access_agent lives in the
+    # persistent worker: friendly app resolution is reused without weakening path checks.
+    enable_app_discovery_cache()
 
     agent = FullAccessJarvisAgent()
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
+    register_browser_fast_tools(agent.tools)
+    register_desktop_control_tools(agent.tools)
+    register_vision_tools(agent.tools)
     # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
-    # to a second unmanaged browser after the CDP tools have been installed.
+    # to a second unmanaged browser after the guarded CDP tools are installed.
     register_full_access_browser_routing(agent.tools)
 
-    # Desktop/browser/workspace mutations are approved by the explicit session-level
-    # Full Access opt-in. HIGH/CRITICAL tools still require a separate approval surface
-    # and therefore fail closed here. Dedicated installed-app/browser tools remain
-    # available without exposing arbitrary shell text to the model.
+    # Desktop/browser/workspace mutations are approved by explicit session-level Full Access.
+    # HIGH/CRITICAL tools still require a separate approval surface and fail closed here.
     def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
         spec = agent.tools._tools.get(tool_name)
         if spec is None:
@@ -47,6 +53,16 @@ def run_mission(goal: str) -> dict[str, Any]:
         return spec.risk <= Risk.MEDIUM
 
     agent.approval = approve
+    return agent
+
+
+def run_agent_mission(agent, goal: str) -> dict[str, Any]:
+    if not goal.strip():
+        return {"ok": False, "error": "Mission cannot be empty"}
+
+    # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
+    # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
+    agent.reset()
     result = agent.run(goal)
     summary = agent.orchestrator.summary()
     current = agent.orchestrator.current
@@ -88,6 +104,10 @@ def run_mission(goal: str) -> dict[str, Any]:
         "mission_completed": mission_completed,
         "high_risk_requires_separate_approval": True,
     }
+
+
+def run_mission(goal: str) -> dict[str, Any]:
+    return run_agent_mission(build_full_access_agent(), goal)
 
 
 def main() -> int:
