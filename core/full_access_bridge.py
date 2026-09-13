@@ -20,6 +20,7 @@ def run_mission(goal: str) -> dict[str, Any]:
     from .browser_tab_tools import register_browser_tab_tools
     from .chrome_session_tools import register_chrome_session_tools
     from .full_access_agent import FullAccessJarvisAgent
+    from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
@@ -29,6 +30,9 @@ def run_mission(goal: str) -> dict[str, Any]:
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
+    # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
+    # to a second unmanaged browser after the CDP tools have been installed.
+    register_full_access_browser_routing(agent.tools)
 
     # Desktop/browser/workspace mutations are approved by the explicit session-level
     # Full Access opt-in. HIGH/CRITICAL tools still require a separate approval surface
