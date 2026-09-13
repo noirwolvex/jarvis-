@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from core.browser_guard import _challenge_evidence
+from core.browser_guard import _CHALLENGE_SELECTOR, _challenge_evidence
 
 
 class _FakeLocator:
@@ -36,11 +36,10 @@ class BrowserGuardTests(unittest.TestCase):
         self.assertTrue(evidence)
         self.assertTrue(any(item.startswith("text:") for item in evidence))
 
-    def test_detects_recaptcha_selector(self) -> None:
-        selector = "iframe[src*='recaptcha']"
-        page = _FakePage("Normal page", {selector: 1})
+    def test_detects_challenge_selector_with_one_combined_scan(self) -> None:
+        page = _FakePage("Normal page", {_CHALLENGE_SELECTOR: 1})
         evidence = _challenge_evidence(page)
-        self.assertIn(f"selector:{selector}", evidence)
+        self.assertIn("selector:combined-challenge-markers:1", evidence)
 
     def test_normal_page_has_no_challenge(self) -> None:
         page = _FakePage("Welcome to the account page")

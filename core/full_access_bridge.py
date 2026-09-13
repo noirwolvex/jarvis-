@@ -10,26 +10,40 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
-def run_mission(goal: str) -> dict[str, Any]:
-    if not goal.strip():
-        return {"ok": False, "error": "Mission cannot be empty"}
-
+def build_full_access_agent():
+    """Build one fully routed Full Access agent. Persistent workers may safely reuse it between missions."""
+    # Import first so .env loading completes, then configure this dedicated local profile.
+    from .app_discovery_cache import enable_app_discovery_cache
     from .app_tools import register_app_tools
+    from .browser_fast_tools import register_browser_fast_tools
     from .browser_tab_tools import register_browser_tab_tools
     from .chrome_session_tools import register_chrome_session_tools
+    from .desktop_control_tools import register_desktop_control_tools
     from .full_access_agent import FullAccessJarvisAgent
     from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
+    from .vision_tools import register_vision_tools
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
     os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
+
+    # The cache becomes materially useful when build_full_access_agent lives in the
+    # persistent worker: friendly app resolution is reused without weakening path checks.
+    enable_app_discovery_cache()
 
     agent = FullAccessJarvisAgent()
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
+    register_browser_fast_tools(agent.tools)
+    register_desktop_control_tools(agent.tools)
+    register_vision_tools(agent.tools)
+    # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
+    # to a second unmanaged browser after the guarded CDP tools are installed.
     register_full_access_browser_routing(agent.tools)
 
+    # Desktop/browser/workspace mutations are approved by explicit session-level Full Access.
+    # HIGH/CRITICAL tools still require a separate approval surface and fail closed here.
     def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
         spec = agent.tools._tools.get(tool_name)
         if spec is None:
@@ -39,7 +53,25 @@ def run_mission(goal: str) -> dict[str, Any]:
         return spec.risk <= Risk.MEDIUM
 
     agent.approval = approve
-    result = agent.run(goal)
+    return agent
+
+
+def run_agent_mission(agent, goal: str) -> dict[str, Any]:
+    if not goal.strip():
+        return {"ok": False, "error": "Mission cannot be empty"}
+
+    from .desktop_control_tools import release_held_inputs
+
+    # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
+    # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
+    agent.reset()
+    try:
+        result = agent.run(goal)
+    finally:
+        # Synthetic held keys/buttons are useful inside a multi-step gesture, but must never
+        # survive mission completion, failure, CAPTCHA pause, or model/tool exceptions.
+        release_held_inputs()
+
     summary = agent.orchestrator.summary()
     current = agent.orchestrator.current
     status = str(summary.get("status", "unknown"))
@@ -82,6 +114,10 @@ def run_mission(goal: str) -> dict[str, Any]:
     }
 
 
+def run_mission(goal: str) -> dict[str, Any]:
+    return run_agent_mission(build_full_access_agent(), goal)
+
+
 def main() -> int:
     if len(sys.argv) < 3 or sys.argv[1] != "run":
         _emit({"ok": False, "error": "Usage: python -m core.full_access_bridge run <mission>"})
@@ -89,7 +125,7 @@ def main() -> int:
     mission = sys.argv[2]
     try:
         payload = run_mission(mission)
-    except Exception as exc:
+    except Exception as exc:  # fail closed and keep stdout machine-readable
         _emit({"ok": False, "error": f"{type(exc).__name__}: {exc}"})
         return 1
     _emit(payload)

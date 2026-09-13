@@ -20,6 +20,23 @@ _CHALLENGE_PATTERNS = (
     r"anti[- ]?bot",
 )
 
+# One combined selector keeps the hard challenge boundary while avoiding a separate
+# CDP round-trip for every individual marker.
+_CHALLENGE_SELECTOR = ",".join((
+    "iframe[src*='captcha']",
+    "iframe[src*='recaptcha']",
+    "iframe[src*='hcaptcha']",
+    "iframe[src*='turnstile']",
+    "[class*='captcha']",
+    "[id*='captcha']",
+    "[class*='recaptcha']",
+    "[id*='recaptcha']",
+    "[class*='hcaptcha']",
+    "[id*='hcaptcha']",
+    "[class*='turnstile']",
+    "[id*='turnstile']",
+))
+
 
 def _page():
     if chrome_is_connected():
@@ -44,30 +61,15 @@ def _challenge_evidence(page) -> list[str]:
     except Exception:
         pass
 
-    selectors = (
-        "iframe[src*='captcha']",
-        "iframe[src*='recaptcha']",
-        "iframe[src*='hcaptcha']",
-        "iframe[src*='turnstile']",
-        "[class*='captcha']",
-        "[id*='captcha']",
-        "[class*='recaptcha']",
-        "[id*='recaptcha']",
-        "[class*='hcaptcha']",
-        "[id*='hcaptcha']",
-        "[class*='turnstile']",
-        "[id*='turnstile']",
-    )
-    for selector in selectors:
-        try:
-            if page == "cdp":
-                count = chrome_page_operation("selector_count", selector=selector)
-            else:
-                count = page.locator(selector).count()
-            if count > 0:
-                evidence.append(f"selector:{selector}")
-        except Exception:
-            continue
+    try:
+        if page == "cdp":
+            count = chrome_page_operation("selector_count", selector=_CHALLENGE_SELECTOR)
+        else:
+            count = page.locator(_CHALLENGE_SELECTOR).count()
+        if count > 0:
+            evidence.append(f"selector:combined-challenge-markers:{count}")
+    except Exception:
+        pass
     return list(dict.fromkeys(evidence))
 
 
