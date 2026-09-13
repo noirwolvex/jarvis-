@@ -14,7 +14,7 @@ from .tools import ToolRegistry, ToolSpec
 
 _START_APPS_SCRIPT = r'''
 [Console]::OutputEncoding = [System.Text.UTF8Encoding]::new()
-$q = $args[0]
+$q = $env:JARVIS_APP_QUERY
 Get-StartApps |
     Where-Object { $_.Name -like ('*' + $q + '*') } |
     Select-Object -First 25 Name, AppID |
@@ -51,14 +51,17 @@ def _start_apps(query: str) -> list[dict[str, str]]:
     if os.name != "nt":
         raise RuntimeError("Installed-app discovery is supported on Windows only")
     cleaned = _clean_query(query)
+    env = dict(os.environ)
+    env["JARVIS_APP_QUERY"] = cleaned
     completed = subprocess.run(
-        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _START_APPS_SCRIPT, cleaned],
+        ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", _START_APPS_SCRIPT],
         capture_output=True,
         text=True,
         encoding="utf-8",
         errors="replace",
         timeout=12,
         check=False,
+        env=env,
     )
     if completed.returncode != 0:
         detail = (completed.stderr or completed.stdout or "Get-StartApps failed").strip()
