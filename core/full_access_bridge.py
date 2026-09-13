@@ -17,17 +17,19 @@ def run_mission(goal: str) -> dict[str, Any]:
     # Import first so .env loading completes, then configure this dedicated child
     # process for the explicit Full Access desktop profile.
     from .agent import JarvisAgent
+    from .app_tools import register_app_tools
     from .permissions import Risk
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
     os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
 
     agent = JarvisAgent()
+    register_app_tools(agent.tools)
 
     # Desktop/browser/workspace mutations are approved by the explicit session-level
-    # Full Access opt-in. HIGH/CRITICAL tools still require a separate future approval
-    # surface and therefore fail closed here. This keeps raw shell/destructive actions
-    # out of unattended execution while preserving broad interactive device control.
+    # Full Access opt-in. HIGH/CRITICAL tools still require a separate approval surface
+    # and therefore fail closed here. Dedicated installed-app tools remain available
+    # without exposing arbitrary shell text to the model.
     def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
         spec = agent.tools._tools.get(tool_name)
         if spec is None:
@@ -52,9 +54,11 @@ def run_mission(goal: str) -> dict[str, Any]:
     else:
         incomplete = []
 
-    ok = status == "completed" and tools_used > 0 and not incomplete
-    if not ok and status == "completed" and tools_used == 0:
+    ok = status == "completed" and tools_used > 0 and not incomplete and verified
+    if status == "completed" and not ok:
         status = "incomplete"
+        if not verified:
+            result = f"{result} Verification is required before Full Access reports mission completion."
 
     return {
         "ok": ok,
