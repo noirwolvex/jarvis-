@@ -16,15 +16,15 @@ def run_mission(goal: str) -> dict[str, Any]:
 
     # Import first so .env loading completes, then configure this dedicated child
     # process for the explicit Full Access desktop profile.
-    from .agent import JarvisAgent
     from .app_tools import register_app_tools
     from .browser_tab_tools import register_browser_tab_tools
+    from .full_access_agent import FullAccessJarvisAgent
     from .permissions import Risk
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
     os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
 
-    agent = JarvisAgent()
+    agent = FullAccessJarvisAgent()
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
 
@@ -56,8 +56,11 @@ def run_mission(goal: str) -> dict[str, Any]:
     else:
         incomplete = []
 
-    ok = status == "completed" and tools_used > 0 and not incomplete and verified
-    if status == "completed" and not ok:
+    requires_user_action = status == "waiting_user"
+    mission_completed = status == "completed" and tools_used > 0 and not incomplete and verified
+    ok = requires_user_action or mission_completed
+
+    if status == "completed" and not mission_completed:
         status = "incomplete"
         if not verified:
             result = f"{result} Verification is required before Full Access reports mission completion."
@@ -75,6 +78,8 @@ def run_mission(goal: str) -> dict[str, Any]:
         "verified": verified,
         "incomplete_steps": incomplete,
         "access_mode": "full",
+        "requires_user_action": requires_user_action,
+        "mission_completed": mission_completed,
         "high_risk_requires_separate_approval": True,
     }
 
