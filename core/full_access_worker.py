@@ -4,14 +4,22 @@ import json
 import sys
 from typing import Any
 
-from .full_access_bridge import run_mission
+from .full_access_bridge import build_full_access_agent, run_agent_mission
 
 PROTOCOL = 1
+_AGENT = None
 
 
 def _write(payload: dict[str, Any]) -> None:
     sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
     sys.stdout.flush()
+
+
+def _agent():
+    global _AGENT
+    if _AGENT is None:
+        _AGENT = build_full_access_agent()
+    return _AGENT
 
 
 def _handle(raw: str) -> dict[str, Any]:
@@ -31,7 +39,7 @@ def _handle(raw: str) -> dict[str, Any]:
 
     action = str(message.get("action") or "")
     if action == "ping":
-        return {"type": "result", "id": request_id, "ok": True, "payload": {"ready": True, "protocol": PROTOCOL}}
+        return {"type": "result", "id": request_id, "ok": True, "payload": {"ready": True, "protocol": PROTOCOL, "agent_loaded": _AGENT is not None}}
     if action != "run":
         return {"type": "result", "id": request_id, "ok": False, "error": f"Unsupported worker action: {action}"}
 
@@ -40,7 +48,7 @@ def _handle(raw: str) -> dict[str, Any]:
         return {"type": "result", "id": request_id, "ok": False, "error": "Mission must contain 1-8000 safe characters"}
 
     try:
-        payload = run_mission(title)
+        payload = run_agent_mission(_agent(), title)
         return {"type": "result", "id": request_id, "ok": True, "payload": payload}
     except Exception as exc:
         return {"type": "result", "id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
