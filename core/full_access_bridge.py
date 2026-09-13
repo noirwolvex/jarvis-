@@ -18,6 +18,7 @@ def run_mission(goal: str) -> dict[str, Any]:
     # process for the explicit Full Access desktop profile.
     from .app_tools import register_app_tools
     from .browser_tab_tools import register_browser_tab_tools
+    from .chrome_session_tools import register_chrome_session_tools
     from .full_access_agent import FullAccessJarvisAgent
     from .permissions import Risk
 
@@ -27,6 +28,7 @@ def run_mission(goal: str) -> dict[str, Any]:
     agent = FullAccessJarvisAgent()
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
+    register_chrome_session_tools(agent.tools)
 
     # Desktop/browser/workspace mutations are approved by the explicit session-level
     # Full Access opt-in. HIGH/CRITICAL tools still require a separate approval surface
