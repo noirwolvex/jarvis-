@@ -18,6 +18,7 @@ def run_mission(goal: str) -> dict[str, Any]:
     # process for the explicit Full Access desktop profile.
     from .agent import JarvisAgent
     from .app_tools import register_app_tools
+    from .browser_tab_tools import register_browser_tab_tools
     from .permissions import Risk
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
@@ -25,11 +26,12 @@ def run_mission(goal: str) -> dict[str, Any]:
 
     agent = JarvisAgent()
     register_app_tools(agent.tools)
+    register_browser_tab_tools(agent.tools)
 
     # Desktop/browser/workspace mutations are approved by the explicit session-level
     # Full Access opt-in. HIGH/CRITICAL tools still require a separate approval surface
-    # and therefore fail closed here. Dedicated installed-app tools remain available
-    # without exposing arbitrary shell text to the model.
+    # and therefore fail closed here. Dedicated installed-app/browser tools remain
+    # available without exposing arbitrary shell text to the model.
     def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
         spec = agent.tools._tools.get(tool_name)
         if spec is None:
