@@ -8,13 +8,13 @@ from typing import Any
 
 from .chrome_cdp import (
     _cdp_url,
-    chrome_connect_cdp,
     chrome_current_tab,
     chrome_is_connected,
     chrome_page_operation,
     chrome_tabs,
     chrome_use_tab,
 )
+from .chrome_session_tools import ensure_chrome_connection
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
 
@@ -69,7 +69,7 @@ def chrome_new_tab(url: str = "about:blank") -> str:
     """Create/select a real Chrome tab through the local CDP endpoint for later browser tools."""
     target_url = _normalize_tab_url(url)
     if not chrome_is_connected():
-        chrome_connect_cdp()
+        ensure_chrome_connection()
 
     before = json.loads(chrome_tabs())
     current_before = json.loads(chrome_current_tab())
