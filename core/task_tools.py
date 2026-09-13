@@ -26,6 +26,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         if normalized not in allowed:
             raise ValueError(f"Unsupported step status: {status}")
 
+        verified_evidence = None
         if normalized == "completed" and orchestrator.current is not None:
             recent = []
             for trace in reversed(orchestrator.current.traces):
@@ -40,8 +41,18 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                 raise ValueError(
                     "Cannot mark a step completed before a successful non-task tool result provides execution or observation evidence."
                 )
+            verified_evidence = next(
+                (trace for trace in evidence if str(trace.result).startswith("VERIFIED:")),
+                None,
+            )
 
         orchestrator.update_step(step_id, normalized, result)
+        if normalized == "completed" and verified_evidence is not None:
+            orchestrator.verify(
+                f"Plan step {step_id} completed with tool-verified evidence",
+                True,
+                str(verified_evidence.result),
+            )
         return json.dumps(orchestrator.summary(), ensure_ascii=False)
 
     def task_verify(claim: str, verified: bool, evidence: str = "") -> str:
@@ -81,7 +92,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
     ))
     registry.register(ToolSpec(
         "task_update_step",
-        "Update one execution-plan step after starting or completing it. Use running (or in_progress, which is normalized to running). A completed step must follow successful execution or observation evidence; never mark an attempted action completed before its tool succeeds.",
+        "Update one execution-plan step after starting or completing it. Use running (or in_progress, which is normalized to running). A completed step must follow successful execution or observation evidence; never mark an attempted action completed before its tool succeeds. VERIFIED tool results are automatically recorded as verification evidence.",
         Risk.SAFE,
         {
             "type": "object",
