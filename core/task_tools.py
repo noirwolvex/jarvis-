@@ -19,10 +19,40 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         } for step in plan], ensure_ascii=False)
 
     def task_update_step(step_id: str, status: str, result: str = "") -> str:
+        normalized = str(status).strip().lower().replace("-", "_")
+        if normalized == "in_progress":
+            normalized = "running"
         allowed = {"pending", "running", "completed", "failed", "skipped"}
-        if status not in allowed:
+        if normalized not in allowed:
             raise ValueError(f"Unsupported step status: {status}")
-        orchestrator.update_step(step_id, status, result)
+
+        verified_evidence = None
+        if normalized == "completed" and orchestrator.current is not None:
+            recent = []
+            for trace in reversed(orchestrator.current.traces):
+                if trace.name == "task_update_step":
+                    break
+                recent.append(trace)
+            evidence = [
+                trace for trace in recent
+                if trace.success and not trace.name.startswith("task_")
+            ]
+            if not evidence:
+                raise ValueError(
+                    "Cannot mark a step completed before a successful non-task tool result provides execution or observation evidence."
+                )
+            verified_evidence = next(
+                (trace for trace in evidence if str(trace.result).startswith("VERIFIED:")),
+                None,
+            )
+
+        orchestrator.update_step(step_id, normalized, result)
+        if normalized == "completed" and verified_evidence is not None:
+            orchestrator.verify(
+                f"Plan step {step_id} completed with tool-verified evidence",
+                True,
+                str(verified_evidence.result),
+            )
         return json.dumps(orchestrator.summary(), ensure_ascii=False)
 
     def task_verify(claim: str, verified: bool, evidence: str = "") -> str:
@@ -62,9 +92,21 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
     ))
     registry.register(ToolSpec(
         "task_update_step",
-        "Update one execution-plan step after starting or completing it.",
+        "Update one execution-plan step after starting or completing it. Use running (or in_progress, which is normalized to running). A completed step must follow successful execution or observation evidence; never mark an attempted action completed before its tool succeeds. VERIFIED tool results are automatically recorded as verification evidence.",
         Risk.SAFE,
-        {"type": "object", "properties": {"step_id": {"type": "string"}, "status": {"type": "string"}, "result": {"type": "string"}}, "required": ["step_id", "status"], "additionalProperties": False},
+        {
+            "type": "object",
+            "properties": {
+                "step_id": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "running", "in_progress", "completed", "failed", "skipped"],
+                },
+                "result": {"type": "string"},
+            },
+            "required": ["step_id", "status"],
+            "additionalProperties": False,
+        },
         task_update_step,
     ))
     registry.register(ToolSpec(
