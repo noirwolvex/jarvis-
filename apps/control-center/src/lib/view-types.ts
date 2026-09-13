@@ -19,7 +19,7 @@ export type NativeView = {
   } | null;
 };
 export type Snapshot = {
-  mode: "simulation" | "native";
+  mode: "simulation" | "native" | "hybrid";
   status: string;
   emergencyStopped: boolean;
   tasks: TaskView[];
