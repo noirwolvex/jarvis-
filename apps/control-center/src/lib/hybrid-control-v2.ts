@@ -125,13 +125,29 @@ async function runFullMission(task: TaskView) {
   try {
     const result = await runFullAccessMission(task.title);
     execute.status = "VERIFIED";
-    verify.status = result.verified ? "VERIFIED" : "PENDING";
+
+    if (result.requires_user_action || result.status === "waiting_user") {
+      verify.status = "WAITING_USER";
+      task.status = "WAITING_USER";
+      task.summary = `${result.result} [tools=${result.tools_used}, failures=${result.failures}]`;
+      value.version += 1;
+      value.status = "WAITING_USER";
+      addEvent("ACTION_PAUSED", task.id, "Full Access paused at a human-verification checkpoint");
+      addEvent("USER_ACTION_REQUIRED", task.id, result.result);
+      return;
+    }
+
+    if (!result.mission_completed || !result.verified) {
+      throw new Error(result.result || "Full Access mission ended without verified completion");
+    }
+
+    verify.status = "VERIFIED";
     task.status = "COMPLETED";
     task.summary = `${result.result} [tools=${result.tools_used}, failures=${result.failures}, verifications=${result.verifications}]`;
     value.version += 1;
     value.status = "COMPLETED";
     addEvent("ACTION_EXECUTED", task.id, `Python agent executed ${result.tools_used} tool calls`);
-    addEvent(result.verified ? "ACTION_VERIFIED" : "ACTION_VERIFICATION_UNAVAILABLE", task.id, result.verified ? "Agent verification records passed" : "Mission executed, but the agent did not record an independent verification checkpoint");
+    addEvent("ACTION_VERIFIED", task.id, "Agent verification records passed");
     addEvent("TASK_COMPLETED", task.id, task.summary);
   } catch (error) {
     execute.status = "FAILED";
