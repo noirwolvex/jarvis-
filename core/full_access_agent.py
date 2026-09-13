@@ -29,6 +29,32 @@ _DESKTOP_BROWSER_INPUT_TOOLS = {
     "desktop_key_down",
     "desktop_key_up",
 }
+_BROWSER_SIGNALS = (
+    "browser", "chrome", "google", "website", "web page", "http://", "https://", "new tab", "another tab", "search for",
+    "متصفح", "كروم", "جوجل", "موقع", "صفحة", "تبويب", "ابحث", "بحث",
+)
+_FULL_TOOL_SIGNALS = (
+    " git", "git ", "github", "repo", "repository", "code", "coding", "vscode", "visual studio code",
+    "file", "folder", "directory", "terminal", "powershell", "command", "script", "npm ", "cargo ", "database", "supabase",
+    "ملف", "مجلد", "كود", "جيت", "قاعدة بيانات",
+)
+_BROWSER_PROFILE_EXPLICIT = {
+    "google_search",
+    "screen_observe",
+    "wait",
+    "take_screenshot",
+    "list_windows",
+    "focus_window",
+    "focus_window_advanced",
+    "inspect_window",
+    "close_window",
+    "find_installed_app",
+    "launch_installed_app",
+    "open_application",
+    "open_application_and_type",
+    "open_url",
+}
+_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_")
 
 
 def _chrome_tab_rows() -> list[dict]:
@@ -68,6 +94,16 @@ def _foreground_is_chrome() -> bool:
         return False
 
 
+def _browser_focused_goal(user_text: str) -> bool:
+    lowered = str(user_text or "").casefold()
+    return any(signal in lowered for signal in _BROWSER_SIGNALS)
+
+
+def _needs_full_toolset(user_text: str) -> bool:
+    lowered = " " + str(user_text or "").casefold() + " "
+    return any(signal in lowered for signal in _FULL_TOOL_SIGNALS)
+
+
 class FullAccessJarvisAgent(JarvisAgent):
     """Full Access execution profile with hard browser-completion, vision, and human-verification boundaries."""
 
@@ -86,6 +122,21 @@ Full Access execution profile:
 - General desktop mouse/keyboard tools are also protected by the browser challenge guard whenever Chrome is the foreground window. Never use desktop input as an alternate path around a CAPTCHA or human-verification checkpoint.
 - If a guarded browser action encounters CAPTCHA, anti-bot, or human verification, stop the current run immediately. Leave the current Chrome window and tab open and unchanged. Do not close it, switch away, navigate elsewhere, launch another browser, or attempt an alternate automation path. The user must complete that checkpoint manually before JARVIS continues.
 """
+
+    def _tool_schemas_for_goal(self, user_text: str) -> list[dict[str, Any]]:
+        schemas = _tool_schemas(self.tools)
+        if not _browser_focused_goal(user_text) or _needs_full_toolset(user_text):
+            return schemas
+        # Browser-heavy missions do not need dev/Git/filesystem/system schemas on every
+        # model turn. Keep browser + task + window/desktop/dialog/vision/app fallback tools.
+        # This only changes what the model sees; PermissionEngine remains authoritative.
+        return [
+            schema for schema in schemas
+            if (
+                str(schema.get("function", {}).get("name", "")) in _BROWSER_PROFILE_EXPLICIT
+                or str(schema.get("function", {}).get("name", "")).startswith(_BROWSER_PROFILE_PREFIXES)
+            )
+        ]
 
     def _browser_action_guard(self, tool_name: str) -> str | None:
         # Native/desktop input must not become a side channel around the DOM/CDP CAPTCHA guard.
@@ -112,6 +163,7 @@ Full Access execution profile:
         requested_google_search_count = required_google_searches(user_text)
         initial_tab_count = len(_chrome_tab_rows())
         minimum_required_tabs = minimum_tab_count(initial_tab_count, requested_new_tab_count)
+        turn_tool_schemas = self._tool_schemas_for_goal(user_text)
 
         try:
             for turn in range(self.max_turns):
@@ -120,7 +172,7 @@ Full Access execution profile:
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": self._system_prompt(user_text)}, *self.messages],
-                    tools=_tool_schemas(self.tools),
+                    tools=turn_tool_schemas,
                     tool_choice="auto",
                 )
                 message = response.choices[0].message
