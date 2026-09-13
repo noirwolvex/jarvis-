@@ -15,6 +15,9 @@ export type FullAccessMissionResult = {
   verified: boolean;
   incomplete_steps: string[];
   access_mode: "full";
+  requires_user_action: boolean;
+  mission_completed: boolean;
+  high_risk_requires_separate_approval: boolean;
 };
 
 function repoRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -68,6 +71,10 @@ export async function runFullAccessMission(title: string, signal?: AbortSignal):
         }
         if (parsed.action !== "full_access_mission" || parsed.access_mode !== "full" || parsed.tools_used < 1) {
           rejectPromise(new Error("Full Access bridge did not return an executed mission result"));
+          return;
+        }
+        if (!parsed.requires_user_action && !parsed.mission_completed) {
+          rejectPromise(new Error(parsed.result || "Full Access mission did not complete or reach a user-action checkpoint"));
           return;
         }
         resolvePromise(parsed);
