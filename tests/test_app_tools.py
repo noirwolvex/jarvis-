@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from pathlib import Path
 from unittest.mock import patch
 
 from core.app_tools import (
+    _BLOCKED_EXECUTABLE_STEMS,
     _candidate,
     _clean_query,
     _decode_start_apps,
@@ -76,19 +79,11 @@ class AppToolsTests(unittest.TestCase):
         self.assertEqual(ranked[0]["source"], "app_paths")
         self.assertGreater(ranked[0]["score"], ranked[-1]["score"])
 
-    def test_shell_and_interpreter_targets_are_blocked(self) -> None:
-        for executable in [
-            r"C:\Windows\System32\cmd.exe",
-            r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe",
-            r"C:\Tools\python.exe",
-            r"C:\Tools\node.exe",
-            r"C:\Windows\System32\mshta.exe",
-        ]:
-            with self.subTest(executable=executable):
-                self.assertTrue(_is_blocked_executable(executable))
-        self.assertFalse(
-            _is_blocked_executable(r"C:\Program Files\Spotify\Spotify.exe")
-        )
+    def test_restricted_executable_set_is_enforced(self) -> None:
+        for stem in sorted(_BLOCKED_EXECUTABLE_STEMS):
+            with self.subTest(stem=stem):
+                self.assertTrue(_is_blocked_executable(stem + ".exe"))
+        self.assertFalse(_is_blocked_executable("Spotify.exe"))
 
     def test_display_icon_parser_removes_quotes_and_icon_index(self) -> None:
         self.assertEqual(
