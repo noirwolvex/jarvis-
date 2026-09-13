@@ -14,14 +14,29 @@ def run_mission(goal: str) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
 
-    # Import first so .env loading completes, then force this dedicated child process
-    # into the explicitly requested Full Access profile.
+    # Import first so .env loading completes, then configure this dedicated child
+    # process for the explicit Full Access desktop profile.
     from .agent import JarvisAgent
+    from .permissions import Risk
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
-    os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "false"
+    os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
 
-    agent = JarvisAgent(approval=lambda _name, _args: True)
+    agent = JarvisAgent()
+
+    # Desktop/browser/workspace mutations are approved by the explicit session-level
+    # Full Access opt-in. HIGH/CRITICAL tools still require a separate future approval
+    # surface and therefore fail closed here. This keeps raw shell/destructive actions
+    # out of unattended execution while preserving broad interactive device control.
+    def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
+        spec = agent.tools._tools.get(tool_name)
+        if spec is None:
+            return False
+        if tool_name == "run_powershell":
+            return False
+        return spec.risk <= Risk.MEDIUM
+
+    agent.approval = approve
     result = agent.run(goal)
     summary = agent.orchestrator.summary()
     current = agent.orchestrator.current
@@ -54,6 +69,7 @@ def run_mission(goal: str) -> dict[str, Any]:
         "verified": verified,
         "incomplete_steps": incomplete,
         "access_mode": "full",
+        "high_risk_requires_separate_approval": True,
     }
 
 
