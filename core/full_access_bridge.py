@@ -16,6 +16,7 @@ def run_mission(goal: str) -> dict[str, Any]:
 
     from .app_tools import register_app_tools
     from .browser_tab_tools import register_browser_tab_tools
+    from .chrome_session_tools import register_chrome_session_tools
     from .full_access_agent import FullAccessJarvisAgent
     from .permissions import Risk
 
@@ -25,6 +26,7 @@ def run_mission(goal: str) -> dict[str, Any]:
     agent = FullAccessJarvisAgent()
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
+    register_chrome_session_tools(agent.tools)
 
     def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
         spec = agent.tools._tools.get(tool_name)
