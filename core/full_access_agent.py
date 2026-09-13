@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import ctypes
 import json
+import os
 import time
 from typing import Any, Callable
 
@@ -13,6 +15,21 @@ from .browser_mission_contract import (
 )
 from .vision_tools import is_internal_vision_message, vision_followup_message
 
+_DESKTOP_BROWSER_INPUT_TOOLS = {
+    "desktop_click",
+    "desktop_type",
+    "desktop_press",
+    "desktop_hotkey",
+    "desktop_scroll",
+    "desktop_double_click",
+    "desktop_click_button",
+    "desktop_drag",
+    "desktop_mouse_down",
+    "desktop_mouse_up",
+    "desktop_key_down",
+    "desktop_key_up",
+}
+
 
 def _chrome_tab_rows() -> list[dict]:
     try:
@@ -24,6 +41,31 @@ def _chrome_tab_rows() -> list[dict]:
         return payload if isinstance(payload, list) else []
     except Exception:
         return []
+
+
+def _foreground_is_chrome() -> bool:
+    """Return true only when a Chrome/Chromium process owns the current foreground window."""
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return False
+    try:
+        from .chrome_cdp import chrome_is_connected
+
+        if not chrome_is_connected():
+            return False
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetForegroundWindow())
+        if not hwnd:
+            return False
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        import psutil
+
+        name = psutil.Process(int(pid.value)).name().casefold()
+        return name in {"chrome.exe", "chromium.exe", "chrome", "chromium"}
+    except Exception:
+        return False
 
 
 class FullAccessJarvisAgent(JarvisAgent):
@@ -39,10 +81,17 @@ Full Access execution profile:
 - For browser, tab, Google, or web-search requests, do not launch Chrome through launch_installed_app or open_application. Use the guarded managed Chrome/CDP tools so JARVIS controls the exact selected tab.
 - If the user explicitly says "new tab" or "another tab", that is a structural requirement: use chrome_new_tab or google_search(new_tab=true) for that step. browser_navigate/open_url on the current tab does NOT satisfy a new-tab request.
 - Preserve earlier result tabs when the user asks for a later search in a new tab. Complete every clause in order before returning a final answer.
-- For desktop applications, prefer semantic Windows UI Automation (inspect_window/dialog tools) when controls are labeled. Use screen_observe when the task genuinely depends on visual layout, canvas content, unlabeled controls, or coordinates that semantic inspection cannot resolve. A screen_observe result is supplied to you as an actual image on the next turn.
+- For desktop applications, prefer semantic Windows UI Automation (inspect_window/dialog tools) when controls are labeled. Use screen_observe when the task genuinely depends on visual layout, canvas content, unlabeled controls, or coordinates that semantic inspection cannot resolve. A screen_observe result is supplied to you as an actual image on the next turn with virtual-desktop coordinate mapping.
 - Do not take repeated screenshots when the visible state has not materially changed. After a visual action, verify the resulting state with semantic inspection or a fresh visual observation when needed.
+- General desktop mouse/keyboard tools are also protected by the browser challenge guard whenever Chrome is the foreground window. Never use desktop input as an alternate path around a CAPTCHA or human-verification checkpoint.
 - If a guarded browser action encounters CAPTCHA, anti-bot, or human verification, stop the current run immediately. Leave the current Chrome window and tab open and unchanged. Do not close it, switch away, navigate elsewhere, launch another browser, or attempt an alternate automation path. The user must complete that checkpoint manually before JARVIS continues.
 """
+
+    def _browser_action_guard(self, tool_name: str) -> str | None:
+        # Native/desktop input must not become a side channel around the DOM/CDP CAPTCHA guard.
+        if tool_name in _DESKTOP_BROWSER_INPUT_TOOLS and _foreground_is_chrome():
+            return super()._browser_action_guard("browser_click")
+        return super()._browser_action_guard(tool_name)
 
     def _replace_internal_vision(self, followup: dict[str, Any]) -> None:
         # Keep only the newest screenshot in the live model context. Image bytes never enter
