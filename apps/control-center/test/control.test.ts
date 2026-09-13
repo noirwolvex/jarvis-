@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { createRuntime } from "@jarvis/runtime";
 import { assertLocalRequest, controlMode, parseControlBody, snapshotForView } from "../src/lib/control-service.ts";
 import { assertHybridMutation, hybridModeEnabled } from "../src/lib/hybrid-control.ts";
-import { parseLegacyLaunchMission } from "../src/lib/legacy-bridge.ts";
+import { parseLegacyLaunchMission, supportedLegacyApplications } from "../src/lib/legacy-bridge.ts";
 import { daemonConfigFromEnv } from "../src/lib/daemon-client.ts";
 
 function request(body: string, overrides: Record<string, string> = {}) {
@@ -18,7 +18,8 @@ test("local control boundary rejects hostile host origin and wrong mode header",
   assert.throws(() => assertLocalRequest(request("{}", { "x-jarvis-control": "native" }), true, "simulation"));
   assert.doesNotThrow(() => assertLocalRequest(request("{}", { "x-jarvis-control": "native" }), true, "native"));
   assert.doesNotThrow(() => assertHybridMutation(request("{}", { "x-jarvis-control": "hybrid" })));
-  assert.throws(() => assertHybridMutation(request("{}", { "x-jarvis-control": "simulation" })));
+  assert.doesNotThrow(() => assertHybridMutation(request("{}", { "x-jarvis-control": "simulation" })));
+  assert.throws(() => assertHybridMutation(request("{}", { "x-jarvis-control": "native" })));
 });
 
 test("control parser validates simulation and typed native actions", async () => {
@@ -41,10 +42,17 @@ test("control mode defaults to simulation and hybrid is an explicit compatibilit
   assert.throws(() => controlMode({ JARVIS_CONTROL_MODE: "remote" }));
 });
 
-test("legacy launch intent is narrow and does not accept command-like suffixes", () => {
+test("legacy launch intent recognizes only allowlisted applications and exact launch phrasing", () => {
+  assert.deepEqual(supportedLegacyApplications(), ["discord", "notepad", "chrome", "vscode"]);
   assert.equal(parseLegacyLaunchMission("open discord app"), "discord");
-  assert.equal(parseLegacyLaunchMission("Launch the Discord application"), "discord");
+  assert.equal(parseLegacyLaunchMission("Launch the Discord"), "discord");
   assert.equal(parseLegacyLaunchMission("افتح ديسكورد"), "discord");
+  assert.equal(parseLegacyLaunchMission("open notepad"), "notepad");
+  assert.equal(parseLegacyLaunchMission("افتح المفكرة"), "notepad");
+  assert.equal(parseLegacyLaunchMission("start google chrome"), "chrome");
+  assert.equal(parseLegacyLaunchMission("شغل كروم"), "chrome");
+  assert.equal(parseLegacyLaunchMission("open visual studio code"), "vscode");
+  assert.equal(parseLegacyLaunchMission("افتح فيجوال ستوديو كود"), "vscode");
   assert.equal(parseLegacyLaunchMission("open discord app && calc"), null);
   assert.equal(parseLegacyLaunchMission("open powershell"), null);
   assert.equal(parseLegacyLaunchMission("discord"), null);
