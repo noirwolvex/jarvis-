@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { freemem, totalmem } from "node:os";
+import { runFullAccessMission } from "./full-access-bridge";
 import {
   launchLegacyApplication,
   parseLegacyLaunchMission,
@@ -8,9 +9,21 @@ import {
 } from "./legacy-bridge";
 import type { EventView, Snapshot, TaskView } from "./view-types";
 
-type State = { tasks: TaskView[]; events: EventView[]; seq: number; status: string; running: boolean; version: number; windowTitle?: string };
-const globalState = globalThis as typeof globalThis & { jarvisHybridV2?: State };
-const getState = () => globalState.jarvisHybridV2 ??= { tasks: [], events: [], seq: 0, status: "IDLE", running: false, version: 0 };
+type AccessMode = "standard" | "full";
+type State = {
+  tasks: TaskView[];
+  events: EventView[];
+  seq: number;
+  status: string;
+  running: boolean;
+  version: number;
+  windowTitle?: string;
+  accessMode: AccessMode;
+};
+const globalState = globalThis as typeof globalThis & { jarvisHybridV3?: State };
+const getState = () => globalState.jarvisHybridV3 ??= {
+  tasks: [], events: [], seq: 0, status: "IDLE", running: false, version: 0, accessMode: "standard",
+};
 
 function addEvent(type: string, taskId: string, summary: string) {
   const value = getState();
@@ -22,26 +35,42 @@ export function hybridModeEnabled(env: NodeJS.ProcessEnv = process.env) {
   return env.JARVIS_CONTROL_MODE?.trim().toLowerCase() === "hybrid";
 }
 
+export function hybridAccessMode(): AccessMode { return getState().accessMode; }
+
+export function setHybridAccessMode(mode: AccessMode) {
+  const value = getState();
+  if (value.running) throw new Error("Access mode cannot change while a mission is running");
+  value.accessMode = mode;
+  value.status = "IDLE";
+  addEvent("ACCESS_MODE_CHANGED", "runtime", mode === "full" ? "Full Access enabled for this local session" : "Full Access disabled; standard hybrid restrictions restored");
+  return { mode };
+}
+
 export function assertHybridMutation(request: Request) {
   const value = request.headers.get("x-jarvis-control");
-  // "simulation" is accepted only as a compatibility alias for the original
-  // ControlCenter component while hybrid mode owns the local API route.
   if (value !== "hybrid" && value !== "simulation") throw new Error("hybrid control header required");
 }
 
 export function hybridSnapshot(): Snapshot {
   const value = getState();
   const applications = supportedLegacyApplications();
+  const full = value.accessMode === "full";
   return {
     mode: "hybrid", status: value.status, emergencyStopped: false,
     tasks: value.tasks.map(item => structuredClone(item)), events: value.events.map(item => structuredClone(item)),
     facts: [
-      { key: "bridge.runtime", value: "python-legacy" },
-      { key: "bridge.allowlist", value: applications.join(", ") },
+      { key: "access.mode", value: value.accessMode },
+      { key: "bridge.runtime", value: full ? "python-agent-full-access" : "python-legacy" },
+      { key: "bridge.scope", value: full ? "desktop + input + browser + files + git + shell (permission engine)" : "verified application launch" },
+      { key: "bridge.allowlist", value: full ? "dynamic via Python agent" : applications.join(", ") },
       ...(value.windowTitle ? [{ key: "last.verified_window", value: value.windowTitle }] : []),
     ],
     worldVersion: value.version, memory: [], models: [], native: null,
-    capabilities: applications.map(app => ({ id: `legacy-launch-${app}`, permission: "launch application", scope: app, expiresAt: "local session" })),
+    capabilities: full ? [
+      { id: "full-desktop", permission: "screen + mouse + keyboard + applications", scope: "local interactive session", expiresAt: "local session" },
+      { id: "full-browser", permission: "browser read/write", scope: "local browser guard", expiresAt: "local session" },
+      { id: "full-dev", permission: "filesystem + Git + shell", scope: "permission engine + workspace boundaries", expiresAt: "local session" },
+    ] : applications.map(app => ({ id: `legacy-launch-${app}`, permission: "launch application", scope: app, expiresAt: "local session" })),
     telemetry: { processRssMb: Math.round(process.memoryUsage().rss / 1024 ** 2), hostRamUsedGb: (totalmem() - freemem()) / 1024 ** 3, hostRamTotalGb: totalmem() / 1024 ** 3, processUptime: Math.floor(process.uptime()), sampledAt: new Date().toISOString() },
   };
 }
@@ -49,9 +78,26 @@ export function hybridSnapshot(): Snapshot {
 export function submitHybridMission(title: string) {
   const value = getState();
   if (value.running) throw new Error("A hybrid mission is already running");
-  const app = parseLegacyLaunchMission(title);
-  if (!app) throw new Error("Hybrid launch currently supports: Discord, Notepad, Chrome, and VS Code");
   const id = randomUUID();
+
+  if (value.accessMode === "full") {
+    const task: TaskView = {
+      id, title: title.trim(), status: "QUEUED", createdAt: new Date().toISOString(), summary: "Queued for Full Access agent",
+      nodes: [
+        { id: `${id}:authorize`, title: "Authorize Full Access session", action: "AUTHORIZE_FULL_ACCESS", dependencies: [], status: "VERIFIED" },
+        { id: `${id}:execute`, title: "Plan and execute with Python agent", action: "AGENT_EXECUTE", dependencies: [`${id}:authorize`], status: "PENDING" },
+        { id: `${id}:verify`, title: "Verify agent outcome", action: "VERIFY_OUTCOME", dependencies: [`${id}:execute`], status: "PENDING" },
+      ],
+    };
+    value.tasks.unshift(task);
+    if (value.tasks.length > 32) value.tasks.length = 32;
+    addEvent("TASK_CREATED", id, "Full Access mission queued");
+    void runFullMission(task);
+    return { id };
+  }
+
+  const app = parseLegacyLaunchMission(title);
+  if (!app) throw new Error("Standard hybrid mode supports verified application launches. Enable Full Access for general device-control missions.");
   const task: TaskView = {
     id, title: title.trim(), status: "QUEUED", createdAt: new Date().toISOString(), summary: "Queued",
     nodes: [
@@ -63,11 +109,43 @@ export function submitHybridMission(title: string) {
   value.tasks.unshift(task);
   if (value.tasks.length > 32) value.tasks.length = 32;
   addEvent("TASK_CREATED", id, `Hybrid ${app} mission queued`);
-  void runMission(task, app);
+  void runLaunchMission(task, app);
   return { id };
 }
 
-async function runMission(task: TaskView, app: LegacyApplication) {
+async function runFullMission(task: TaskView) {
+  const value = getState();
+  const execute = task.nodes[1]!;
+  const verify = task.nodes[2]!;
+  value.running = true;
+  value.status = "EXECUTING";
+  task.status = "RUNNING";
+  execute.status = "EXECUTING";
+  addEvent("ACTION_STARTED", task.id, "Full Access agent execution started");
+  try {
+    const result = await runFullAccessMission(task.title);
+    execute.status = "VERIFIED";
+    verify.status = result.verified ? "VERIFIED" : "PENDING";
+    task.status = "COMPLETED";
+    task.summary = `${result.result} [tools=${result.tools_used}, failures=${result.failures}, verifications=${result.verifications}]`;
+    value.version += 1;
+    value.status = "COMPLETED";
+    addEvent("ACTION_EXECUTED", task.id, `Python agent executed ${result.tools_used} tool calls`);
+    addEvent(result.verified ? "ACTION_VERIFIED" : "ACTION_VERIFICATION_UNAVAILABLE", task.id, result.verified ? "Agent verification records passed" : "Mission executed, but the agent did not record an independent verification checkpoint");
+    addEvent("TASK_COMPLETED", task.id, task.summary);
+  } catch (error) {
+    execute.status = "FAILED";
+    verify.status = "FAILED";
+    task.status = "FAILED";
+    task.summary = error instanceof Error ? error.message : "Full Access mission failed";
+    value.status = "ERROR";
+    addEvent("TASK_FAILED", task.id, task.summary);
+  } finally {
+    value.running = false;
+  }
+}
+
+async function runLaunchMission(task: TaskView, app: LegacyApplication) {
   const value = getState();
   const launch = task.nodes[1]!;
   const verify = task.nodes[2]!;
