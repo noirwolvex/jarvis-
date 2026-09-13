@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createRuntime } from "@jarvis/runtime";
 import { assertLocalRequest, controlMode, parseControlBody, snapshotForView } from "../src/lib/control-service.ts";
+import { assertHybridMutation, hybridModeEnabled } from "../src/lib/hybrid-control.ts";
+import { parseLegacyLaunchMission } from "../src/lib/legacy-bridge.ts";
 import { daemonConfigFromEnv } from "../src/lib/daemon-client.ts";
 
 function request(body: string, overrides: Record<string, string> = {}) {
@@ -15,6 +17,8 @@ test("local control boundary rejects hostile host origin and wrong mode header",
   assert.throws(() => assertLocalRequest(request("{}", { origin: "https://attacker.test" }), true, "simulation"));
   assert.throws(() => assertLocalRequest(request("{}", { "x-jarvis-control": "native" }), true, "simulation"));
   assert.doesNotThrow(() => assertLocalRequest(request("{}", { "x-jarvis-control": "native" }), true, "native"));
+  assert.doesNotThrow(() => assertHybridMutation(request("{}", { "x-jarvis-control": "hybrid" })));
+  assert.throws(() => assertHybridMutation(request("{}", { "x-jarvis-control": "simulation" })));
 });
 
 test("control parser validates simulation and typed native actions", async () => {
@@ -29,10 +33,21 @@ test("control parser validates simulation and typed native actions", async () =>
   await assert.rejects(parseControlBody(request(JSON.stringify({ action: "type", text: "x".repeat(9000) }))));
 });
 
-test("control mode defaults to simulation and validates native mode", () => {
+test("control mode defaults to simulation and hybrid is an explicit compatibility mode", () => {
   assert.equal(controlMode({}), "simulation");
   assert.equal(controlMode({ JARVIS_CONTROL_MODE: "native" }), "native");
+  assert.equal(hybridModeEnabled({ JARVIS_CONTROL_MODE: "hybrid" }), true);
+  assert.equal(hybridModeEnabled({ JARVIS_CONTROL_MODE: "simulation" }), false);
   assert.throws(() => controlMode({ JARVIS_CONTROL_MODE: "remote" }));
+});
+
+test("legacy launch intent is narrow and does not accept command-like suffixes", () => {
+  assert.equal(parseLegacyLaunchMission("open discord app"), "discord");
+  assert.equal(parseLegacyLaunchMission("Launch the Discord application"), "discord");
+  assert.equal(parseLegacyLaunchMission("افتح ديسكورد"), "discord");
+  assert.equal(parseLegacyLaunchMission("open discord app && calc"), null);
+  assert.equal(parseLegacyLaunchMission("open powershell"), null);
+  assert.equal(parseLegacyLaunchMission("discord"), null);
 });
 
 test("daemon configuration is loopback-only and requires mTLS material", () => {
