@@ -23,7 +23,6 @@ def _loopback_port() -> int | None:
 
 
 def _probe_cdp(timeout: float = 0.6) -> dict[str, Any] | None:
-    """Return Chrome DevTools metadata when the configured local CDP endpoint is already alive."""
     port = _loopback_port()
     if port is None:
         return None
@@ -38,7 +37,6 @@ def _probe_cdp(timeout: float = 0.6) -> dict[str, Any] | None:
 
 
 def _page_targets(timeout: float = 0.6) -> list[dict[str, Any]]:
-    """Return page targets that Chrome has actually published through DevTools."""
     port = _loopback_port()
     if port is None:
         return []
@@ -65,8 +63,73 @@ def _wait_for_page_target(timeout: float = 5.0) -> list[dict[str, Any]]:
         time.sleep(0.1)
 
 
+def _settle_page_targets(timeout: float = 1.2, stable_polls: int = 3) -> list[dict[str, Any]]:
+    deadline = time.monotonic() + max(0.0, timeout)
+    previous_ids: tuple[str, ...] | None = None
+    stable = 0
+    latest: list[dict[str, Any]] = []
+    while True:
+        latest = _page_targets()
+        current_ids = tuple(sorted(str(row.get("id") or "") for row in latest))
+        if latest and current_ids == previous_ids:
+            stable += 1
+        else:
+            stable = 0
+            previous_ids = current_ids
+        if latest and stable >= max(1, stable_polls):
+            return latest
+        if time.monotonic() >= deadline:
+            return latest
+        time.sleep(0.1)
+
+
+def _close_page_target(target_id: str, timeout: float = 1.0) -> bool:
+    port = _loopback_port()
+    if port is None or not target_id:
+        return False
+    encoded = urllib.parse.quote(str(target_id), safe="")
+    try:
+        with urllib.request.urlopen(
+            f"http://127.0.0.1:{port}/json/close/{encoded}",
+            timeout=timeout,
+        ) as response:
+            return response.status == 200
+    except Exception:
+        return False
+
+
+def _dedupe_startup_blank_targets(targets: list[dict[str, Any]]) -> tuple[list[dict[str, Any]], int]:
+    blanks = [
+        row for row in targets
+        if str(row.get("url") or "").strip().lower() == "about:blank"
+        and str(row.get("id") or "").strip()
+    ]
+    if len(blanks) <= 1:
+        return targets, 0
+
+    keep_id = str(blanks[0].get("id") or "")
+    closed = 0
+    for row in blanks[1:]:
+        target_id = str(row.get("id") or "")
+        if target_id and target_id != keep_id and _close_page_target(target_id):
+            closed += 1
+
+    if closed:
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline:
+            remaining = _page_targets()
+            remaining_blanks = [
+                row for row in remaining
+                if str(row.get("url") or "").strip().lower() == "about:blank"
+            ]
+            if len(remaining_blanks) <= 1:
+                return remaining, closed
+            time.sleep(0.1)
+
+    return _page_targets(), closed
+
+
 def ensure_managed_chrome() -> str:
-    """Ensure one managed Chrome/CDP session exists instead of opening another about:blank window."""
     existing = _probe_cdp()
     if existing is not None:
         return json.dumps(
@@ -103,10 +166,10 @@ def ensure_managed_chrome() -> str:
 
 
 def ensure_chrome_connection() -> str:
-    """Connect only after Chrome has published its startup page, avoiding duplicate about:blank tabs."""
     endpoint = _cdp_url()
     existed_before = _probe_cdp() is not None
     startup: dict[str, Any] = {}
+    duplicates_closed = 0
 
     if not existed_before:
         startup = json.loads(ensure_managed_chrome())
@@ -118,6 +181,21 @@ def ensure_chrome_connection() -> str:
             "refusing to create a second fallback about:blank page."
         )
 
+    if not existed_before:
+        settled = _settle_page_targets(timeout=1.2, stable_polls=3)
+        if settled:
+            targets = settled
+        targets, duplicates_closed = _dedupe_startup_blank_targets(targets)
+        startup_blanks = [
+            row for row in targets
+            if str(row.get("url") or "").strip().lower() == "about:blank"
+        ]
+        if len(startup_blanks) > 1:
+            raise RuntimeError(
+                "Managed Chrome still exposed multiple about:blank startup targets after deduplication; "
+                "refusing to attach until the session is unambiguous."
+            )
+
     session_type = "managed" if not existed_before else "real"
     result = _runtime().call("connect", endpoint=endpoint, session_type=session_type)
     result.update(
@@ -126,6 +204,7 @@ def ensure_chrome_connection() -> str:
             "startup_guard": True,
             "page_target_ready": bool(targets),
             "startup_target_count": len(targets),
+            "startup_blank_duplicates_closed": duplicates_closed,
         }
     )
     if startup:
@@ -148,7 +227,7 @@ def register_chrome_session_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "chrome_connect_cdp",
-            "Safely connect JARVIS to Chrome CDP. If managed Chrome must start, wait for its real startup page target before attaching so Playwright cannot create a duplicate about:blank tab.",
+            "Safely connect JARVIS to Chrome CDP. Fresh managed startup waits for page targets to stabilize, removes duplicate about:blank startup targets, and only then attaches Playwright.",
             Risk.MEDIUM,
             {"type": "object", "properties": {}, "additionalProperties": False},
             ensure_chrome_connection,
