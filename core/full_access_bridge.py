@@ -61,6 +61,7 @@ def run_agent_mission(agent, goal: str) -> dict[str, Any]:
         return {"ok": False, "error": "Mission cannot be empty"}
 
     from .desktop_control_tools import release_held_inputs
+    from .full_access_completion import read_only_observation_verified
 
     # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
     # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
@@ -80,6 +81,7 @@ def run_agent_mission(agent, goal: str) -> dict[str, Any]:
     recoveries = int(summary.get("recoveries", 0) or 0)
     verifications = int(summary.get("verifications", 0) or 0)
     verified = bool(summary.get("verified", False))
+    observation_verified = read_only_observation_verified(goal, current)
 
     if current is not None and current.plan:
         incomplete = [step.id for step in current.plan if step.status not in {"completed", "skipped"}]
@@ -87,12 +89,13 @@ def run_agent_mission(agent, goal: str) -> dict[str, Any]:
         incomplete = []
 
     requires_user_action = status == "waiting_user"
-    mission_completed = status == "completed" and tools_used > 0 and not incomplete and verified
+    completion_evidence = verified or observation_verified
+    mission_completed = status == "completed" and tools_used > 0 and not incomplete and completion_evidence
     ok = requires_user_action or mission_completed
 
     if status == "completed" and not mission_completed:
         status = "incomplete"
-        if not verified:
+        if not completion_evidence:
             result = f"{result} Verification is required before Full Access reports mission completion."
 
     return {
@@ -106,6 +109,7 @@ def run_agent_mission(agent, goal: str) -> dict[str, Any]:
         "recoveries": recoveries,
         "verifications": verifications,
         "verified": verified,
+        "read_only_observation_verified": observation_verified,
         "incomplete_steps": incomplete,
         "access_mode": "full",
         "requires_user_action": requires_user_action,
