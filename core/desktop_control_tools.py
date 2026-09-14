@@ -79,8 +79,10 @@ def desktop_mouse_down(button: str = "left") -> str:
     import pyautogui
 
     chosen = _button(button)
-    pyautogui.mouseDown(button=chosen)
+    from .process_control import check_cancelled
+    check_cancelled()
     _HELD_MOUSE_BUTTONS.add(chosen)
+    pyautogui.mouseDown(button=chosen)
     return f"Mouse {chosen} button down"
 
 
@@ -99,8 +101,12 @@ def desktop_key_down(key: str) -> str:
     import pyautogui
 
     value = _key(key)
-    pyautogui.keyDown(value)
+    from .process_control import check_cancelled
+    check_cancelled()
+    if value not in pyautogui.KEYBOARD_KEYS:
+        raise ValueError("Unsupported keyboard key")
     _HELD_KEYS.add(value)
+    pyautogui.keyDown(value)
     return f"Key down: {value}"
 
 
@@ -122,7 +128,9 @@ def release_held_inputs() -> None:
         return
     try:
         import pyautogui
-
+        previous_failsafe, previous_pause = pyautogui.FAILSAFE, pyautogui.PAUSE
+        # Releasing synthetic inputs must work even when the pointer is in a fail-safe corner.
+        pyautogui.FAILSAFE, pyautogui.PAUSE = False, 0
         for key in list(_HELD_KEYS):
             try:
                 pyautogui.keyUp(key)
@@ -134,6 +142,8 @@ def release_held_inputs() -> None:
             except Exception:
                 pass
     finally:
+        if "previous_failsafe" in locals():
+            pyautogui.FAILSAFE, pyautogui.PAUSE = previous_failsafe, previous_pause
         _HELD_KEYS.clear()
         _HELD_MOUSE_BUTTONS.clear()
 

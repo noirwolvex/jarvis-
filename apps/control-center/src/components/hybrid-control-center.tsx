@@ -9,6 +9,7 @@ export function HybridControlCenter() {
   const [mode, setMode] = useState<AccessMode>("standard");
   const [busy, setBusy] = useState(false);
   const [message, setMessage] = useState("");
+  const [allowShell, setAllowShell] = useState(false);
 
   const refresh = useCallback(async () => {
     try {
@@ -29,7 +30,8 @@ export function HybridControlCenter() {
     if (next === "full") {
       const confirmed = window.confirm(
         "Enable Full Access for this local JARVIS session?\n\n" +
-        "JARVIS will be able to perform general desktop actions. High-risk actions remain separately gated."
+        "JARVIS will be able to perform general desktop actions. Screen images may be sent to your configured model provider. Ctrl+Alt+Escape stops the worker.\n\n" +
+        (allowShell ? "Terminal execution is also enabled. Commands run as your Windows account and can modify files and system settings accessible to it." : "Terminal execution remains disabled. Other high-risk actions remain separately gated.")
       );
       if (!confirmed) return;
     }
@@ -39,7 +41,7 @@ export function HybridControlCenter() {
       const response = await fetch("/api/full-access", {
         method: "POST",
         headers: { "Content-Type": "application/json", "X-Jarvis-Control": "hybrid" },
-        body: JSON.stringify({ mode: next, ...(next === "full" ? { confirmation: "ENABLE_FULL_ACCESS" } : {}) }),
+        body: JSON.stringify({ mode: next, ...(next === "full" ? { allowShell, confirmation: allowShell ? "ENABLE_FULL_ACCESS_AND_SHELL" : "ENABLE_FULL_ACCESS" } : {}) }),
         signal: AbortSignal.timeout(6000),
       });
       const body = await response.json();
@@ -51,6 +53,17 @@ export function HybridControlCenter() {
     } finally {
       setBusy(false);
     }
+  };
+
+  const stop = async () => {
+    try {
+      const response = await fetch("/api/control", { method: "POST",
+        headers: { "Content-Type": "application/json", "X-Jarvis-Control": "hybrid" },
+        body: JSON.stringify({ action: "stop" }), signal: AbortSignal.timeout(4000) });
+      if (!response.ok) throw new Error("Stop request failed; use Ctrl+Alt+Escape");
+      setMode("standard");
+      setMessage("Emergency stop latched. Reset it before enabling Full Access again.");
+    } catch (error) { setMessage(error instanceof Error ? error.message : "Use Ctrl+Alt+Escape to stop"); }
   };
 
   return <>
@@ -70,6 +83,9 @@ export function HybridControlCenter() {
       <p style={{ fontSize: 12, lineHeight: 1.45, opacity: .75, margin: "10px 0" }}>
         {mode === "full" ? "General desktop missions are enabled for this local session." : "Standard hybrid restrictions are active."}
       </p>
+      {mode === "standard" && <label style={{ display: "block", fontSize: 12, marginBottom: 10 }}>
+        <input type="checkbox" checked={allowShell} onChange={event => setAllowShell(event.target.checked)} /> Allow terminal commands when enabling
+      </label>}
       <button
         type="button"
         disabled={busy}
@@ -78,6 +94,7 @@ export function HybridControlCenter() {
       >
         {busy ? "Updating…" : mode === "full" ? "Disable Full Access" : "Enable Full Access"}
       </button>
+      <button type="button" onClick={() => void stop()} style={{ width: "100%", marginTop: 8, background: "#b42335", color: "white", border: 0, borderRadius: 9, padding: 10, cursor: "pointer", fontWeight: 700 }}>Emergency stop · Ctrl+Alt+Esc</button>
       {message && <div style={{ fontSize: 11, marginTop: 8, opacity: .8 }}>{message}</div>}
     </div>
     <ControlCenter />

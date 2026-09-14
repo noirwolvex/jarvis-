@@ -23,11 +23,9 @@ def _workspace_path(path: str | None = None) -> Path:
 
 def _run_git(args: list[str], cwd: str | None = None, timeout: int = 30) -> str:
     root = _workspace_path(cwd)
-    completed = subprocess.run(
-        ["git", *args], cwd=root, capture_output=True, text=True, timeout=timeout, check=False
-    )
-    output = (completed.stdout or "") + (completed.stderr or "")
-    return f"cwd={root}\nexit_code={completed.returncode}\n{output[-16000:]}"
+    from .process_control import run_command
+    result = run_command(["git", *args], cwd=root, timeout=timeout)
+    return result + f"\ncwd={root}"
 
 
 def git_status(path: str = ".") -> str:

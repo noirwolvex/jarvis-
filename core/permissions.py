@@ -86,16 +86,24 @@ class PermissionEngine:
     def _category_allowed(self, tool_name: str) -> tuple[bool, str]:
         if tool_name in self.deny_tools:
             return False, f"Tool {tool_name} is explicitly denied by policy."
+        if self.access_mode == "restricted" and (
+            tool_name.startswith("desktop_") and tool_name != "desktop_cursor"
+            or tool_name in {"open_application", "open_application_and_type", "launch_installed_app", "focus_window", "focus_window_advanced", "close_window", "vscode_open"}
+        ):
+            return False, "Desktop interaction is disabled in restricted mode."
         if tool_name == "run_powershell" and not self.allow_shell:
             return False, "PowerShell execution is disabled by policy."
-        if tool_name.startswith("git_") and tool_name in {"git_add", "git_commit", "git_push", "git_checkout", "git_pull", "git_merge", "git_rebase"}:
+        if tool_name.startswith("git_") and tool_name in {"git_add", "git_commit", "git_push", "git_checkout", "git_pull", "git_merge", "git_rebase", "git_branch"}:
             if not self.allow_git_write:
                 return False, "Git write operations are disabled by policy."
-        if tool_name in {"write_file", "notepad_save_as"} and not self.allow_filesystem_write:
+        if tool_name in {"write_file", "notepad_save_as", "file_copy", "directory_create"} and not self.allow_filesystem_write:
             return False, "Filesystem writes are disabled by policy."
-        if tool_name in {"browser_click", "browser_type", "browser_press"} and not self.allow_browser_write:
+        if tool_name.startswith(("browser_", "chrome_", "dialog_")) and tool_name not in {
+            "browser_read_page", "browser_links", "browser_page_state", "browser_check_challenge", "browser_screenshot", "browser_wait",
+            "chrome_tabs", "chrome_current_tab", "chrome_is_connected", "dialog_inspect",
+        } and not self.allow_browser_write:
             return False, "Browser write interactions are disabled by policy."
-        if tool_name in {"open_url", "browser_navigate", "chrome_connect_cdp", "chrome_start_managed"} and not self.allow_network:
+        if tool_name in {"open_url", "google_search", "browser_navigate", "chrome_new_tab", "chrome_connect_cdp", "chrome_start_managed"} and not self.allow_network:
             return False, "Network/browser access is disabled by policy."
         return True, "allowed"
 

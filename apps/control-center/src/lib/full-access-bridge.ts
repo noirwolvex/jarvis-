@@ -1,4 +1,4 @@
-import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -14,6 +14,7 @@ export type FullAccessMissionResult = {
   recoveries: number;
   verifications: number;
   verified: boolean;
+  read_only_observation_verified?: boolean;
   incomplete_steps: string[];
   access_mode: "full";
   requires_user_action: boolean;
@@ -34,6 +35,7 @@ type PendingRequest = {
   reject: (error: Error) => void;
   timer: ReturnType<typeof setTimeout>;
   abortCleanup?: () => void;
+  onProgress?: (kind: string, message: string) => void;
 };
 
 type WorkerState = {
@@ -41,11 +43,13 @@ type WorkerState = {
   buffer: string;
   stderr: string;
   pending: Map<string, PendingRequest>;
+  stopping?: boolean;
+  onEmergency?: () => void;
 };
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-const WORKER_TIMEOUT_MS = 180_000;
+const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
 function repoRoot(env: NodeJS.ProcessEnv = process.env): string {
@@ -68,18 +72,6 @@ function validateMissionResult(parsed: FullAccessMissionResult | { ok: false; er
   return parsed;
 }
 
-function parseBridgeOutput(stdout: string): FullAccessMissionResult | { ok: false; error: string } {
-  const line = stdout.split(/\r?\n/).map(value => value.trim()).filter(Boolean).at(-1);
-  if (!line) throw new Error("Full Access bridge returned no result");
-  const parsed: unknown = JSON.parse(line);
-  if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("Full Access bridge returned invalid JSON");
-  return parsed as FullAccessMissionResult | { ok: false; error: string };
-}
-
-function workerEnabled(env: NodeJS.ProcessEnv = process.env) {
-  return env.JARVIS_FULL_ACCESS_PERSISTENT_WORKER?.trim().toLowerCase() !== "false";
-}
-
 function rejectPending(state: WorkerState, message: string) {
   for (const request of state.pending.values()) {
     clearTimeout(request.timer);
@@ -87,6 +79,17 @@ function rejectPending(state: WorkerState, message: string) {
     request.reject(new Error(message));
   }
   state.pending.clear();
+}
+
+function stopWorker(state: WorkerState, reason: string) {
+  if (state.stopping) return;
+  state.stopping = true;
+  // Stop is consumed on the worker's stdin thread, independently of the model/tool thread.
+  state.child.stdin.write(JSON.stringify({ protocol: WORKER_PROTOCOL, action: "stop" }) + "\n", () => {});
+  rejectPending(state, reason);
+  const fallback = setTimeout(() => state.child.kill(), 300);
+  fallback.unref();
+  state.child.once("exit", () => clearTimeout(fallback));
 }
 
 function handleWorkerLine(state: WorkerState, raw: string) {
@@ -98,6 +101,19 @@ function handleWorkerLine(state: WorkerState, raw: string) {
   if (!message || typeof message !== "object" || Array.isArray(message)) return;
   const value = message as Record<string, unknown>;
   if (value.type === "ready") return;
+  if (value.type === "stopped") {
+    state.onEmergency?.();
+    stopWorker(state, "Full Access emergency stop activated");
+    return;
+  }
+  if (value.type === "progress" && typeof value.id === "string" && typeof value.kind === "string" && typeof value.message === "string") {
+    state.pending.get(value.id)?.onProgress?.(value.kind, value.message.slice(0, 2000));
+    return;
+  }
+  if (value.type === "observation" && typeof value.id === "string") {
+    state.pending.get(value.id)?.onProgress?.("observation", JSON.stringify({ frame: value.frame, preview: value.preview }));
+    return;
+  }
   if (value.type !== "result" || typeof value.id !== "string") return;
 
   const pending = state.pending.get(value.id);
@@ -121,15 +137,17 @@ function handleWorkerLine(state: WorkerState, raw: string) {
 
 function startWorker(): WorkerState {
   const current = globalState.jarvisFullAccessWorkerV1;
+  if (current?.stopping && current.child.exitCode === null) throw new Error("Full Access worker is still stopping");
   if (current && !current.child.killed && current.child.exitCode === null) return current;
 
   const root = repoRoot();
   const python = process.env.JARVIS_PYTHON_EXECUTABLE?.trim() || "python";
-  const child = spawn(python, ["-u", "-m", "core.full_access_worker"], {
+  // Python and the checkout are runtime dependencies, not files to bundle into Next output.
+  const child = spawn(/* turbopackIgnore: true */ python, ["-u", "-m", "core.full_access_worker"], {
     cwd: root,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, JARVIS_ACCESS_MODE: "full", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "false" },
+    env: { ...process.env, JARVIS_ACCESS_MODE: "standard", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "true" },
   });
   const state: WorkerState = { child, buffer: "", stderr: "", pending: new Map() };
   globalState.jarvisFullAccessWorkerV1 = state;
@@ -138,8 +156,7 @@ function startWorker(): WorkerState {
   child.stdout.on("data", (chunk: string) => {
     state.buffer += chunk;
     if (state.buffer.length > MAX_WORKER_BUFFER) {
-      child.kill();
-      rejectPending(state, "Full Access worker output exceeded its safety limit");
+      stopWorker(state, "Full Access worker output exceeded its safety limit");
       return;
     }
     while (true) {
@@ -166,27 +183,24 @@ function startWorker(): WorkerState {
   return state;
 }
 
-function runPersistent(title: string, signal?: AbortSignal): Promise<FullAccessMissionResult> {
+function runPersistent(title: string, signal?: AbortSignal, onProgress?: (kind: string, message: string) => void, allowShell = false): Promise<FullAccessMissionResult> {
+  if (signal?.aborted) return Promise.reject(new Error("Full Access mission aborted"));
   const state = startWorker();
+  if (state.pending.size) return Promise.reject(new Error("A Full Access mission is already running"));
+  state.onEmergency = () => onProgress?.("emergency_stop", "Worker emergency stop activated");
   const id = randomUUID();
   return new Promise<FullAccessMissionResult>((resolvePromise, rejectPromise) => {
     const timer = setTimeout(() => {
       const pending = state.pending.get(id);
       if (!pending) return;
-      state.pending.delete(id);
-      pending.abortCleanup?.();
-      state.child.kill();
-      rejectPromise(new Error("Full Access worker mission timed out"));
+      stopWorker(state, "Full Access worker mission timed out");
     }, WORKER_TIMEOUT_MS);
 
-    const pending: PendingRequest = { resolve: resolvePromise, reject: rejectPromise, timer };
+    const pending: PendingRequest = { resolve: resolvePromise, reject: rejectPromise, timer, onProgress };
     if (signal) {
       const onAbort = () => {
         if (!state.pending.has(id)) return;
-        state.pending.delete(id);
-        clearTimeout(timer);
-        state.child.kill();
-        rejectPromise(new Error("Full Access mission aborted"));
+        stopWorker(state, "Full Access mission aborted");
       };
       if (signal.aborted) {
         clearTimeout(timer);
@@ -198,7 +212,7 @@ function runPersistent(title: string, signal?: AbortSignal): Promise<FullAccessM
       pending.abortCleanup = () => signal.removeEventListener("abort", onAbort);
     }
     state.pending.set(id, pending);
-    state.child.stdin.write(JSON.stringify({ protocol: WORKER_PROTOCOL, id, action: "run", title }) + "\n", error => {
+    state.child.stdin.write(JSON.stringify({ protocol: WORKER_PROTOCOL, id, action: "run", title, allow_shell: allowShell }) + "\n", error => {
       if (!error) return;
       const active = state.pending.get(id);
       if (!active) return;
@@ -210,36 +224,9 @@ function runPersistent(title: string, signal?: AbortSignal): Promise<FullAccessM
   });
 }
 
-function runOneShot(title: string, signal?: AbortSignal): Promise<FullAccessMissionResult> {
-  const root = repoRoot();
-  const python = process.env.JARVIS_PYTHON_EXECUTABLE?.trim() || "python";
-  return new Promise<FullAccessMissionResult>((resolvePromise, rejectPromise) => {
-    execFile(
-      python,
-      ["-m", "core.full_access_bridge", "run", title],
-      {
-        cwd: root,
-        windowsHide: true,
-        timeout: WORKER_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-        signal,
-        env: { ...process.env, JARVIS_ACCESS_MODE: "full", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "false" },
-      },
-      (error, stdout) => {
-        try {
-          const result = validateMissionResult(parseBridgeOutput(stdout));
-          if (error) throw new Error(error.message || "Full Access bridge execution failed");
-          resolvePromise(result);
-        } catch (parseError) {
-          rejectPromise(parseError instanceof Error ? parseError : new Error("Invalid Full Access bridge response"));
-        }
-      },
-    );
-  });
-}
-
-export async function runFullAccessMission(title: string, signal?: AbortSignal): Promise<FullAccessMissionResult> {
+export async function runFullAccessMission(title: string, signal?: AbortSignal, onProgress?: (kind: string, message: string) => void, allowShell = false): Promise<FullAccessMissionResult> {
   if (process.platform !== "win32") throw new Error("JARVIS Full Access is available on Windows only");
-  if (!title.trim()) throw new Error("Full Access mission cannot be empty");
-  return workerEnabled() ? runPersistent(title.trim(), signal) : runOneShot(title.trim(), signal);
+  if (!title.trim() || title.length > 8000 || title.includes("\0")) throw new Error("Full Access mission requires 1–8000 safe characters");
+  // The persistent protocol is required for independent stop handling and progress events.
+  return runPersistent(title.trim(), signal, onProgress, allowShell);
 }

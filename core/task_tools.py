@@ -56,11 +56,34 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         return json.dumps(orchestrator.summary(), ensure_ascii=False)
 
     def task_verify(claim: str, verified: bool, evidence: str = "") -> str:
+        current = orchestrator.current
+        if current is None:
+            raise ValueError("No active task")
+        observed = [trace for index, trace in enumerate(current.traces)
+                    if trace.success and not trace.name.startswith("task_")
+                    and (index > current.last_mutation_index
+                         or index == current.last_mutation_index and trace.result.startswith("VERIFIED:") and not trace.name.startswith("desktop_"))]
+        if not observed or not evidence.strip():
+            raise ValueError("Verification requires successful observation after the action and nonempty evidence")
         ok = orchestrator.verify(claim, bool(verified), evidence)
         return json.dumps({"verified": ok, "claim": claim, "evidence": evidence[:12000]}, ensure_ascii=False)
 
     def task_status() -> str:
         return json.dumps(orchestrator.summary(), ensure_ascii=False)
+
+    def task_recall(task_id: str = "latest") -> str:
+        candidates = sorted(orchestrator.trace_dir.glob("task-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if task_id == "latest":
+            candidates = [path for path in candidates if not orchestrator.current or path.stem != orchestrator.current.task_id]
+            if not candidates:
+                return json.dumps({"status": "no_previous_checkpoint"})
+            task_id = candidates[0].stem
+        previous = TaskOrchestrator(str(orchestrator.trace_dir))
+        restored = previous.restore(task_id)
+        from dataclasses import asdict
+        return json.dumps({"summary": previous.summary(), "plan": [asdict(step) for step in restored.plan],
+                           "uncertain_action": restored.in_flight, "recent_evidence": [asdict(trace) for trace in restored.traces[-8:]],
+                           "instruction": "Re-observe current state before continuing. An uncertain action must never be automatically replayed."}, ensure_ascii=False)
 
     registry.register(ToolSpec(
         "task_plan",
@@ -123,3 +146,5 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         {"type": "object", "properties": {}, "additionalProperties": False},
         task_status,
     ))
+    registry.register(ToolSpec("task_recall", "Read a previous task checkpoint when the user asks to resume or continue. Returns plan, progress, recent evidence, and uncertain actions without executing them.", Risk.SAFE,
+        {"type": "object", "properties": {"task_id": {"type": "string", "default": "latest"}}, "additionalProperties": False}, task_recall))

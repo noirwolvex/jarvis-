@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import time
+import uuid
 from pathlib import Path
 from typing import Any
 
@@ -40,15 +41,38 @@ def _virtual_origin() -> tuple[int, int]:
     return int(user32.GetSystemMetrics(76)), int(user32.GetSystemMetrics(77))
 
 
-def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76) -> str:
+def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76, settle_ms: int = 300) -> str:
     """Capture all visible monitors into one bounded JPEG for model visual understanding."""
     if os.name != "nt":
         raise RuntimeError("Visual screen observation is supported on Windows only")
 
-    from PIL import ImageGrab
+    from PIL import ImageGrab, ImageChops, ImageStat
+    from .desktop_observation import foreground_identity, remember_signature
 
+    # Keep capture and input in physical pixels across monitors with different DPI.
+    try:
+        ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+    except (AttributeError, OSError):
+        pass
+    foreground = foreground_identity()
+    capture_started = time.monotonic()
     image = ImageGrab.grab(all_screens=True)
+    stable = False
+    deadline = capture_started + max(60, min(settle_ms, 1000)) / 1000
+    previous = image.resize((96, 54)).convert("RGB")
+    while time.monotonic() < deadline:
+        time.sleep(0.06)
+        image = ImageGrab.grab(all_screens=True)
+        current = image.resize((96, 54)).convert("RGB")
+        difference = sum(ImageStat.Stat(ImageChops.difference(previous, current)).mean) / 3
+        if difference <= 1.5:
+            stable = True
+            break
+        previous = current
+    if foreground != foreground_identity():
+        raise RuntimeError("Foreground changed during capture; observe again")
     source_width, source_height = image.size
+    source_signature = image.resize((192, 108)).convert("RGB")
     origin_x, origin_y = _virtual_origin()
     target_width, target_height = _bounded_size(source_width, source_height, max_dimension)
     if (target_width, target_height) != (source_width, source_height):
@@ -58,7 +82,7 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76) -> st
 
     out_dir = _workspace() / ".jarvis" / "vision"
     out_dir.mkdir(parents=True, exist_ok=True)
-    path = out_dir / f"screen-{int(time.time() * 1000)}.jpg"
+    path = out_dir / f"screen-{uuid.uuid4().hex}.jpg"
     bounded_quality = max(45, min(int(quality), 88))
     image.save(path, format="JPEG", quality=bounded_quality, optimize=True)
     size = path.stat().st_size
@@ -69,6 +93,10 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76) -> st
             raise RuntimeError(f"Visual observation size is outside the allowed range: {size} bytes")
 
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    remember_signature(digest, source_signature)
+    # Bounded disk retention, including long missions. Never follow arbitrary file names.
+    for old in sorted(out_dir.glob("screen-*.jpg"), key=lambda item: item.stat().st_mtime, reverse=True)[8:]:
+        old.unlink(missing_ok=True)
     payload = {
         "path": str(path),
         "mime": "image/jpeg",
@@ -83,6 +111,10 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76) -> st
         "bytes": size,
         "sha256": digest,
         "captured_at_ms": int(time.time() * 1000),
+        "foreground_hwnd": foreground,
+        "stable": stable,
+        "scene_bound": True,
+        "capture_ms": round((time.monotonic() - capture_started) * 1000, 2),
     }
     return "VERIFIED: " + json.dumps(payload, ensure_ascii=False)
 
@@ -114,6 +146,8 @@ def vision_followup_message(result: str) -> dict[str, Any] | None:
         return None
     raw = path.read_bytes()
     if not raw or len(raw) > _MAX_FILE_BYTES:
+        return None
+    if payload.get("sha256") and hashlib.sha256(raw).hexdigest() != payload["sha256"]:
         return None
     encoded = base64.b64encode(raw).decode("ascii")
 
@@ -169,6 +203,7 @@ def register_vision_tools(registry: ToolRegistry) -> None:
                 "properties": {
                     "max_dimension": {"type": "integer", "minimum": 320, "maximum": 1920},
                     "quality": {"type": "integer", "minimum": 45, "maximum": 88},
+                    "settle_ms": {"type": "integer", "minimum": 60, "maximum": 1000},
                 },
                 "additionalProperties": False,
             },

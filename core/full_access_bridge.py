@@ -23,21 +23,22 @@ def build_full_access_agent():
     from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
     from .vision_tools import register_vision_tools
-
-    os.environ["JARVIS_ACCESS_MODE"] = "full"
-    os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
+    from .filesystem_tools import register_filesystem_tools
 
     # The cache becomes materially useful when build_full_access_agent lives in the
     # persistent worker: friendly app resolution is reused without weakening path checks.
     enable_app_discovery_cache()
 
     agent = FullAccessJarvisAgent()
+    agent.tools.permissions.full_access_require_approval = True
+    agent.tools.permissions.set_access_mode("full")
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
     register_browser_fast_tools(agent.tools)
     register_desktop_control_tools(agent.tools)
     register_vision_tools(agent.tools)
+    register_filesystem_tools(agent.tools)
     # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
     # to a second unmanaged browser after the guarded CDP tools are installed.
     register_full_access_browser_routing(agent.tools)
@@ -49,14 +50,14 @@ def build_full_access_agent():
         if spec is None:
             return False
         if tool_name == "run_powershell":
-            return False
+            return bool(getattr(agent, "allow_shell", False))
         return spec.risk <= Risk.MEDIUM
 
     agent.approval = approve
     return agent
 
 
-def run_agent_mission(agent, goal: str) -> dict[str, Any]:
+def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shell: bool = False) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
 
@@ -66,8 +67,12 @@ def run_agent_mission(agent, goal: str) -> dict[str, Any]:
     # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
     # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
     agent.reset()
+    agent.cancel_event = cancel_event
+    agent.allow_shell = allow_shell
+    from .process_control import set_cancellation
+    set_cancellation(agent._is_stopped)
     try:
-        result = agent.run(goal)
+        result = agent.run(goal, emit=emit)
     finally:
         # Synthetic held keys/buttons are useful inside a multi-step gesture, but must never
         # survive mission completion, failure, CAPTCHA pause, or model/tool exceptions.
