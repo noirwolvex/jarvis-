@@ -10,24 +10,40 @@ def _emit(payload: dict[str, Any]) -> None:
     print(json.dumps(payload, ensure_ascii=False))
 
 
-def run_mission(goal: str) -> dict[str, Any]:
-    if not goal.strip():
-        return {"ok": False, "error": "Mission cannot be empty"}
-
-    # Import first so .env loading completes, then configure this dedicated child
-    # process for the explicit Full Access desktop profile.
-    from .agent import JarvisAgent
+def build_full_access_agent():
+    """Build one fully routed Full Access agent. Persistent workers may safely reuse it between missions."""
+    # Import first so .env loading completes, then configure this dedicated local profile.
+    from .app_discovery_cache import enable_app_discovery_cache
+    from .app_tools import register_app_tools
+    from .browser_fast_tools import register_browser_fast_tools
+    from .browser_tab_tools import register_browser_tab_tools
+    from .chrome_session_tools import register_chrome_session_tools
+    from .desktop_control_tools import register_desktop_control_tools
+    from .full_access_agent import FullAccessJarvisAgent
+    from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
+    from .vision_tools import register_vision_tools
 
     os.environ["JARVIS_ACCESS_MODE"] = "full"
     os.environ["JARVIS_FULL_ACCESS_REQUIRE_APPROVAL"] = "true"
 
-    agent = JarvisAgent()
+    # The cache becomes materially useful when build_full_access_agent lives in the
+    # persistent worker: friendly app resolution is reused without weakening path checks.
+    enable_app_discovery_cache()
 
-    # Desktop/browser/workspace mutations are approved by the explicit session-level
-    # Full Access opt-in. HIGH/CRITICAL tools still require a separate future approval
-    # surface and therefore fail closed here. This keeps raw shell/destructive actions
-    # out of unattended execution while preserving broad interactive device control.
+    agent = FullAccessJarvisAgent()
+    register_app_tools(agent.tools)
+    register_browser_tab_tools(agent.tools)
+    register_chrome_session_tools(agent.tools)
+    register_browser_fast_tools(agent.tools)
+    register_desktop_control_tools(agent.tools)
+    register_vision_tools(agent.tools)
+    # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
+    # to a second unmanaged browser after the guarded CDP tools are installed.
+    register_full_access_browser_routing(agent.tools)
+
+    # Desktop/browser/workspace mutations are approved by explicit session-level Full Access.
+    # HIGH/CRITICAL tools still require a separate approval surface and fail closed here.
     def approve(tool_name: str, _arguments: dict[str, Any]) -> bool:
         spec = agent.tools._tools.get(tool_name)
         if spec is None:
@@ -37,7 +53,26 @@ def run_mission(goal: str) -> dict[str, Any]:
         return spec.risk <= Risk.MEDIUM
 
     agent.approval = approve
-    result = agent.run(goal)
+    return agent
+
+
+def run_agent_mission(agent, goal: str) -> dict[str, Any]:
+    if not goal.strip():
+        return {"ok": False, "error": "Mission cannot be empty"}
+
+    from .desktop_control_tools import release_held_inputs
+    from .full_access_completion import read_only_observation_verified
+
+    # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
+    # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
+    agent.reset()
+    try:
+        result = agent.run(goal)
+    finally:
+        # Synthetic held keys/buttons are useful inside a multi-step gesture, but must never
+        # survive mission completion, failure, CAPTCHA pause, or model/tool exceptions.
+        release_held_inputs()
+
     summary = agent.orchestrator.summary()
     current = agent.orchestrator.current
     status = str(summary.get("status", "unknown"))
@@ -46,15 +81,22 @@ def run_mission(goal: str) -> dict[str, Any]:
     recoveries = int(summary.get("recoveries", 0) or 0)
     verifications = int(summary.get("verifications", 0) or 0)
     verified = bool(summary.get("verified", False))
+    observation_verified = read_only_observation_verified(goal, current)
 
     if current is not None and current.plan:
         incomplete = [step.id for step in current.plan if step.status not in {"completed", "skipped"}]
     else:
         incomplete = []
 
-    ok = status == "completed" and tools_used > 0 and not incomplete
-    if not ok and status == "completed" and tools_used == 0:
+    requires_user_action = status == "waiting_user"
+    completion_evidence = verified or observation_verified
+    mission_completed = status == "completed" and tools_used > 0 and not incomplete and completion_evidence
+    ok = requires_user_action or mission_completed
+
+    if status == "completed" and not mission_completed:
         status = "incomplete"
+        if not completion_evidence:
+            result = f"{result} Verification is required before Full Access reports mission completion."
 
     return {
         "ok": ok,
@@ -67,10 +109,17 @@ def run_mission(goal: str) -> dict[str, Any]:
         "recoveries": recoveries,
         "verifications": verifications,
         "verified": verified,
+        "read_only_observation_verified": observation_verified,
         "incomplete_steps": incomplete,
         "access_mode": "full",
+        "requires_user_action": requires_user_action,
+        "mission_completed": mission_completed,
         "high_risk_requires_separate_approval": True,
     }
+
+
+def run_mission(goal: str) -> dict[str, Any]:
+    return run_agent_mission(build_full_access_agent(), goal)
 
 
 def main() -> int:
