@@ -28,7 +28,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     let pki = common::Pki::new();
     pki.write(&directory);
-    let grant_ms = if native { 30 * 60 * 1000 } else { 5 * 60 * 1000 };
+    let grant_ms = if native {
+        30 * 60 * 1000
+    } else {
+        5 * 60 * 1000
+    };
     let expiry = jarvis_execution_daemon::types::now_ms() + grant_ms;
     let fingerprint = format!("{:x}", Sha256::digest(pki.client.der()));
     let config = serde_json::json!({
