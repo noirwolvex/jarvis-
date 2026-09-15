@@ -262,10 +262,13 @@ class RustDaemonClient:
             encoded = json.dumps(request, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
             if len(encoded) > _MAX_FRAME_BYTES:
                 raise ValueError("Rust daemon request exceeds frame limit")
-            sent = False
+            dispatch_may_have_started = False
             try:
+                # sendall can fail after transmitting a partial request. Mark a mutation
+                # uncertain before the first write attempt so auto mode never replays it
+                # through the Python fallback after a transport error.
+                dispatch_may_have_started = mutating
                 self._socket.sendall(struct.pack(">I", len(encoded)) + encoded)
-                sent = True
                 for _ in range(64):
                     reply = self._read_frame(self._socket)
                     if reply.get("type") != "result" or reply.get("request_id") != request_id:
@@ -282,9 +285,9 @@ class RustDaemonClient:
                 raise
             except Exception as exc:
                 self.close()
-                if mutating and sent:
+                if dispatch_may_have_started:
                     raise RustEngineExecutionError(
-                        "Rust engine connection failed after dispatch; action outcome is uncertain. Re-observe before retrying."
+                        "Rust engine connection failed after dispatch may have started; action outcome is uncertain. Re-observe before retrying."
                     ) from exc
                 raise RustEngineUnavailable(f"Rust daemon request failed: {type(exc).__name__}: {exc}") from exc
 
@@ -407,10 +410,20 @@ def _preflight() -> tuple[RustDaemonClient | None, dict[str, Any] | None]:
         if mode == "auto":
             return None, None
         raise
-    if status.get("simulation") is True or status.get("native_input") is not True:
+    if status.get("emergency_stopped") is True:
+        raise RustEngineUnavailable("Rust daemon emergency stop is latched; restart the daemon before native execution")
+    if (
+        status.get("simulation") is True
+        or status.get("native_input") is not True
+        or status.get("capture_available") is False
+    ):
         if mode == "auto":
             return None, None
-        raise RustEngineUnavailable("Rust engine requires simulation=false and native_input=true")
+        raise RustEngineUnavailable("Rust engine requires simulation=false, native_input=true, and native capture availability")
+    if not client._displays(status):
+        if mode == "auto":
+            return None, None
+        raise RustEngineUnavailable("Rust engine did not report any available displays")
     return client, status
 
 
@@ -421,8 +434,27 @@ def native_engine_status() -> str:
         return json.dumps({"mode": mode, "backend": "python", "rust_configured": False}, ensure_ascii=False)
     try:
         status = client.status()
+        displays = client._displays(status)
+        capability_ready = all(
+            int(row.get("id", -1)) in client.config.observe_capabilities
+            and int(row.get("id", -1)) in client.config.input_capabilities
+            for row in displays
+        ) if displays else False
+        input_ready = (
+            status.get("simulation") is False
+            and status.get("native_input") is True
+            and status.get("capture_available") is not False
+            and status.get("emergency_stopped") is not True
+            and capability_ready
+        )
         return json.dumps(
-            {"mode": mode, "backend": "rust", "rust_configured": True, "daemon": status},
+            {
+                "mode": mode,
+                "backend": "rust" if input_ready else ("python" if mode == "auto" else "rust"),
+                "rust_configured": True,
+                "rust_input_ready": input_ready,
+                "daemon": status,
+            },
             ensure_ascii=False,
         )
     except RustEngineUnavailable as exc:
@@ -454,7 +486,12 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
             if original is None:
                 raise RuntimeError("Python desktop click fallback is unavailable")
             return original.handler(x=x, y=y)
-        result = client.click(int(x), int(y), status)
+        try:
+            result = client.click(int(x), int(y), status)
+        except RustEngineUnavailable:
+            if native_engine_mode() == "auto" and original is not None:
+                return original.handler(x=x, y=y)
+            raise
         return "RUST_EXECUTED: native click dispatched with fresh frame + foreground binding; independent verification required. " + json.dumps(result, ensure_ascii=False)
 
     def desktop_type(text: str) -> str:
@@ -464,7 +501,12 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
             if original is None:
                 raise RuntimeError("Python desktop type fallback is unavailable")
             return original.handler(text=text)
-        result = client.type_text(text, status)
+        try:
+            result = client.type_text(text, status)
+        except RustEngineUnavailable:
+            if native_engine_mode() == "auto" and original is not None:
+                return original.handler(text=text)
+            raise
         return "RUST_EXECUTED: native text input dispatched with fresh frame + foreground binding; independent verification required. " + json.dumps(result, ensure_ascii=False)
 
     def desktop_click_button(x: int, y: int, button: str = "left", clicks: int = 1) -> str:
@@ -485,9 +527,15 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
             return original.handler(x=x, y=y, button=button, clicks=count)
         results: list[dict[str, Any]] = []
         for index in range(count):
-            # Re-observe Rust state between repeated clicks. Never replay against stale evidence.
-            current = status if index == 0 else client.status()
-            results.append(client.click(int(x), int(y), current))
+            try:
+                current = status if index == 0 else client.status()
+                results.append(client.click(int(x), int(y), current))
+            except RustEngineUnavailable as exc:
+                if index == 0 and native_engine_mode() == "auto" and original is not None:
+                    return original.handler(x=x, y=y, button=button, clicks=count)
+                raise RustEngineExecutionError(
+                    "Rust engine became unavailable after a prior click; refusing fallback replay. Re-observe before continuing."
+                ) from exc
         return "RUST_EXECUTED: native left click(s) dispatched with per-action frame binding; independent verification required. " + json.dumps(results, ensure_ascii=False)
 
     for name, handler in (("desktop_click", desktop_click), ("desktop_type", desktop_type), ("desktop_click_button", desktop_click_button)):
