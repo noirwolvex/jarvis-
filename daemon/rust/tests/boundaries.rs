@@ -142,7 +142,7 @@ fn input_capability_authorizes_click_and_keyboard_but_not_capture() {
 fn capability_max_ttl_and_duplicate_identifiers_are_rejected() {
     let now = now_ms();
     let mut cap = grant(now);
-    cap.expires_at_ms = now + 300_001;
+    cap.expires_at_ms = now + 1_800_001;
     assert!(Policy::new(true, vec![cap], now).is_err());
     assert!(Policy::new(true, vec![grant(now), grant(now)], now).is_err());
 }
