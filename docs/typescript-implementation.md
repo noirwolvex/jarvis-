@@ -14,7 +14,7 @@ rtk proxy npm.cmd run dev
 
 Open [the local control center](http://127.0.0.1:3000). On non-Windows shells, use `npm` instead of `npm.cmd`. The development command binds loopback. Production-style local preview uses `npm run build` then `npm start`.
 
-`npm run demo` runs the same mission without a browser. Its four nodes observe the virtual workspace, read a virtual brief, write a virtual report, then verify its SHA-256 evidence. The title labels the fixed recipe; it is not interpreted as arbitrary instructions. Host files, applications, and cloud models are untouched by this mission. Runtime restart clears its state.
+`npm run demo` runs the same mission without a browser. Its four nodes observe the virtual workspace, read a virtual brief, write a virtual report, then verify its SHA-256 ev  idence. The title labels the fixed recipe; it is not interpreted as arbitrary instructions. Host files, applications, and cloud models are untouched by this mission. Runtime restart clears its state.
 
 ## Ownership and executable API
 
