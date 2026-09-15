@@ -65,8 +65,27 @@ def _managed_blank_placeholder(rows: list[dict[str, Any]], current: dict[str, An
     return int(blanks[-1].get("index", -1))
 
 
+def _verified_navigation(target_url: str) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Navigate the currently selected Playwright page and reject a stale blank target."""
+    result = chrome_page_operation("goto", url=target_url)
+    if not isinstance(result, dict):
+        raise RuntimeError("Chrome navigation did not return page evidence")
+    current = json.loads(chrome_current_tab())
+    current_url = str(current.get("url") or result.get("url") or "").strip()
+    if not current_url or current_url == "about:blank":
+        raise RuntimeError(
+            f"Chrome tab stayed on about:blank instead of navigating to {target_url}"
+        )
+    parsed = urllib.parse.urlparse(current_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        raise RuntimeError(
+            f"Chrome tab navigation produced an invalid destination: {current_url or 'empty URL'}"
+        )
+    return result, current
+
+
 def chrome_new_tab(url: str = "about:blank") -> str:
-    """Create/select a real Chrome tab through the local CDP endpoint for later browser tools."""
+    """Create/select a real Chrome tab through CDP, then navigate it through the selected Playwright page."""
     target_url = _normalize_tab_url(url)
     if not chrome_is_connected():
         ensure_chrome_connection()
@@ -77,8 +96,7 @@ def chrome_new_tab(url: str = "about:blank") -> str:
 
     if reusable_index is not None and reusable_index >= 0:
         chrome_use_tab(reusable_index)
-        result = chrome_page_operation("goto", url=target_url)
-        current = json.loads(chrome_current_tab())
+        result, current = _verified_navigation(target_url)
         evidence = {
             "created": False,
             "reused_managed_placeholder": True,
@@ -89,12 +107,14 @@ def chrome_new_tab(url: str = "about:blank") -> str:
             "session_type": current.get("session_type", "managed"),
             "target_id": "",
         }
-        if not evidence["url"]:
-            raise RuntimeError("Managed Chrome placeholder was selected but navigation could not be verified")
         return "VERIFIED: " + json.dumps(evidence, ensure_ascii=False)
 
     before_indexes = {int(row.get("index", -1)) for row in before if isinstance(row, dict)}
-    target = _devtools_new_target(target_url)
+
+    # Create only an empty target through the raw DevTools endpoint. Navigation is done
+    # after Playwright has selected that exact page. This avoids Chrome races where
+    # /json/new reports success while the page still exposes about:blank to Playwright.
+    target = _devtools_new_target("about:blank")
 
     deadline = time.time() + 8.0
     selected_index: int | None = None
@@ -110,7 +130,7 @@ def chrome_new_tab(url: str = "about:blank") -> str:
         if len(rows) > len(before):
             selected_index = int(rows[-1]["index"])
             break
-        time.sleep(0.15)
+        time.sleep(0.10)
 
     if selected_index is None:
         raise RuntimeError(
@@ -118,10 +138,13 @@ def chrome_new_tab(url: str = "about:blank") -> str:
         )
 
     chrome_use_tab(selected_index)
-    current = json.loads(chrome_current_tab())
-    current_url = str(current.get("url") or "")
-    if target_url != "about:blank" and not current_url:
-        raise RuntimeError("New Chrome tab was selected but its URL could not be verified")
+
+    if target_url == "about:blank":
+        current = json.loads(chrome_current_tab())
+        current_url = str(current.get("url") or "")
+    else:
+        _result, current = _verified_navigation(target_url)
+        current_url = str(current.get("url") or "")
 
     evidence = {
         "created": True,
@@ -139,7 +162,7 @@ def chrome_new_tab(url: str = "about:blank") -> str:
 def register_browser_tab_tools(registry: ToolRegistry) -> None:
     registry.register(ToolSpec(
         "chrome_new_tab",
-        "Open and select a real Chrome tab in the connected CDP session and verify it. For browser/search requests, use chrome_connect_cdp then this tool instead of launch_installed_app/open_application for Chrome. When managed Chrome starts with its temporary about:blank placeholder, this tool reuses that placeholder instead of leaving an extra blank tab. When the user says 'open a new tab in Google', call this with url='https://www.google.com/'. After it succeeds, use browser_page_state/browser_type/browser_press on this selected tab.",
+        "Open and select a real Chrome tab in the connected CDP session and verify it. JARVIS creates a blank target first, selects that exact Playwright page, then performs and verifies any requested http(s) navigation so a stale about:blank page can never count as success. For browser/search requests, use chrome_connect_cdp then this tool instead of launch_installed_app/open_application for Chrome. When managed Chrome starts with its temporary about:blank placeholder, this tool reuses that placeholder instead of leaving an extra blank tab.",
         Risk.MEDIUM,
         {
             "type": "object",

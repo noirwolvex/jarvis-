@@ -21,43 +21,92 @@ class BrowserTabToolsTests(unittest.TestCase):
         self.assertIn("chrome_new_tab", registry._tools)
         self.assertEqual(registry._tools["chrome_new_tab"].risk.name, "MEDIUM")
 
+    @patch("core.browser_tab_tools.chrome_page_operation")
     @patch("core.browser_tab_tools.chrome_current_tab")
     @patch("core.browser_tab_tools.chrome_use_tab")
     @patch("core.browser_tab_tools._devtools_new_target")
     @patch("core.browser_tab_tools.chrome_tabs")
     @patch("core.browser_tab_tools.chrome_is_connected")
-    def test_new_google_tab_is_selected_for_followup_browser_actions(
+    def test_new_google_tab_is_created_blank_then_selected_and_navigated(
         self,
         is_connected,
         tabs,
         new_target,
         use_tab,
         current_tab,
+        page_operation,
     ) -> None:
         is_connected.return_value = True
         tabs.side_effect = [
             json.dumps([{"index": 0, "title": "Existing", "url": "https://example.com/"}]),
             json.dumps([
                 {"index": 0, "title": "Existing", "url": "https://example.com/"},
-                {"index": 1, "title": "Google", "url": "https://www.google.com/"},
+                {"index": 1, "title": "", "url": "about:blank"},
             ]),
         ]
         new_target.return_value = {"id": "target-google"}
-        current_tab.return_value = json.dumps({
-            "session_type": "managed",
-            "title": "Google",
-            "url": "https://www.google.com/",
-        })
+        current_tab.side_effect = [
+            json.dumps({
+                "session_type": "real",
+                "title": "Existing",
+                "url": "https://example.com/",
+            }),
+            json.dumps({
+                "session_type": "real",
+                "title": "Google",
+                "url": "https://www.google.com/",
+            }),
+        ]
+        page_operation.return_value = {"title": "Google", "url": "https://www.google.com/"}
 
         result = chrome_new_tab("https://www.google.com/")
 
+        new_target.assert_called_once_with("about:blank")
         use_tab.assert_called_once_with(1)
+        page_operation.assert_called_once_with("goto", url="https://www.google.com/")
         self.assertTrue(result.startswith("VERIFIED:"))
         payload = json.loads(result.removeprefix("VERIFIED: "))
         self.assertEqual(payload["selected"], 1)
         self.assertEqual(payload["url"], "https://www.google.com/")
         self.assertTrue(payload["created"])
         self.assertFalse(payload["reused_managed_placeholder"])
+
+    @patch("core.browser_tab_tools.chrome_page_operation")
+    @patch("core.browser_tab_tools.chrome_current_tab")
+    @patch("core.browser_tab_tools.chrome_use_tab")
+    @patch("core.browser_tab_tools._devtools_new_target")
+    @patch("core.browser_tab_tools.chrome_tabs")
+    @patch("core.browser_tab_tools.chrome_is_connected")
+    def test_http_tab_never_reports_success_if_selected_page_stays_blank(
+        self,
+        is_connected,
+        tabs,
+        new_target,
+        use_tab,
+        current_tab,
+        page_operation,
+    ) -> None:
+        is_connected.return_value = True
+        tabs.side_effect = [
+            json.dumps([{"index": 0, "title": "Existing", "url": "https://example.com/"}]),
+            json.dumps([
+                {"index": 0, "title": "Existing", "url": "https://example.com/"},
+                {"index": 1, "title": "", "url": "about:blank"},
+            ]),
+        ]
+        new_target.return_value = {"id": "target-google"}
+        current_tab.side_effect = [
+            json.dumps({"session_type": "real", "title": "Existing", "url": "https://example.com/"}),
+            json.dumps({"session_type": "real", "title": "", "url": "about:blank"}),
+        ]
+        page_operation.return_value = {"title": "", "url": "about:blank"}
+
+        with self.assertRaisesRegex(RuntimeError, "stayed on about:blank"):
+            chrome_new_tab("https://www.google.com/")
+
+        new_target.assert_called_once_with("about:blank")
+        use_tab.assert_called_once_with(1)
+        page_operation.assert_called_once_with("goto", url="https://www.google.com/")
 
     @patch("core.browser_tab_tools.chrome_page_operation")
     @patch("core.browser_tab_tools.chrome_current_tab")
