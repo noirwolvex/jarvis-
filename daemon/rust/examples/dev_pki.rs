@@ -12,7 +12,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     );
     let native = match args.next() {
         None => false,
-        Some(value) if value == "--native" => true,
+        Some(value) if value.to_string_lossy() == "--native" => true,
         Some(_) => return Err("second argument must be --native".into()),
     };
     if args.next().is_some() {
