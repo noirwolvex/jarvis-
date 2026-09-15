@@ -24,7 +24,10 @@ class FastMissionCompilerTests(unittest.TestCase):
                 "launch_installed_app",
             ],
         )
-        self.assertEqual(steps[0].arguments, {"query": "a cat", "new_tab": True})
+        self.assertEqual(
+            steps[0].arguments,
+            {"query": "a cat", "new_tab": True, "preserve_search_tab": False},
+        )
         self.assertEqual(steps[1].arguments["query"].casefold(), "discord")
         self.assertEqual(steps[2].arguments["query"].casefold(), "whatsapp")
 
