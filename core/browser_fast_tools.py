@@ -19,6 +19,22 @@ _EXCLUDED_RESULT_HOST_SUFFIXES = (
     "googleadservices.com",
     "doubleclick.net",
 )
+_NON_RESULT_TEXT = {
+    "images",
+    "videos",
+    "news",
+    "maps",
+    "shopping",
+    "books",
+    "flights",
+    "finance",
+    "settings",
+    "tools",
+    "more",
+    "sign in",
+    "web",
+    "ai mode",
+}
 
 
 def _query(value: str) -> str:
@@ -77,8 +93,8 @@ def _first_google_result(links: list[dict[str, Any]]) -> dict[str, str]:
     for item in links[:300]:
         if not isinstance(item, dict):
             continue
-        text = str(item.get("text") or "").strip()
-        if not text:
+        text = " ".join(str(item.get("text") or "").split()).strip()
+        if not text or text.casefold() in _NON_RESULT_TEXT:
             continue
         target = _external_result_target(str(item.get("href") or ""))
         if target:
@@ -146,7 +162,11 @@ def google_search(query: str, new_tab: bool = False) -> str:
     )
 
 
-def browser_google_search_first_result(query: str, new_tab: bool = False) -> str:
+def browser_google_search_first_result(
+    query: str,
+    new_tab: bool = False,
+    preserve_search_tab: bool = True,
+) -> str:
     """Search Google, resolve the first real external result, open it, and verify the destination."""
     text = _query(query)
     searched = google_search(text, new_tab=bool(new_tab))
@@ -166,12 +186,16 @@ def browser_google_search_first_result(query: str, new_tab: bool = False) -> str
         raise RuntimeError("Chrome did not return a valid link inventory for the Google results page")
     candidate = _first_google_result(links)
 
-    # Keep the verified Google results tab intact and open the chosen result in one
-    # selected result tab. This preserves structural evidence for the search while
-    # avoiding a second model round-trip for click + post-click verification.
-    opened = chrome_new_tab(candidate["href"])
-    if not opened.startswith("VERIFIED:"):
-        raise RuntimeError("The first Google result could not be opened in a verified Chrome tab")
+    if bool(preserve_search_tab):
+        opened = chrome_new_tab(candidate["href"])
+        if not opened.startswith("VERIFIED:"):
+            raise RuntimeError("The first Google result could not be opened in a verified Chrome tab")
+    else:
+        # Fast missions should behave like actually pressing the first result: keep the
+        # single user-requested Google tab and navigate it directly to the destination.
+        navigated = chrome_page_operation("goto", url=candidate["href"])
+        if not isinstance(navigated, dict) or not str(navigated.get("url") or ""):
+            raise RuntimeError("The first Google result could not be opened in the current Chrome tab")
 
     current = json.loads(chrome_current_tab())
     result_url = str(current.get("url") or "")
@@ -200,7 +224,7 @@ def browser_google_search_first_result(query: str, new_tab: bool = False) -> str
             "result_text": candidate["text"],
             "result_url": result_url,
             "result_title": result_title,
-            "preserved_search_tab": True,
+            "preserved_search_tab": bool(preserve_search_tab),
         },
         ensure_ascii=False,
     )
@@ -227,13 +251,14 @@ def register_browser_fast_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "browser_google_search_first_result",
-            "Fast deterministic path for a request that says to search Google and then press/click/open the first result or first link. Performs the verified Google search, resolves the first real external result while excluding Google navigation/tracking/ad hosts, opens that result in a selected Chrome tab, preserves the search-results tab for evidence, and verifies the external destination. Set new_tab=true when the user explicitly asks to start the Google search in a new/additional tab. Prefer this single tool over separate google_search + browser_click calls for lower latency and fewer missed clauses.",
+            "Fast deterministic path for a request that says to search Google and then press/click/open the first result or first link. Performs the verified Google search, resolves the first real external result while excluding Google navigation/tracking/ad hosts, opens and verifies that destination. Set new_tab=true when the user explicitly asks to start the Google search in a new/additional tab. preserve_search_tab=true keeps the Google results tab and opens the result separately; false navigates the current results tab exactly like pressing the result and is preferred by the deterministic Fast Lane. Prefer this single tool over separate google_search + browser_click calls for lower latency and fewer missed clauses.",
             Risk.MEDIUM,
             {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string", "minLength": 1, "maxLength": 500},
                     "new_tab": {"type": "boolean"},
+                    "preserve_search_tab": {"type": "boolean"},
                 },
                 "required": ["query"],
                 "additionalProperties": False,

@@ -33,7 +33,7 @@ class BrowserFastToolsTests(unittest.TestCase):
     @patch("core.browser_fast_tools.chrome_page_operation")
     @patch("core.browser_fast_tools.chrome_current_tab")
     @patch("core.browser_fast_tools.google_search")
-    def test_combined_search_and_first_result_is_verified_in_one_tool_call(
+    def test_combined_search_can_preserve_results_tab(
         self,
         google_search,
         chrome_current_tab,
@@ -56,11 +56,51 @@ class BrowserFastToolsTests(unittest.TestCase):
         self.assertTrue(result.startswith("VERIFIED: "))
         payload = json.loads(result[len("VERIFIED: "):])
         self.assertEqual(payload["action"], "browser_google_search_first_result")
-        self.assertEqual(payload["query"], "cat")
         self.assertEqual(payload["result_url"], "https://example.com/cat")
         self.assertTrue(payload["preserved_search_tab"])
         google_search.assert_called_once_with("cat", new_tab=True)
         chrome_new_tab.assert_called_once_with("https://example.com/cat")
+
+    @patch("core.browser_fast_tools.browser_check_challenge", return_value=json.dumps({"challenge_detected": False}))
+    @patch("core.browser_fast_tools.chrome_new_tab")
+    @patch("core.browser_fast_tools.chrome_page_operation")
+    @patch("core.browser_fast_tools.chrome_current_tab")
+    @patch("core.browser_fast_tools.google_search")
+    def test_fast_lane_navigates_first_result_in_same_tab(
+        self,
+        google_search,
+        chrome_current_tab,
+        chrome_page_operation,
+        chrome_new_tab,
+        _browser_check_challenge,
+    ) -> None:
+        google_search.return_value = "VERIFIED: {}"
+        chrome_current_tab.side_effect = [
+            json.dumps({"url": "https://www.google.com/search?q=cat", "title": "cat - Google Search"}),
+            json.dumps({"url": "https://example.com/cat", "title": "Cat article"}),
+        ]
+        chrome_page_operation.side_effect = [
+            [
+                {"text": "Images", "href": "https://www.google.com/search?tbm=isch&q=cat"},
+                {"text": "Cat article", "href": "https://example.com/cat"},
+            ],
+            {"title": "Cat article", "url": "https://example.com/cat"},
+        ]
+
+        result = browser_google_search_first_result(
+            "cat",
+            new_tab=True,
+            preserve_search_tab=False,
+        )
+        self.assertTrue(result.startswith("VERIFIED: "))
+        payload = json.loads(result[len("VERIFIED: "):])
+        self.assertFalse(payload["preserved_search_tab"])
+        self.assertEqual(payload["result_url"], "https://example.com/cat")
+        chrome_new_tab.assert_not_called()
+        self.assertEqual(
+            chrome_page_operation.call_args_list[-1].kwargs,
+            {"url": "https://example.com/cat"},
+        )
 
 
 if __name__ == "__main__":
