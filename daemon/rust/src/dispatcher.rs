@@ -152,6 +152,10 @@ impl Worker {
                 } else {
                     None
                 };
+                let (displays, capture_available, capture_error) = match self.capture.displays() {
+                    Ok(displays) => (displays, true, None),
+                    Err(error) => (Vec::new(), false, Some(error.to_string())),
+                };
                 Ok(json!({
                     "simulation": self.policy.simulation,
                     "emergency_stopped": self.emergency.check().is_err(),
@@ -160,6 +164,9 @@ impl Worker {
                     "audit_events_retained": self.journal.entries().len(),
                     "native_input": self.native_input,
                     "foreground": foreground,
+                    "displays": displays,
+                    "capture_available": capture_available,
+                    "capture_error": capture_error,
                     "accessibility": "unsupported",
                     "sandbox": "none"
                 }))

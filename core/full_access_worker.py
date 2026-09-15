@@ -81,6 +81,11 @@ def main() -> int:
         _STOPPED.set()
         if _AGENT is not None:
             _AGENT.request_stop()
+        # Stop both execution backends. The Rust daemon has an independent emergency
+        # latch, while Python-held synthetic keys/buttons and child processes are also
+        # released locally. All stop operations are best-effort and idempotent.
+        from .rust_engine import rust_engine_emergency_stop_best_effort
+        rust_engine_emergency_stop_best_effort()
         from .desktop_control_tools import release_held_inputs
         release_held_inputs()
         from .process_control import stop_processes

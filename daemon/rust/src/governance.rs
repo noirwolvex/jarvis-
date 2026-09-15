@@ -14,7 +14,9 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_REQUEST_TTL_MS: u64 = 30_000;
-pub const MAX_CAPABILITY_TTL_MS: u64 = 300_000;
+// Full Access dashboard missions are bounded to 30 minutes. Capability grants may
+// cover that same window, while every individual request still carries a short TTL.
+pub const MAX_CAPABILITY_TTL_MS: u64 = 30 * 60 * 1000;
 
 #[derive(Clone, Default)]
 pub struct EmergencyLatch {
