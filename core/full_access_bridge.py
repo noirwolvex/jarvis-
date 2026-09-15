@@ -19,7 +19,7 @@ def build_full_access_agent():
     from .browser_tab_tools import register_browser_tab_tools
     from .chrome_session_tools import register_chrome_session_tools
     from .desktop_control_tools import register_desktop_control_tools
-    from .full_access_agent import FullAccessJarvisAgent
+    from .fast_execution_agent import FastExecutionFullAccessAgent
     from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
     from .rust_engine import register_rust_engine_tools
@@ -30,7 +30,7 @@ def build_full_access_agent():
     # persistent worker: friendly app resolution is reused without weakening path checks.
     enable_app_discovery_cache()
 
-    agent = FullAccessJarvisAgent()
+    agent = FastExecutionFullAccessAgent()
     agent.tools.permissions.full_access_require_approval = True
     agent.tools.permissions.set_access_mode("full")
     register_app_tools(agent.tools)
