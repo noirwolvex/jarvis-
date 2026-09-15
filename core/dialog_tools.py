@@ -92,8 +92,12 @@ def _click(hwnd: int) -> None:
 
 def _find_control(dialog: int, target: str, control_type: str | None = None) -> tuple[int, dict[str, Any]]:
     needle = target.strip().lower()
+    if not needle:
+        raise ValueError("A specific dialog control target is required")
     controls: list[tuple[int, dict[str, Any]]] = []
     for hwnd in _children(dialog):
+        if not _user32().IsWindowVisible(hwnd) or not _user32().IsWindowEnabled(hwnd):
+            continue
         title = _window_text(hwnd)
         cls = _class_name(hwnd)
         row = {"hwnd": hwnd, "text": title, "class": cls, "rect": _rect(hwnd)}
@@ -104,6 +108,10 @@ def _find_control(dialog: int, target: str, control_type: str | None = None) -> 
         controls.append((hwnd, row))
     if not controls:
         raise RuntimeError(f"No dialog control matches target={target!r}, type={control_type!r}")
+    exact = [item for item in controls if item[1]["text"].replace("&", "").casefold() == needle.replace("&", "")]
+    controls = exact or controls
+    if len(controls) != 1:
+        raise RuntimeError("Dialog control target is ambiguous; inspect and use a more specific name")
     return controls[0]
 
 
@@ -190,7 +198,10 @@ def dialog_save_file(path: str) -> str:
         time.sleep(0.1)
 
     exists = resolved.exists()
-    return f"VERIFIED: save requested for {resolved}; exists={exists}; dialog_closed={not bool(_user32().IsWindow(dialog))}"
+    closed = not bool(_user32().IsWindow(dialog))
+    if not exists or not closed:
+        raise RuntimeError(f"Save is unverified: file_exists={exists}; dialog_closed={closed}. Inspect the dialog before retrying.")
+    return f"Save dialog closed and file exists at {resolved}; verify the saved content before claiming completion"
 
 
 def register_dialog_tools(registry: ToolRegistry) -> None:

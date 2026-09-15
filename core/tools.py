@@ -10,6 +10,7 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
+from jsonschema import Draft202012Validator
 
 from .desktop_input import paste_text
 from .permissions import PermissionEngine, Risk
@@ -31,10 +32,13 @@ class ToolRegistry:
     def __init__(self, permissions: PermissionEngine | None = None) -> None:
         self.permissions = permissions or PermissionEngine()
         self._tools: dict[str, ToolSpec] = {}
+        self._validators: dict[str, Draft202012Validator] = {}
         self._register_builtin_tools()
 
     def register(self, spec: ToolSpec) -> None:
+        Draft202012Validator.check_schema(spec.input_schema)
         self._tools[spec.name] = spec
+        self._validators[spec.name] = Draft202012Validator(spec.input_schema)
 
     def definitions(self) -> list[dict[str, Any]]:
         return [
@@ -50,6 +54,10 @@ class ToolRegistry:
         if not ok:
             return f"PERMISSION_DENIED: {reason}"
         try:
+            encoded = json.dumps(arguments, allow_nan=False)
+            if len(encoded.encode("utf-8")) > 65536:
+                raise ValueError("Tool arguments exceed 64 KiB")
+            self._validators[name].validate(arguments)
             return spec.handler(**arguments)
         except Exception as exc:
             return f"ERROR executing {name}: {type(exc).__name__}: {exc}"
@@ -75,9 +83,9 @@ class ToolRegistry:
 
 
 def _run_powershell(command: str) -> str:
-    completed = subprocess.run(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command], capture_output=True, text=True, timeout=60, check=False)
-    output = (completed.stdout or "") + (completed.stderr or "")
-    return f"exit_code={completed.returncode}\n{output[-12000:]}"
+    from .process_control import run_command
+    return run_command(["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", command],
+                       cwd=Path(os.getenv("JARVIS_WORKSPACE", ".")).resolve(), timeout=60)
 
 
 _BLOCKED_DIRECT_LAUNCHERS = {
@@ -384,14 +392,24 @@ def _desktop_click(x: int, y: int) -> str:
 
 
 def _desktop_press(key: str) -> str:
-    import pyautogui
-    pyautogui.press(key)
+    from .desktop_control_tools import desktop_key_down, desktop_key_up
+    try:
+        desktop_key_down(key)
+    finally:
+        desktop_key_up(key)
     return f"Pressed key: {key}"
 
 
 def _desktop_hotkey(keys: list[str]) -> str:
-    import pyautogui
-    if not keys:
-        raise ValueError("At least one key is required")
-    pyautogui.hotkey(*keys)
+    from .desktop_control_tools import desktop_key_down, desktop_key_up
+    if not keys or len(keys) > 8:
+        raise ValueError("A shortcut requires 1–8 keys")
+    pressed = []
+    try:
+        for key in keys:
+            pressed.append(key)
+            desktop_key_down(key)
+    finally:
+        for key in reversed(pressed):
+            desktop_key_up(key)
     return f"Pressed hotkey: {'+'.join(keys)}"

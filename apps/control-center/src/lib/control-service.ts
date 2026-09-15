@@ -194,7 +194,7 @@ export function assertLocalRequest(request: Request, mutation = false, expectedC
   }
 }
 
-export async function parseControlBody(request: Request): Promise<ControlInput> {
+export async function readControlObject(request: Request, limit = 8192): Promise<Record<string, unknown>> {
   if (request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") throw new Error("JSON content type required");
   const reader = request.body?.getReader();
   if (!reader) throw new Error("Request body required");
@@ -204,18 +204,23 @@ export async function parseControlBody(request: Request): Promise<ControlInput> 
       const { done, value } = await reader.read();
       if (done) break;
       size += value.byteLength;
-      if (size > 8192) { await reader.cancel(); throw new Error("Control body exceeds 8 KiB"); }
+      if (size > limit) { await reader.cancel(); throw new Error("Control body exceeds its byte limit"); }
       parts.push(value);
     }
   } finally { reader.releaseLock(); }
   const body: unknown = JSON.parse(Buffer.concat(parts).toString("utf8"));
   if (!body || typeof body !== "object" || Array.isArray(body)) throw new Error("Expected a control object");
   const value = body as Record<string, unknown>;
+  return value;
+}
+
+export async function parseControlBody(request: Request, maxTitleLength = 160): Promise<ControlInput> {
+  const value = await readControlObject(request, maxTitleLength > 160 ? 65536 : 8192);
   const allowed = new Set(["action", "title", "x", "y", "text"]);
   if (Object.keys(value).some(k => !allowed.has(k))) throw new Error("Unknown control property");
   if (typeof value.action !== "string" || !["run", "pause", "resume", "stop", "reset", "capture", "click", "type"].includes(value.action)) throw new Error("Unknown control action");
   if (value.action === "run") {
-    if (typeof value.title !== "string" || !value.title.trim() || value.title.length > 160) throw new Error("Mission title must contain 1–160 characters");
+    if (typeof value.title !== "string" || !value.title.trim() || value.title.includes("\0") || value.title.length > maxTitleLength) throw new Error(`Mission must contain 1–${maxTitleLength} characters`);
     if (value.x !== undefined || value.y !== undefined || value.text !== undefined) throw new Error("Run accepts only a title");
     return { action: "run", title: value.title.trim() };
   }

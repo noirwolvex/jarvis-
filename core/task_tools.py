@@ -19,18 +19,71 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         } for step in plan], ensure_ascii=False)
 
     def task_update_step(step_id: str, status: str, result: str = "") -> str:
+        normalized = str(status).strip().lower().replace("-", "_")
+        if normalized == "in_progress":
+            normalized = "running"
         allowed = {"pending", "running", "completed", "failed", "skipped"}
-        if status not in allowed:
+        if normalized not in allowed:
             raise ValueError(f"Unsupported step status: {status}")
-        orchestrator.update_step(step_id, status, result)
+
+        verified_evidence = None
+        if normalized == "completed" and orchestrator.current is not None:
+            recent = []
+            for trace in reversed(orchestrator.current.traces):
+                if trace.name == "task_update_step":
+                    break
+                recent.append(trace)
+            evidence = [
+                trace for trace in recent
+                if trace.success and not trace.name.startswith("task_")
+            ]
+            if not evidence:
+                raise ValueError(
+                    "Cannot mark a step completed before a successful non-task tool result provides execution or observation evidence."
+                )
+            verified_evidence = next(
+                (trace for trace in evidence if str(trace.result).startswith("VERIFIED:")),
+                None,
+            )
+
+        orchestrator.update_step(step_id, normalized, result)
+        if normalized == "completed" and verified_evidence is not None:
+            orchestrator.verify(
+                f"Plan step {step_id} completed with tool-verified evidence",
+                True,
+                str(verified_evidence.result),
+            )
         return json.dumps(orchestrator.summary(), ensure_ascii=False)
 
     def task_verify(claim: str, verified: bool, evidence: str = "") -> str:
+        current = orchestrator.current
+        if current is None:
+            raise ValueError("No active task")
+        observed = [trace for index, trace in enumerate(current.traces)
+                    if trace.success and not trace.name.startswith("task_")
+                    and (index > current.last_mutation_index
+                         or index == current.last_mutation_index and trace.result.startswith("VERIFIED:") and not trace.name.startswith("desktop_"))]
+        if not observed or not evidence.strip():
+            raise ValueError("Verification requires successful observation after the action and nonempty evidence")
         ok = orchestrator.verify(claim, bool(verified), evidence)
         return json.dumps({"verified": ok, "claim": claim, "evidence": evidence[:12000]}, ensure_ascii=False)
 
     def task_status() -> str:
         return json.dumps(orchestrator.summary(), ensure_ascii=False)
+
+    def task_recall(task_id: str = "latest") -> str:
+        candidates = sorted(orchestrator.trace_dir.glob("task-*.json"), key=lambda path: path.stat().st_mtime, reverse=True)
+        if task_id == "latest":
+            candidates = [path for path in candidates if not orchestrator.current or path.stem != orchestrator.current.task_id]
+            if not candidates:
+                return json.dumps({"status": "no_previous_checkpoint"})
+            task_id = candidates[0].stem
+        previous = TaskOrchestrator(str(orchestrator.trace_dir))
+        restored = previous.restore(task_id)
+        from dataclasses import asdict
+        return json.dumps({"summary": previous.summary(), "plan": [asdict(step) for step in restored.plan],
+                           "uncertain_action": restored.in_flight, "recent_evidence": [asdict(trace) for trace in restored.traces[-8:]],
+                           "instruction": "Re-observe current state before continuing. An uncertain action must never be automatically replayed."}, ensure_ascii=False)
 
     registry.register(ToolSpec(
         "task_plan",
@@ -62,9 +115,21 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
     ))
     registry.register(ToolSpec(
         "task_update_step",
-        "Update one execution-plan step after starting or completing it.",
+        "Update one execution-plan step after starting or completing it. Use running (or in_progress, which is normalized to running). A completed step must follow successful execution or observation evidence; never mark an attempted action completed before its tool succeeds. VERIFIED tool results are automatically recorded as verification evidence.",
         Risk.SAFE,
-        {"type": "object", "properties": {"step_id": {"type": "string"}, "status": {"type": "string"}, "result": {"type": "string"}}, "required": ["step_id", "status"], "additionalProperties": False},
+        {
+            "type": "object",
+            "properties": {
+                "step_id": {"type": "string"},
+                "status": {
+                    "type": "string",
+                    "enum": ["pending", "running", "in_progress", "completed", "failed", "skipped"],
+                },
+                "result": {"type": "string"},
+            },
+            "required": ["step_id", "status"],
+            "additionalProperties": False,
+        },
         task_update_step,
     ))
     registry.register(ToolSpec(
@@ -81,3 +146,5 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         {"type": "object", "properties": {}, "additionalProperties": False},
         task_status,
     ))
+    registry.register(ToolSpec("task_recall", "Read a previous task checkpoint when the user asks to resume or continue. Returns plan, progress, recent evidence, and uncertain actions without executing them.", Risk.SAFE,
+        {"type": "object", "properties": {"task_id": {"type": "string", "default": "latest"}}, "additionalProperties": False}, task_recall))

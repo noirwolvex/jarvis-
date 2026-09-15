@@ -52,6 +52,8 @@ def focus_window_advanced(title: str) -> str:
     candidates = [(hwnd, name) for hwnd, name, _pid in _windows() if needle in name.lower()]
     if not candidates:
         raise RuntimeError(f"No visible window matches: {title}")
+    if len(candidates) != 1:
+        raise RuntimeError("Window title is ambiguous; inspect windows and use a specific title")
     hwnd, actual = candidates[0]
     user32 = ctypes.windll.user32
     user32.ShowWindow(hwnd, 9)
@@ -93,7 +95,7 @@ def inspect_window(title: str = "") -> str:
     try:
         descendants = window.descendants()
     except Exception as exc:
-        return f"UIA inspection failed: {type(exc).__name__}: {exc}"
+        return f"ERROR: UIA inspection failed: {type(exc).__name__}: {exc}"
 
     for control in descendants[:250]:
         try:

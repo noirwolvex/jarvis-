@@ -4,10 +4,21 @@ import json
 import os
 import time
 import uuid
+import re
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+
+from .memory import redact_secrets
+
+
+def tool_succeeded(result: str) -> bool:
+    text = str(result).strip()
+    if text.startswith(("ERROR", "PERMISSION_DENIED", "BROWSER_ACTION_BLOCKED", "CANCELLED")):
+        return False
+    match = re.search(r"(?:^|\n)exit_code=(-?\d+)", text)
+    return match is None or int(match.group(1)) == 0
 
 
 @dataclass
@@ -35,6 +46,7 @@ class VerificationRecord:
     verified: bool
     evidence: str = ""
     created_at: float = field(default_factory=time.time)
+    evidence_trace_index: int = -1
 
 
 @dataclass
@@ -52,6 +64,8 @@ class TaskRun:
     verifications: list[VerificationRecord] = field(default_factory=list)
     final_result: str = ""
     finished_at: float | None = None
+    in_flight: dict[str, Any] | None = None
+    last_mutation_index: int = -1
 
     @property
     def elapsed_ms(self) -> float:
@@ -74,6 +88,7 @@ class TaskOrchestrator:
             goal=goal,
             started_at=time.time(),
         )
+        self._persist(self.current)
         return self.current
 
     def set_plan(self, steps: list[PlanStep | dict[str, Any] | str]) -> list[PlanStep]:
@@ -91,7 +106,20 @@ class TaskOrchestrator:
                     description=str(raw.get("description") or raw.get("goal") or "Unnamed step"),
                     depends_on=list(raw.get("depends_on") or []),
                 ))
+        ids = [step.id for step in plan]
+        if not plan or len(plan) > 100 or len(set(ids)) != len(ids) or any(not item for item in ids):
+            raise ValueError("Plan must contain 1-100 uniquely identified steps")
+        dependencies = {step.id: set(step.depends_on) for step in plan}
+        if any(not deps.issubset(ids) for deps in dependencies.values()):
+            raise ValueError("Plan refers to an unknown dependency")
+        resolved: set[str] = set()
+        while len(resolved) < len(plan):
+            ready = {key for key, deps in dependencies.items() if key not in resolved and deps <= resolved}
+            if not ready:
+                raise ValueError("Plan contains a dependency cycle")
+            resolved.update(ready)
         self.current.plan = plan
+        self._persist(self.current)
         return plan
 
     def update_step(self, step_id: str, status: str, result: str = "") -> None:
@@ -99,14 +127,21 @@ class TaskOrchestrator:
             return
         for step in self.current.plan:
             if step.id == step_id:
+                if status not in {"pending", "running", "completed", "failed", "skipped"}:
+                    raise ValueError("Invalid step status")
+                completed = {s.id for s in self.current.plan if s.status in {"completed", "skipped"}}
+                if status in {"running", "completed"} and not set(step.depends_on) <= completed:
+                    raise ValueError("Step dependencies have not completed")
                 step.status = status
                 step.result = result[:12000]
-                break
+                self._persist(self.current)
+                return
+        raise ValueError(f"Unknown plan step: {step_id}")
 
     def ready_steps(self) -> list[PlanStep]:
         if not self.current:
             return []
-        completed = {step.id for step in self.current.plan if step.status == "completed"}
+        completed = {step.id for step in self.current.plan if step.status in {"completed", "skipped"}}
         return [
             step for step in self.current.plan
             if step.status == "pending" and all(dep in completed for dep in step.depends_on)
@@ -132,10 +167,10 @@ class TaskOrchestrator:
         if self.current:
             self.current.current_turn = turn
 
-    def record_tool(self, name: str, arguments: dict[str, Any], result: str, duration_ms: float, turn: int) -> None:
+    def record_tool(self, name: str, arguments: dict[str, Any], result: str, duration_ms: float, turn: int, mutation: bool = False) -> None:
         if not self.current:
             return
-        success = not result.startswith("ERROR") and not result.startswith("PERMISSION_DENIED")
+        success = tool_succeeded(result)
         self.current.traces.append(
             ToolTrace(
                 name=name,
@@ -147,24 +182,62 @@ class TaskOrchestrator:
             )
         )
         self.current.tools_used += 1
+        if mutation:
+            self.current.last_mutation_index = len(self.current.traces) - 1
         if not success:
             self.current.failures += 1
+        if not result.startswith("CANCELLED"):
+            self.current.in_flight = None
+        self._persist(self.current)
+
+    def start_action(self, name: str, arguments: dict[str, Any]) -> None:
+        """Write intent before dispatch: a crash here leaves an uncertain action, never a replay command."""
+        if self.current:
+            self.current.in_flight = {"name": name, "arguments": arguments, "started_at": time.time()}
+            self._persist(self.current)
+
+    def restore(self, task_id: str) -> TaskRun:
+        if not re.fullmatch(r"task-[0-9]+-[a-f0-9]{8}", task_id):
+            raise ValueError("Invalid task identifier")
+        path = self.trace_dir / f"{task_id}.json"
+        if path.stat().st_size > 8 * 1024 * 1024:
+            raise ValueError("Checkpoint exceeds the size limit")
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        payload["plan"] = [PlanStep(**step) for step in payload["plan"]]
+        payload["traces"] = [ToolTrace(**trace) for trace in payload["traces"]]
+        payload["verifications"] = [VerificationRecord(**item) for item in payload["verifications"]]
+        restored = TaskRun(**payload)
+        if restored.status == "running" or restored.in_flight:
+            restored.status = "interrupted"
+            for step in restored.plan:
+                if step.status == "running":
+                    step.status = "pending"
+        self.current = restored
+        return restored
 
     def verify(self, claim: str, verified: bool, evidence: str = "") -> bool:
         if not self.current:
             return False
         self.current.verifications.append(
-            VerificationRecord(claim=claim, verified=verified, evidence=evidence[:12000])
+            VerificationRecord(claim=claim, verified=verified, evidence=evidence[:12000], evidence_trace_index=len(self.current.traces) - 1)
         )
+        self._persist(self.current)
         return verified
 
     def all_required_verifications_passed(self) -> bool:
         if not self.current:
             return False
-        return bool(self.current.verifications) and all(item.verified for item in self.current.verifications)
+        latest = {item.claim: item for item in self.current.verifications}
+        return bool(latest) and all(item.verified for item in latest.values()) and not self.needs_action_review()
+
+    def needs_action_review(self) -> bool:
+        if not self.current or self.current.last_mutation_index < 0:
+            return False
+        reviewed = max((item.evidence_trace_index for item in self.current.verifications), default=-1)
+        return reviewed < self.current.last_mutation_index
 
     def recovery_hint(self, result: str, tool_name: str) -> str:
-        if not self.current or not (result.startswith("ERROR") or result.startswith("PERMISSION_DENIED")):
+        if not self.current or tool_succeeded(result):
             return ""
         self.current.recoveries += 1
         low = result.lower()
@@ -180,6 +253,19 @@ class TaskOrchestrator:
         if not hints:
             hints.append(f"Diagnose the failure from the result of {tool_name} and use a safer alternate tool path.")
         return "Recovery guidance: " + " ".join(hints)
+
+    def repeated_failure(self, name: str, arguments: dict[str, Any], limit: int = 3) -> bool:
+        if not self.current:
+            return False
+        count = 0
+        for trace in reversed(self.current.traces):
+            if trace.name.startswith("task_"):
+                continue
+            if trace.success:
+                break
+            if trace.name == name and trace.arguments == arguments:
+                count += 1
+        return count >= limit
 
     def finish(self, status: str, result: str) -> None:
         if not self.current:
@@ -209,7 +295,20 @@ class TaskOrchestrator:
 
     def _persist(self, task: TaskRun) -> None:
         path = self.trace_dir / f"{task.task_id}.json"
-        path.write_text(json.dumps(asdict(task), ensure_ascii=False, indent=2), encoding="utf-8")
+        def scrub(value: Any) -> Any:
+            if isinstance(value, str):
+                return redact_secrets(value)
+            if isinstance(value, list):
+                return [scrub(item) for item in value]
+            if isinstance(value, dict):
+                return {key: ("[REDACTED]" if re.search(r"password|secret|token|api.?key", key, re.I) else scrub(item)) for key, item in value.items()}
+            return value
+        temporary = path.with_suffix(".json.tmp")
+        with temporary.open("w", encoding="utf-8") as output:
+            json.dump(scrub(asdict(task)), output, ensure_ascii=False)
+            output.flush()
+            os.fsync(output.fileno())
+        os.replace(temporary, path)
 
 
 def build_execution_context(task: TaskRun | None) -> str:

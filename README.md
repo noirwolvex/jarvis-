@@ -2,9 +2,15 @@
 
 A Windows-first desktop AI agent powered by Claude.
 
+## Autonomous desktop upgrade
+
+The hybrid control center now connects the existing Python agent to guarded screen, mouse, keyboard, browser, application, file, Git and terminal tools. It adds atomic task checkpoints, recovery recall, action-review gates, live progress and desktop previews, and a Full Access emergency-stop latch with **Ctrl+Alt+Escape**. Terminal commands require an additional explicit session permission.
+
+See the [desktop-agent runbook and validation limits](docs/autonomous-desktop-upgrade.md) for setup, controls, recovery, tests, and the remaining native qualification requirements. Full Access starts disabled in a new server session; simulation remains the default control mode.
+
 ## JARVIS X reference implementation
 
-The repository now also includes a separate Next.js/TypeScript/Rust foundation for the expanded JARVIS X specification. The existing Python application below remains available. The new control center runs a **deterministic, in-memory workspace simulation**: it does not claim to operate the real desktop or call a model.
+The repository also includes a separate Next.js/TypeScript/Rust foundation for the expanded JARVIS X specification. The existing Python application below remains available. By default, the control center runs a **deterministic, in-memory workspace simulation**. Set `JARVIS_CONTROL_MODE=hybrid` to use the Python desktop agent described above.
 
 ```powershell
 rtk proxy npm.cmd ci

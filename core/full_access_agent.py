@@ -1,0 +1,399 @@
+from __future__ import annotations
+
+import ctypes
+import json
+import os
+import time
+import threading
+from concurrent.futures import TimeoutError as FutureTimeout
+from typing import Any, Callable
+
+from .agent import AgentEvent, JarvisAgent, _tool_schemas
+from .browser_mission_contract import (
+    google_search_result_count,
+    minimum_tab_count,
+    required_google_searches,
+    required_new_tabs,
+)
+from .vision_tools import is_internal_vision_message, vision_followup_message
+from .desktop_observation import DesktopObservationGate
+from .orchestrator import tool_succeeded
+from .permissions import Risk
+
+_DESKTOP_BROWSER_INPUT_TOOLS = {
+    "dialog_set_field",
+    "dialog_click_button",
+    "dialog_save_file",
+    "desktop_click",
+    "desktop_type",
+    "desktop_press",
+    "desktop_hotkey",
+    "desktop_scroll",
+    "desktop_double_click",
+    "desktop_click_button",
+    "desktop_drag",
+    "desktop_mouse_down",
+    "desktop_mouse_up",
+    "desktop_key_down",
+    "desktop_key_up",
+}
+_BROWSER_SIGNALS = (
+    "browser", "chrome", "google", "website", "web page", "http://", "https://", "new tab", "another tab", "search for",
+    "متصفح", "كروم", "جوجل", "موقع", "صفحة", "تبويب", "ابحث", "بحث",
+)
+_FULL_TOOL_SIGNALS = (
+    " git", "git ", "github", "repo", "repository", "code", "coding", "vscode", "visual studio code",
+    "file", "folder", "directory", "terminal", "powershell", "command", "script", "npm ", "cargo ", "database", "supabase",
+    "ملف", "مجلد", "كود", "جيت", "قاعدة بيانات",
+)
+_BROWSER_PROFILE_EXPLICIT = {
+    "google_search",
+    "screen_observe",
+    "wait",
+    "take_screenshot",
+    "list_windows",
+    "focus_window",
+    "focus_window_advanced",
+    "inspect_window",
+    "close_window",
+    "find_installed_app",
+    "launch_installed_app",
+    "open_application",
+    "open_application_and_type",
+    "open_url",
+}
+_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_")
+
+
+def _chrome_tab_rows() -> list[dict]:
+    try:
+        from .chrome_cdp import chrome_is_connected, chrome_tabs
+
+        if not chrome_is_connected():
+            return []
+        payload = json.loads(chrome_tabs())
+        return payload if isinstance(payload, list) else []
+    except Exception:
+        return []
+
+
+def _foreground_is_chrome() -> bool:
+    """Return true only when a Chrome/Chromium process owns the current foreground window."""
+    if os.name != "nt" or not hasattr(ctypes, "windll"):
+        return False
+    try:
+        from .chrome_cdp import chrome_is_connected
+
+        if not chrome_is_connected():
+            return False
+        user32 = ctypes.windll.user32
+        hwnd = int(user32.GetForegroundWindow())
+        if not hwnd:
+            return False
+        pid = ctypes.c_ulong()
+        user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+        if not pid.value:
+            return False
+        import psutil
+
+        name = psutil.Process(int(pid.value)).name().casefold()
+        return name in {"chrome.exe", "chromium.exe", "chrome", "chromium"}
+    except Exception:
+        return False
+
+
+def _browser_focused_goal(user_text: str) -> bool:
+    lowered = str(user_text or "").casefold()
+    return any(signal in lowered for signal in _BROWSER_SIGNALS)
+
+
+def _needs_full_toolset(user_text: str) -> bool:
+    lowered = " " + str(user_text or "").casefold() + " "
+    return any(signal in lowered for signal in _FULL_TOOL_SIGNALS)
+
+
+class FullAccessJarvisAgent(JarvisAgent):
+    """Full Access execution profile with hard browser-completion, vision, and human-verification boundaries."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.max_turns = max(1, min(int(os.getenv("JARVIS_FULL_ACCESS_MAX_TURNS", str(max(160, self.max_turns)))), 512))
+        self._stop = threading.Event()
+        self._desktop_observation = DesktopObservationGate()
+
+    def request_stop(self) -> None:
+        self._stop.set()
+
+    def _is_stopped(self) -> bool:
+        external = getattr(self, "cancel_event", None)
+        return self._stop.is_set() or bool(external and external.is_set())
+
+    def reset(self) -> None:
+        super().reset()
+        self._stop.clear()
+        self._desktop_observation.invalidate()
+
+    def _compact_context(self, goal: str) -> None:
+        # Trim only at assistant boundaries so retained tool calls always keep their results.
+        starts = [index for index, item in enumerate(self.messages) if item.get("role") == "assistant"]
+        if len(starts) > 12:
+            self.messages = [{"role": "user", "content": goal}, *self.messages[starts[-12]:]]
+
+    def _is_mutation(self, name: str) -> bool:
+        spec = self.tools._tools.get(name)
+        return bool(spec and (spec.risk >= Risk.MEDIUM or name.startswith("desktop_") and name != "desktop_cursor"
+                             or name in {"open_url", "browser_navigate", "open_application", "focus_window", "focus_window_advanced", "chrome_new_tab", "chrome_select_tab"}))
+
+    def _execute_tool(self, name: str, arguments: dict[str, Any], approved: bool = False) -> str:
+        def dispatch():
+            if self._is_stopped():
+                return "CANCELLED: Emergency stop is active"
+            raw_input = name.startswith("desktop_") and name != "desktop_cursor"
+            mutation = self._is_mutation(name)
+            if mutation and name not in {"desktop_mouse_up", "desktop_key_up"} and self.orchestrator.needs_action_review():
+                return "ERROR: Observe the last action and call task_verify with evidence before another mutation. Use verified=false for a failed outcome, then diagnose and recover."
+            if raw_input and name not in {"desktop_mouse_up", "desktop_key_up"}:
+                try:
+                    self._desktop_observation.check(arguments)
+                except ValueError as exc:
+                    return f"ERROR: {exc}"
+            self.orchestrator.start_action(name, arguments)
+            result = self.tools.execute(name, arguments, approved)
+            if name == "screen_observe" and result.startswith("VERIFIED: "):
+                self._desktop_observation.observe(json.loads(result[len("VERIFIED: "):]))
+            elif raw_input:
+                self._desktop_observation.invalidate()
+            return result
+
+        if self._is_stopped():
+            return "CANCELLED: Emergency stop is active"
+        future = self._tool_executor.submit(dispatch)
+        while True:
+            try:
+                return future.result(timeout=0.05)
+            except FutureTimeout:
+                if self._is_stopped():
+                    future.cancel()
+                    return "CANCELLED: Action interrupted; inspect state before any retry"
+
+    def _system_prompt(self, user_text: str = "") -> str:
+        base = super()._system_prompt(user_text)
+        base += "\nTerminal tool permission: " + ("enabled by the operator" if getattr(self, "allow_shell", False) else "disabled; the operator must select terminal access in the Full Access UI before run_powershell can execute") + "."
+        return base + """
+
+Full Access execution profile:
+- Create a task_plan before multi-step work, honor its dependencies, and update each step using observed evidence. Use task_status for progress. After any uncertain mutation, observe before retrying: never blindly repeat writes, clicks, sends, or commands.
+- When the user asks to continue or resume, use task_recall to recover the previous checkpoint, then inspect the live state and plan only remaining work. The current screen and file contents take precedence over saved evidence.
+- After an action without a VERIFIED result, inspect the resulting state and call task_verify with a specific claim and observed evidence before another mutation. For a failed outcome, record verified=false, recover, then re-verify the SAME claim to resolve it. Verification cannot be invented from intended actions.
+- Raw desktop input requires a stable screen_observe with the same foreground window and coordinates inside its virtual desktop. The scene is captured and compared again immediately before dispatch; evidence older than 60 seconds is rejected. Each input consumes that observation. A new screen observation follows desktop input automatically; evaluate the visible outcome before continuing. Cursor arrival alone does not verify the application outcome.
+- Optimize for low latency and verified completion. Prefer one reliable semantic/direct tool over several exploratory mouse or keyboard steps when both achieve the same requested result.
+- For an explicit Google search, prefer google_search. It performs a guarded verified search in one call. Set new_tab=true only when the user explicitly asks for a new/additional tab.
+- For browser, tab, Google, or web-search requests, do not launch Chrome through launch_installed_app or open_application. Use the guarded managed Chrome/CDP tools so JARVIS controls the exact selected tab.
+- If the user explicitly says "new tab" or "another tab", that is a structural requirement: use chrome_new_tab or google_search(new_tab=true) for that step. browser_navigate/open_url on the current tab does NOT satisfy a new-tab request.
+- Preserve earlier result tabs when the user asks for a later search in a new tab. Complete every clause in order before returning a final answer.
+- For desktop applications, prefer semantic Windows UI Automation (inspect_window/dialog tools) when controls are labeled. Use screen_observe when the task genuinely depends on visual layout, canvas content, unlabeled controls, or coordinates that semantic inspection cannot resolve. A screen_observe result is supplied to you as an actual image on the next turn with virtual-desktop coordinate mapping.
+- Do not take repeated screenshots when the visible state has not materially changed. After a visual action, verify the resulting state with semantic inspection or a fresh visual observation when needed.
+- General desktop mouse/keyboard tools are also protected by the browser challenge guard whenever Chrome is the foreground window. Never use desktop input as an alternate path around a CAPTCHA or human-verification checkpoint.
+- If a guarded browser action encounters CAPTCHA, anti-bot, or human verification, stop the current run immediately. Leave the current Chrome window and tab open and unchanged. Do not close it, switch away, navigate elsewhere, launch another browser, or attempt an alternate automation path. The user must complete that checkpoint manually before JARVIS continues.
+"""
+
+    def _tool_schemas_for_goal(self, user_text: str) -> list[dict[str, Any]]:
+        schemas = _tool_schemas(self.tools)
+        if not _browser_focused_goal(user_text) or _needs_full_toolset(user_text):
+            return schemas
+        # Browser-heavy missions do not need dev/Git/filesystem/system schemas on every
+        # model turn. Keep browser + task + window/desktop/dialog/vision/app fallback tools.
+        # This only changes what the model sees; PermissionEngine remains authoritative.
+        return [
+            schema for schema in schemas
+            if (
+                str(schema.get("function", {}).get("name", "")) in _BROWSER_PROFILE_EXPLICIT
+                or str(schema.get("function", {}).get("name", "")).startswith(_BROWSER_PROFILE_PREFIXES)
+            )
+        ]
+
+    def _browser_action_guard(self, tool_name: str) -> str | None:
+        # Native/desktop input must not become a side channel around the DOM/CDP CAPTCHA guard.
+        if tool_name in _DESKTOP_BROWSER_INPUT_TOOLS and _foreground_is_chrome():
+            return super()._browser_action_guard("browser_click")
+        return super()._browser_action_guard(tool_name)
+
+    def _replace_internal_vision(self, followup: dict[str, Any]) -> None:
+        # Keep only the newest screenshot in the live model context. Image bytes never enter
+        # MemoryStore or tool traces, which keeps subsequent turns fast and bounded.
+        self.messages = [
+            message for message in self.messages
+            if not (isinstance(message, dict) and is_internal_vision_message(message))
+        ]
+        self.messages.append(followup)
+
+    def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None) -> str:
+        self.orchestrator.begin(user_text)
+        self.workspace_context.save_snapshot()
+        self.messages.append({"role": "user", "content": user_text})
+        self.memory.add("user", user_text)
+
+        requested_new_tab_count = required_new_tabs(user_text)
+        requested_google_search_count = required_google_searches(user_text)
+        initial_tab_count = len(_chrome_tab_rows())
+        minimum_required_tabs = minimum_tab_count(initial_tab_count, requested_new_tab_count)
+        turn_tool_schemas = self._tool_schemas_for_goal(user_text)
+
+        try:
+            for turn in range(self.max_turns):
+                if self._is_stopped():
+                    self.orchestrator.finish("cancelled", "Emergency stop is active")
+                    return "CANCELLED: Emergency stop is active"
+                self.orchestrator.start_turn(turn + 1)
+                self._compact_context(user_text)
+                emit and emit(AgentEvent("status", f"Thinking… (turn {turn + 1})"))
+                response = self.client.chat.completions.create(
+                    model=self.model,
+                    messages=[{"role": "system", "content": self._system_prompt(user_text)}, *self.messages],
+                    tools=turn_tool_schemas,
+                    tool_choice="auto",
+                )
+                if self._is_stopped():
+                    self.orchestrator.finish("cancelled", "Emergency stop is active")
+                    return "CANCELLED: Emergency stop is active"
+                message = response.choices[0].message
+                self.messages.append(message.model_dump(exclude_none=True))
+                tool_calls = getattr(message, "tool_calls", None) or []
+                if not tool_calls:
+                    if self.orchestrator.needs_action_review():
+                        self.messages.append({"role": "user", "content": "An action is still unverified. Inspect its result and use task_verify with observed evidence before completing the mission."})
+                        continue
+                    rows = _chrome_tab_rows()
+                    actual_tab_count = len(rows)
+                    actual_google_search_count = google_search_result_count(rows)
+
+                    unmet: list[str] = []
+                    if requested_new_tab_count and actual_tab_count < minimum_required_tabs:
+                        unmet.append(
+                            f"the user requested {requested_new_tab_count} additional browser tab(s), "
+                            f"but only {actual_tab_count} tab(s) are currently verified; "
+                            f"at least {minimum_required_tabs} are required"
+                        )
+                    if (
+                        requested_google_search_count
+                        and actual_google_search_count < requested_google_search_count
+                    ):
+                        unmet.append(
+                            f"the user requested {requested_google_search_count} Google search(es), "
+                            f"but only {actual_google_search_count} Google search-result tab(s) are verified"
+                        )
+
+                    if unmet:
+                        contract_hint = (
+                            "The original browser mission is not complete: "
+                            + "; ".join(unmet)
+                            + ". Continue executing the original request. For every explicit new-tab step, "
+                            "use chrome_new_tab or google_search(new_tab=true), keep previous result tabs open, "
+                            "perform the requested search/action inside the newly selected tab, and verify the resulting tab/URL before finishing."
+                        )
+                        emit and emit(AgentEvent("status", contract_hint))
+                        self.messages.append({"role": "user", "content": contract_hint})
+                        continue
+
+                    result = (message.content or "Done.").strip()
+                    if self.orchestrator.current and self.orchestrator.current.plan:
+                        pending = [
+                            step for step in self.orchestrator.current.plan
+                            if step.status not in {"completed", "skipped"}
+                        ]
+                        if pending:
+                            result = "I stopped before all planned steps were completed: " + ", ".join(step.id for step in pending)
+                            self.orchestrator.finish("incomplete", result)
+                            self.memory.add("assistant", result)
+                            return result
+                    self.memory.add("assistant", result)
+                    self.orchestrator.finish("completed", result)
+                    return result
+
+                vision_followups: list[dict[str, Any]] = []
+                for call in tool_calls:
+                    if self._is_stopped():
+                        self.orchestrator.finish("cancelled", "Emergency stop is active")
+                        return "CANCELLED: Emergency stop is active"
+                    name = call.function.name
+                    started = time.perf_counter()
+                    challenge_pause = False
+                    try:
+                        arguments = json.loads(call.function.arguments or "{}")
+                    except json.JSONDecodeError as exc:
+                        result = f"ERROR: invalid tool arguments for {name}: {exc}"
+                        arguments = {}
+                    else:
+                        emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
+                        guard_result = self._browser_action_guard(name)
+                        if guard_result:
+                            result = guard_result
+                            challenge_pause = result.startswith("BROWSER_ACTION_BLOCKED:")
+                        else:
+                            approved = self.approval(name, arguments)
+                            result = self._execute_tool(name, arguments, approved=approved)
+                            # Fast-path navigation tools can detect a challenge after navigation.
+                            challenge_pause = str(result).startswith("BROWSER_ACTION_BLOCKED:")
+
+                    duration_ms = (time.perf_counter() - started) * 1000.0
+                    mutation = self._is_mutation(name)
+                    # Rejected dispatches do not constitute a new action to review.
+                    mutation = mutation and not str(result).startswith(("PERMISSION_DENIED", "ERROR: Observe the last", "ERROR: Fresh screen", "ERROR: Foreground", "ERROR: Desktop coordinate"))
+                    self.orchestrator.record_tool(name, arguments, result, duration_ms, turn + 1, mutation=mutation)
+                    if mutation and result.startswith("VERIFIED:") and not name.startswith("desktop_"):
+                        self.orchestrator.verify(f"{name} reported its postcondition", True, result)
+                    emit and emit(AgentEvent("tool_result", result, name))
+                    self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+                    if name == "screen_observe":
+                        followup = vision_followup_message(result)
+                        if followup is not None:
+                            vision_followups.append(followup)
+
+                    if name.startswith("desktop_") and name != "desktop_cursor" and tool_succeeded(result) and not self._is_stopped():
+                        observed = self._execute_tool("screen_observe", {}, approved=True)
+                        self.orchestrator.record_tool("screen_observe", {}, observed, 0, turn + 1)
+                        emit and emit(AgentEvent("tool_result", observed, "screen_observe"))
+                        followup = vision_followup_message(observed)
+                        if followup is not None:
+                            vision_followups.append(followup)
+                        # The next model turn must see post-action evidence before another input.
+                        for remaining in tool_calls[tool_calls.index(call) + 1:]:
+                            self.messages.append({"role": "tool", "tool_call_id": remaining.id,
+                                                  "content": "ERROR: Re-plan this action after evaluating the fresh desktop observation"})
+                        break
+
+                    if challenge_pause:
+                        pause_result = (
+                            "Human verification is required in the current browser tab. "
+                            "JARVIS paused and left the page open without closing, switching, navigating, or interacting with the challenge. "
+                            "Complete the CAPTCHA or human-verification step manually, then ask JARVIS to continue."
+                        )
+                        emit and emit(AgentEvent("status", pause_result, name))
+                        self.memory.add("assistant", pause_result)
+                        self.orchestrator.finish("waiting_user", pause_result)
+                        return pause_result
+
+                    hint = self.orchestrator.recovery_hint(result, name)
+                    if hint:
+                        emit and emit(AgentEvent("status", hint, name))
+                        self.messages.append({"role": "user", "content": hint})
+                        if self.orchestrator.repeated_failure(name, arguments):
+                            result = f"Stopped after three failed {name} attempts without new successful observation. Inspect the saved checkpoint before continuing."
+                            self.orchestrator.finish("incomplete", result)
+                            return result
+
+                # Append multimodal context only after every tool_call has a matching tool result,
+                # preserving the Chat Completions tool-call protocol for parallel tool responses.
+                if vision_followups:
+                    self._replace_internal_vision(vision_followups[-1])
+
+            result = "I reached the execution limit before the requested outcome was verified."
+            self.memory.add("assistant", result)
+            self.orchestrator.finish("incomplete", result)
+            return result
+        except Exception as exc:
+            result = f"ERROR: {type(exc).__name__}: {exc}"
+            self.memory.add("assistant", result)
+            self.orchestrator.finish("failed", result)
+            raise

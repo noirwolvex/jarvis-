@@ -12,6 +12,8 @@ import {
   hybridModeEnabled,
   hybridSnapshot,
   submitHybridMission,
+  emergencyStopHybrid,
+  resetHybridStop,
 } from "@/lib/hybrid-control";
 
 export const runtime = "nodejs";
@@ -36,7 +38,12 @@ export async function POST(request: Request) {
     if (hybridModeEnabled()) {
       assertLocalRequest(request);
       assertHybridMutation(request);
-      const input = await parseControlBody(request);
+      const input = await parseControlBody(request, 8000);
+      if (input.action === "stop" || input.action === "reset") {
+        if (input.action === "stop") emergencyStopHybrid();
+        else resetHybridStop();
+        return Response.json({ ok: true }, { headers });
+      }
       if (input.action !== "run") throw new Error(`${input.action} is not available in hybrid bridge mode yet`);
       const result = submitHybridMission(input.title);
       return Response.json({ ok: true, ...result }, { status: 202, headers });

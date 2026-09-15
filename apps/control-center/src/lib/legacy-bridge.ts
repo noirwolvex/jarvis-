@@ -73,7 +73,7 @@ export async function launchLegacyApplication(app: LegacyApplication, signal?: A
 
   return await new Promise<LegacyLaunchResult>((resolvePromise, rejectPromise) => {
     execFile(
-      python,
+      /* turbopackIgnore: true */ python,
       ["-m", "core.legacy_bridge", "launch", app],
       { cwd: root, windowsHide: true, timeout: 30_000, maxBuffer: 64 * 1024, signal },
       (error, stdout) => {
