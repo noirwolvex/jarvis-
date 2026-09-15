@@ -14,6 +14,7 @@ def build_full_access_agent():
     """Build one fully routed Full Access agent. Persistent workers may safely reuse it between missions."""
     # Import first so .env loading completes, then configure this dedicated local profile.
     from .app_discovery_cache import enable_app_discovery_cache
+    from .app_discovery_fast import enable_fast_app_discovery
     from .app_tools import register_app_tools
     from .browser_fast_tools import register_browser_fast_tools
     from .browser_tab_tools import register_browser_tab_tools
@@ -26,8 +27,9 @@ def build_full_access_agent():
     from .vision_tools import register_vision_tools
     from .filesystem_tools import register_filesystem_tools
 
-    # The cache becomes materially useful when build_full_access_agent lives in the
-    # persistent worker: friendly app resolution is reused without weakening path checks.
+    # Resolve exact/common apps from bounded Windows sources first; only ambiguous names
+    # fall through to the exhaustive install-tree scan. Cache the resulting resolver.
+    enable_fast_app_discovery()
     enable_app_discovery_cache()
 
     agent = FastExecutionFullAccessAgent()
