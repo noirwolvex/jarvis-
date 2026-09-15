@@ -99,7 +99,7 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
                 id="fast-1",
                 description=f"Search Google for {query} and open the first real result",
                 tool="browser_google_search_first_result",
-                arguments={"query": query, "new_tab": new_tab},
+                arguments={"query": query, "new_tab": new_tab, "preserve_search_tab": False},
             )
         ]
         apps = _parse_app_chain(first.group("rest"), 2)
