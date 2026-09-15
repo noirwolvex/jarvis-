@@ -186,7 +186,8 @@ class TaskOrchestrator:
             self.current.last_mutation_index = len(self.current.traces) - 1
         if not success:
             self.current.failures += 1
-        self.current.in_flight = None
+        if not result.startswith("CANCELLED"):
+            self.current.in_flight = None
         self._persist(self.current)
 
     def start_action(self, name: str, arguments: dict[str, Any]) -> None:

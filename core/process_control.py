@@ -7,7 +7,7 @@ import time
 from typing import Callable
 
 _cancelled: Callable[[], bool] = lambda: False
-_active: set[subprocess.Popen] = set()
+_active: dict[subprocess.Popen, object] = {}
 _lock = threading.Lock()
 
 
@@ -22,15 +22,14 @@ def check_cancelled() -> None:
 
 
 def _terminate(process: subprocess.Popen) -> None:
+    with _lock:
+        job = _active.get(process)
+    if job is not None:
+        job.terminate()
+        return
     if process.poll() is not None:
         return
-    if os.name == "nt":
-        # Only PIDs created and retained by this module are accepted here.
-        subprocess.run(["taskkill.exe", "/PID", str(process.pid), "/T", "/F"],
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=2,
-                       creationflags=subprocess.CREATE_NO_WINDOW, check=False)
-    else:
-        process.kill()
+    process.kill()
 
 
 def stop_processes() -> None:
@@ -47,10 +46,33 @@ def run_command(argv: list[str], cwd=None, timeout: float = 60) -> str:
     """Run explicit argv with bounded retained output and cancellation. No shell expansion."""
     if _cancelled():
         return "CANCELLED: Command was not started"
-    process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
-                               stderr=subprocess.STDOUT, creationflags=subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0)
+    job = None
+    if os.name == "nt":
+        from .windows_job import WindowsJob
+        job = WindowsJob()
+    try:
+        process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                   stderr=subprocess.STDOUT, creationflags=(subprocess.CREATE_NO_WINDOW | 4) if job else 0)
+    except BaseException:
+        if job:
+            job.close()
+        raise
     with _lock:
-        _active.add(process)
+        _active[process] = job
+    try:
+        check_cancelled()
+        if job:
+            job.assign_and_resume(process)
+    except BaseException:
+        process.kill()
+        process.wait(timeout=2)
+        if process.stdout:
+            process.stdout.close()
+        if job:
+            job.close()
+        with _lock:
+            _active.pop(process, None)
+        raise
     output = bytearray()
     overflow = threading.Event()
 
@@ -76,13 +98,20 @@ def run_command(argv: list[str], cwd=None, timeout: float = 60) -> str:
                 break
             time.sleep(0.02)
         process.wait(timeout=2)
+        if job:
+            job.close()
         reader.join(timeout=1)
+        if overflow.is_set() and not failure:
+            failure = "ERROR: Command exceeded its output limit"
         text = bytes(output).decode("utf-8", errors="replace")
         return f"{failure}\nexit_code={process.returncode}\n{text}".lstrip()
     finally:
         if process.poll() is None:
             process.kill()
+            process.wait(timeout=2)
+        if job:
+            job.close()
         with _lock:
-            _active.discard(process)
+            _active.pop(process, None)
         if not reader.is_alive() and process.stdout:
             process.stdout.close()

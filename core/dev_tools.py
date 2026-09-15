@@ -1,10 +1,19 @@
 from __future__ import annotations
 
 import subprocess
+import os
+import shutil
 from pathlib import Path
 
 from .permissions import Risk
 from .tools import ToolSpec
+
+
+def _git_argument(value: str) -> str:
+    value = value.strip()
+    if not value or value.startswith("-") or "\0" in value:
+        raise ValueError("Git target must be a nonempty name, not an option")
+    return value
 
 
 def _workspace() -> Path:
@@ -53,29 +62,29 @@ def git_commit(path: str = ".", message: str = "JARVIS update") -> str:
 
 
 def git_push(path: str = ".", remote: str = "origin", branch: str = "") -> str:
-    args = ["push", remote]
+    args = ["push", _git_argument(remote)]
     if branch.strip():
-        args.append(branch.strip())
+        args.append(_git_argument(branch))
     return _run_git(args, path, timeout=60)
 
 
 def git_pull(path: str = ".", remote: str = "origin", branch: str = "") -> str:
-    args = ["pull", remote]
+    args = ["pull", _git_argument(remote)]
     if branch.strip():
-        args.append(branch.strip())
+        args.append(_git_argument(branch))
     return _run_git(args, path, timeout=60)
 
 
 def git_branch(path: str = ".", name: str = "") -> str:
     if name.strip():
-        return _run_git(["switch", "-c", name.strip()], path)
+        return _run_git(["switch", "-c", _git_argument(name)], path)
     return _run_git(["branch", "--show-current"], path)
 
 
 def git_checkout(path: str = ".", target: str = "") -> str:
     if not target.strip():
         raise ValueError("Checkout target is required")
-    return _run_git(["switch", target.strip()], path)
+    return _run_git(["switch", _git_argument(target)], path)
 
 
 def git_remote(path: str = ".") -> str:
@@ -99,8 +108,16 @@ def project_snapshot(path: str = ".") -> str:
 
 def vscode_open(path: str = ".") -> str:
     target = _workspace_path(path)
-    subprocess.Popen(["code", "--reuse-window", str(target)], shell=False)
-    return f"Opened VS Code: {target}"
+    executable = shutil.which("code")
+    if not executable:
+        raise FileNotFoundError("VS Code command is not on PATH")
+    if os.name == "nt" and Path(executable).suffix.lower() in {".cmd", ".bat"}:
+        native = Path(executable).parent.parent / "Code.exe"
+        if not native.is_file():
+            raise FileNotFoundError("VS Code's native executable could not be resolved")
+        executable = str(native)
+    process = subprocess.Popen([executable, "--reuse-window", str(target)], shell=False)
+    return f"Requested VS Code for {target} (launcher pid={process.pid}); inspect its window to verify"
 
 
 def register_dev_tools(registry) -> None:

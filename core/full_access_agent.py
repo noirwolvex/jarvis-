@@ -21,6 +21,9 @@ from .orchestrator import tool_succeeded
 from .permissions import Risk
 
 _DESKTOP_BROWSER_INPUT_TOOLS = {
+    "dialog_set_field",
+    "dialog_click_button",
+    "dialog_save_file",
     "desktop_click",
     "desktop_type",
     "desktop_press",
@@ -175,6 +178,7 @@ class FullAccessJarvisAgent(JarvisAgent):
 
     def _system_prompt(self, user_text: str = "") -> str:
         base = super()._system_prompt(user_text)
+        base += "\nTerminal tool permission: " + ("enabled by the operator" if getattr(self, "allow_shell", False) else "disabled; the operator must select terminal access in the Full Access UI before run_powershell can execute") + "."
         return base + """
 
 Full Access execution profile:

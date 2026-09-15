@@ -7,6 +7,8 @@ import subprocess
 import sys
 import tempfile
 import threading
+import time
+import re
 import unittest
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -29,6 +31,7 @@ class DurableExecutionTests(unittest.TestCase):
             state.set_plan([{"id": "a", "description": "write"}])
             state.update_step("a", "running")
             state.start_action("write_file", {"password": "private-value", "text": "password=hunter2"})
+            state.record_tool("write_file", {}, "CANCELLED: outcome uncertain", 1, 1, mutation=True)
             persisted = (Path(tmp) / f"{task.task_id}.json").read_text(encoding="utf-8")
             self.assertNotIn("private-value", persisted)
             self.assertNotIn("hunter2", persisted)
@@ -162,6 +165,7 @@ class InputPrecisionTests(unittest.TestCase):
             gate.check({"x": 20, "y": 20})
         self.assertIsNone(gate.frame)
 
+    @unittest.skipUnless(os.name == "nt", "Windows capture adapter")
     def test_capture_is_stable_bounded_and_digest_checked(self):
         import core.vision_tools as vision
         from PIL import Image
@@ -184,6 +188,20 @@ class InputPrecisionTests(unittest.TestCase):
 
 
 class FullAgentFlowTests(unittest.TestCase):
+    def test_factory_registers_real_tools_without_enabling_terminal_by_default(self):
+        from core.full_access_bridge import build_full_access_agent
+        with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"JARVIS_WORKSPACE": tmp, "AI_API_KEY": "fixture"}), patch("core.agent.OpenAI"):
+            agent = build_full_access_agent()
+            try:
+                for name in ("screen_observe", "desktop_drag", "google_search", "vscode_open", "file_copy", "task_recall", "dialog_inspect"):
+                    self.assertIn(name, agent.tools._tools)
+                self.assertFalse(agent.approval("run_powershell", {}))
+                agent.allow_shell = True
+                self.assertTrue(agent.approval("run_powershell", {}))
+                self.assertFalse(agent.approval("git_push", {}))
+            finally:
+                agent._tool_executor.shutdown(wait=True)
+
     def test_mutation_requires_review_before_next_action(self):
         from core.full_access_agent import FullAccessJarvisAgent
         with tempfile.TemporaryDirectory() as tmp:
@@ -231,12 +249,69 @@ class ProcessAndWorkerTests(unittest.TestCase):
         result = run_command([sys.executable, "-c", "import time; time.sleep(10)"], timeout=0.1)
         self.assertTrue(result.startswith("ERROR:"))
 
+    def test_command_output_remains_bounded(self):
+        from core.process_control import run_command
+        result = run_command([sys.executable, "-c", "print('x' * 2000000)"])
+        self.assertTrue(result.startswith("ERROR:"))
+        self.assertLess(len(result), 17000)
+
     def test_cancelled_command_is_never_started(self):
         from core.process_control import run_command, set_cancellation
         set_cancellation(lambda: True)
         with patch("core.process_control.subprocess.Popen") as spawn:
             self.assertTrue(run_command(["unreachable"]).startswith("CANCELLED:"))
             spawn.assert_not_called()
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object containment")
+    def test_command_timeout_terminates_descendants(self):
+        import psutil
+        from core.process_control import run_command
+        script = "import subprocess,sys,time; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); print('CHILD='+str(p.pid),flush=True); time.sleep(30)"
+        result = run_command([sys.executable, "-c", script], timeout=0.5)
+        child = re.search(r"CHILD=(\d+)", result)
+        self.assertIsNotNone(child, result)
+        try:
+            psutil.Process(int(child.group(1))).wait(timeout=3)
+        except psutil.NoSuchProcess:
+            pass
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object containment")
+    def test_assignment_failure_never_executes_the_command(self):
+        from core.process_control import run_command
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "must-not-exist"
+            script = f"from pathlib import Path; Path({str(marker)!r}).touch()"
+            with patch("core.windows_job.WindowsJob.assign_and_resume", side_effect=RuntimeError("assignment failed")), self.assertRaisesRegex(RuntimeError, "assignment failed"):
+                run_command([sys.executable, "-c", script])
+            self.assertFalse(marker.exists())
+
+    @unittest.skipUnless(os.name == "nt", "Windows Job Object containment")
+    def test_forced_worker_death_terminates_the_command_job(self):
+        import psutil
+        with tempfile.TemporaryDirectory() as tmp:
+            marker = Path(tmp) / "owned-pids.json"
+            child_code = f"import subprocess,sys,time,json,os; from pathlib import Path; p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(30)']); Path({str(marker)!r}).write_text(json.dumps([os.getpid(),p.pid])); time.sleep(30)"
+            worker_code = f"import sys; from core.process_control import run_command; run_command([sys.executable,'-c',{child_code!r}])"
+            worker = subprocess.Popen([sys.executable, "-c", worker_code], stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+            owned = []
+            try:
+                deadline = time.monotonic() + 5
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(marker.exists(), "fixture command did not start")
+                for pid in json.loads(marker.read_text()):
+                    owned.append(psutil.Process(pid))
+                worker.kill()
+                worker.wait(timeout=3)
+                _, alive = psutil.wait_procs(owned, timeout=3)
+                self.assertEqual(alive, [])
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+                worker.wait(timeout=3)
+                for process in owned:
+                    if process.is_running():
+                        process.kill()
 
     def test_worker_stop_does_not_wait_for_blocked_mission(self):
         script = "import time; import core.full_access_worker as w; w._handle=lambda raw: time.sleep(30); w.main()"
@@ -252,6 +327,24 @@ class ProcessAndWorkerTests(unittest.TestCase):
 
 
 class WorkspaceFileTests(unittest.TestCase):
+    def test_git_remote_options_cannot_inject_a_command(self):
+        from core.dev_tools import git_pull
+        with patch("core.dev_tools._run_git") as run:
+            with self.assertRaises(ValueError):
+                git_pull(remote="--upload-pack=malicious-command")
+            run.assert_not_called()
+
+    def test_dialog_rejects_ambiguous_and_disabled_controls(self):
+        import core.dialog_tools as dialog
+        user = Mock()
+        user.IsWindowVisible.return_value = True
+        user.IsWindowEnabled.return_value = True
+        with patch.object(dialog, "_user32", return_value=user), patch.object(dialog, "_children", return_value=[1, 2]), patch.object(dialog, "_window_text", return_value="Save"), patch.object(dialog, "_class_name", return_value="Button"), patch.object(dialog, "_rect", return_value=[0, 0, 20, 20]):
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                dialog._find_control(10, "Save", "Button")
+            user.IsWindowEnabled.side_effect = lambda hwnd: hwnd == 2
+            self.assertEqual(dialog._find_control(10, "Save", "Button")[0], 2)
+
     def test_copy_verifies_bytes_and_refuses_overwrite_and_escape(self):
         from core.filesystem_tools import directory_create, file_copy
         with tempfile.TemporaryDirectory() as tmp, patch.dict(os.environ, {"JARVIS_WORKSPACE": tmp}):

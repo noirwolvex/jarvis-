@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { freemem, totalmem } from "node:os";
-import { runFullAccessMission } from "./full-access-bridge";
+import { runFullAccessMission, stopFullAccessWorker } from "./full-access-bridge";
 import {
   launchLegacyApplication,
   parseLegacyLaunchMission,
@@ -51,6 +51,7 @@ export function setHybridAccessMode(mode: AccessMode, allowShell = false) {
   if (value.running) throw new Error("Access mode cannot change while a mission is running");
   value.accessMode = mode;
   value.allowShell = mode === "full" && allowShell;
+  if (mode === "standard") stopFullAccessWorker();
   value.status = "IDLE";
   addEvent("ACCESS_MODE_CHANGED", "runtime", mode === "full" ? "Full Access enabled for this local session" : "Full Access disabled; standard hybrid restrictions restored");
   return { mode, allowShell: value.allowShell };
@@ -63,6 +64,7 @@ export function emergencyStopHybrid() {
   value.allowShell = false;
   value.status = "EMERGENCY_STOPPED";
   value.abort?.abort();
+  stopFullAccessWorker();
   addEvent("EMERGENCY_STOP", "runtime", "Full Access revoked; active worker cancellation requested");
 }
 

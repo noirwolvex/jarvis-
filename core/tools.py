@@ -54,6 +54,9 @@ class ToolRegistry:
         if not ok:
             return f"PERMISSION_DENIED: {reason}"
         try:
+            encoded = json.dumps(arguments, allow_nan=False)
+            if len(encoded.encode("utf-8")) > 65536:
+                raise ValueError("Tool arguments exceed 64 KiB")
             self._validators[name].validate(arguments)
             return spec.handler(**arguments)
         except Exception as exc:
