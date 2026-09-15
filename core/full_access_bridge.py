@@ -20,12 +20,16 @@ def build_full_access_agent():
     from .browser_tab_tools import register_browser_tab_tools
     from .chrome_session_tools import register_chrome_session_tools
     from .desktop_control_tools import register_desktop_control_tools
+    from .discord_tools import register_discord_tools
     from .fast_execution_agent import FastExecutionFullAccessAgent
     from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
     from .rust_engine import register_rust_engine_tools
+    from .semantic_ui_guard import guard_semantic_ui_tools
+    from .semantic_ui_tools import register_semantic_ui_tools
     from .vision_tools import register_vision_tools
     from .filesystem_tools import register_filesystem_tools
+    from .youtube_fast_tools import register_youtube_fast_tools
 
     # Resolve exact/common apps from bounded Windows sources first; only ambiguous names
     # fall through to the exhaustive install-tree scan. Cache the resulting resolver.
@@ -39,7 +43,11 @@ def build_full_access_agent():
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
     register_browser_fast_tools(agent.tools)
+    register_youtube_fast_tools(agent.tools)
     register_desktop_control_tools(agent.tools)
+    register_semantic_ui_tools(agent.tools)
+    guard_semantic_ui_tools(agent.tools)
+    register_discord_tools(agent.tools)
     register_vision_tools(agent.tools)
     register_filesystem_tools(agent.tools)
     # Overlay native desktop mutations after the normal Python tools exist. Auto mode
