@@ -22,6 +22,7 @@ def build_full_access_agent():
     from .full_access_agent import FullAccessJarvisAgent
     from .full_access_browser_routing import register_full_access_browser_routing
     from .permissions import Risk
+    from .rust_engine import register_rust_engine_tools
     from .vision_tools import register_vision_tools
     from .filesystem_tools import register_filesystem_tools
 
@@ -39,6 +40,10 @@ def build_full_access_agent():
     register_desktop_control_tools(agent.tools)
     register_vision_tools(agent.tools)
     register_filesystem_tools(agent.tools)
+    # Overlay native desktop mutations after the normal Python tools exist. Auto mode
+    # keeps the Python path as a pre-dispatch fallback when the Rust daemon is not ready;
+    # strict rust mode fails closed instead of silently bypassing the daemon.
+    register_rust_engine_tools(agent.tools)
     # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
     # to a second unmanaged browser after the guarded CDP tools are installed.
     register_full_access_browser_routing(agent.tools)
