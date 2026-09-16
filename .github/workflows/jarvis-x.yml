@@ -37,6 +37,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.14'
+      - name: Compile Python runtime bridges
+        run: python -m py_compile core/full_access_worker.py scripts/jarvis_runtime.py
       - name: Install stable Rust
         run: rustup update stable --no-self-update
       - name: Format
