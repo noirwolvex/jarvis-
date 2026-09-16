@@ -44,9 +44,14 @@ def ui_type_native(text: str, target: str = "", title: str = "") -> str:
 
     client, status = _preflight()
     if client is None:
-        # Compatibility for manual JARVIS_NATIVE_ENGINE=auto sessions. The normal
-        # JARVIS X launcher runs strict rust mode, so it never silently reaches this path.
-        return ui_type(text=value, target=target, title=title, submit=False, replace=False)
+        # Compatibility is allowed only for explicitly requested auto mode. The normal
+        # JARVIS X launcher uses strict rust mode and must fail closed if the daemon/config
+        # is unavailable instead of silently typing through Python.
+        if native_engine_mode() == "auto":
+            return ui_type(text=value, target=target, title=title, submit=False, replace=False)
+        raise RustEngineUnavailable(
+            "Strict Rust mode requires the native daemon before semantic keyboard input"
+        )
 
     _guard_foreground(hwnd)
     _SNAPSHOTS.invalidate(hwnd)
@@ -115,3 +120,7 @@ def register_native_ui_input_tools(registry: ToolRegistry) -> None:
             guarded,
         )
     )
+
+    from .whatsapp_native import register_whatsapp_native_tools
+
+    register_whatsapp_native_tools(registry)
