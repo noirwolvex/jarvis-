@@ -76,7 +76,7 @@ def build_full_access_agent():
     return agent
 
 
-def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shell: bool = False) -> dict[str, Any]:
+def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shell: bool = False, observation_emit=None) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
 
@@ -90,12 +90,31 @@ def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shel
     agent.allow_shell = allow_shell
     from .process_control import set_cancellation
     set_cancellation(agent._is_stopped)
+    from .live_desktop import LiveDesktopMonitor, enabled as live_enabled
+    monitor = None
+    agent.live_monitor = None
+    agent._explicit_vision_pending = False
     try:
+        permissions = agent.tools.permissions
+        if (observation_emit is not None and live_enabled() and not agent._is_stopped()
+                and permissions.access_mode == "full" and "screen_observe" not in permissions.deny_tools):
+            monitor = LiveDesktopMonitor(lambda: agent._is_stopped() or permissions.access_mode != "full"
+                                         or "screen_observe" in permissions.deny_tools, observation_emit)
+            agent.live_monitor = monitor
+            monitor.start()
         result = agent.run(goal, emit=emit)
     finally:
-        # Synthetic held keys/buttons are useful inside a multi-step gesture, but must never
-        # survive mission completion, failure, CAPTCHA pause, or model/tool exceptions.
-        release_held_inputs()
+        try:
+            if monitor:
+                monitor.stop()
+                if agent.orchestrator.current:
+                    agent.orchestrator.current.metrics.update(live_captures=monitor.captures,
+                        live_changes=monitor.changes, live_capture_errors=monitor.errors)
+                    agent.orchestrator._persist(agent.orchestrator.current)
+        finally:
+            agent.live_monitor = None
+            # Cleanup still runs if capture or checkpoint persistence fails.
+            release_held_inputs()
 
     summary = agent.orchestrator.summary()
     current = agent.orchestrator.current

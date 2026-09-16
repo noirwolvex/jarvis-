@@ -16,6 +16,7 @@ export type NativeView = {
     previewDataUrl: string;
     previewWidth: number;
     previewHeight: number;
+    live?: boolean;
   } | null;
 };
 export type Snapshot = {

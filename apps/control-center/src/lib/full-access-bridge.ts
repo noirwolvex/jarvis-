@@ -51,7 +51,7 @@ type WorkerState = {
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-const WORKER_REVISION = 3;
+const WORKER_REVISION = 4;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 

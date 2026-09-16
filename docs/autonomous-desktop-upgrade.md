@@ -33,6 +33,10 @@ The persistent worker is now required for dashboard missions. The old `JARVIS_FU
 
 ## Perception and precise input
 
+During an authorized dashboard mission, a background monitor samples the desktop with a 500 ms target interval and publishes only changed previews. It holds one latest JPEG in memory, bounded to 960 pixels on the longest edge and 750 KB, without a disk queue. The dashboard polls state once per second and labels the timestamp as the latest screen change; it does not flood the event log with preview updates. This is sampled live context, not a video stream or a hard real-time guarantee.
+
+At an existing model decision, the agent can attach the newest preview without adding a model request. An explicitly requested `screen_observe` image takes priority for the next decision so its coordinate mapping remains available. Previews older than three seconds without a successful sample, failed captures, revoked permissions and stopped missions cannot provide new model context. Captures stop when the mission finishes or pauses, Full Access is disabled, or emergency stop is activated. An explicit `screen_observe` deny rule also disables the monitor. Set `JARVIS_LIVE_PREVIEW=false` to retain on-demand capture only. Capture counts, changes and errors are recorded in execution metrics. This background path does not independently interpret every frame or authorize input.
+
 `screen_observe` captures the Windows virtual desktop, including negative monitor origins and the source-to-preview scale. It checks the foreground during capture, attempts to settle changing UI for a bounded period, and publishes the latest JPEG to the model and dashboard. The default settling budget is 300 ms; captures stop early when sampled images agree. JPEGs are bounded to 1.5 MB and the newest eight captures are retained in `.jarvis/vision`.
 
 Raw desktop input requires a stable, foreground-bound observation and coordinates within its captured virtual bounds. Immediately before dispatch, another screen sample is compared with the retained scene signature. A changed foreground or scene requires observation again. Scene-bound evidence expires after 60 seconds; this accommodates provider latency while still checking the current scene before input. The comparison uses a reduced image and tolerances, so it is a guard against visible changes rather than proof of element identity. Semantic browser and UI Automation tools remain the preferred route.
@@ -41,11 +45,13 @@ Every raw desktop mutation consumes its observation. After successful input, the
 
 Windows Unicode input now uses the complete native `INPUT` union: 40 bytes on 64-bit Windows and 28 on 32-bit Windows. Non-BMP characters use UTF-16 surrogate pairs. Newlines generate one return sequence. Partial input and uncertain UIA writes fail without replaying text through the clipboard. Verification reads the editor instead of writing the text again. Synthetic shortcuts track held keys for cleanup, including fail-safe-corner cleanup.
 
+The Python pointer path uses smooth interpolation with cancellation and foreground checks between samples, without PyAutoGUI's additional per-call pause. Dragging retains one foreground binding and releases its tracked button on failure. Wheel input is delivered in bounded chunks with cancellation/focus checks. These changes preserve the existing raw-input observation gate and PyAutoGUI fail-safe; they do not bypass verification or apply new behavior to the separate Rust input backend.
+
 ## Planning, verification and recovery
 
 ### High-speed semantic execution
 
-The Full Access factory now registers `workflow_execute`, `workflow_status`, `workflow_review`, `browser_semantic_snapshot`, `browser_semantic_action`, `browser_wait_state`, and `ui_wait_state` on the existing `FastExecutionFullAccessAgent`. This is the same agent used by the persistent dashboard worker. Worker revision 3 replaces an outdated idle worker before the next mission; an active older worker must finish or stop first.
+The Full Access factory now registers `workflow_execute`, `workflow_status`, `workflow_review`, `browser_semantic_snapshot`, `browser_semantic_action`, `browser_wait_state`, and `ui_wait_state` on the existing `FastExecutionFullAccessAgent`. This is the same agent used by the persistent dashboard worker. Worker revision 4 replaces an outdated idle worker before the next mission; an active older worker must finish or stop first.
 
 For an unfamiliar interface, the model obtains a compact semantic snapshot, chooses exact targets, and submits known steps as one ordered workflow. Browser actions use DOM/CDP; native applications use UI Automation; existing application/file/Git/native tools remain available. Raw coordinates remain on the existing screen-bound path and are deliberately excluded from deterministic workflows.
 
@@ -54,6 +60,8 @@ For an unfamiliar interface, the model obtains a compact semantic snapshot, choo
 Each workflow stores its immutable program and per-step journal in the task checkpoint. Repeating the same workflow ID resumes only unfinished work. A delivered action with a pending checkpoint retries only the observation. An uncertain send, write or click is never automatically replayed: inspect the live outcome, record a fresh `task_verify` claim, then use `workflow_review` before continuing. `workflow_status` restores program context after chat trimming; metadata alone cannot verify an action. Workflow budgets are 20 programs, 100 steps and 256 KiB of program data per mission.
 
 The narrow text compiler still handles unambiguous app-opening and Google-search chains without a model request. Unknown action clauses fall back to the model instead of being swallowed into a search query. A fast-path failure now continues the same task through model recovery, retaining completed steps and the original browser baseline. Full Access plans preserve required steps and their order; unfinished workflows or skipped steps cannot produce mission completion.
+
+The direct compiler also recognizes strict Arabic app-launch chains such as `افتح ديسكورد ثم افتح الحاسبة ثم افتح المفكرة`, quoted searches such as `ابحث في جوجل عن "تعلم بايثون"`, quoted playback requests such as `شغل "اسم الأغنية" على يوتيوب`, and explicit current-video play/pause commands. Every clause must match; an unrecognized requested step sends the whole mission to the model. Successful deterministic commands need no model call, while their existing semantic tools still verify results. This is a bounded command grammar, not unrestricted Arabic language understanding without a model.
 
 ### Observation reuse and checkpoint behavior
 
@@ -103,11 +111,11 @@ Local Windows validation updated on September 16, 2026:
 
 | Check | Result |
 | --- | --- |
-| Python unit and integration suite | 218 passed |
-| Control-center tests | 12 passed |
+| Python unit and integration suite | 239 passed |
+| Control-center tests | 13 passed |
 | TypeScript runtime tests | 21 passed |
 | Database migration/invariant tests | 6 passed, including the parent test |
-| Rust tests | 19 passed; 3 ignored |
+| Rust tests | 20 passed; 3 ignored |
 | Workspace TypeScript checks | Passed |
 | Next.js production build | Passed |
 | Python source compilation | Passed |
@@ -115,7 +123,7 @@ Local Windows validation updated on September 16, 2026:
 | Prisma schema validation | Passed |
 | npm dependency audit | 0 vulnerabilities |
 
-Performance regressions assert structural costs rather than unreliable wall-clock promises: eight verified workflow actions complete in one model tool-call cycle plus the final response (two model calls total), with no intermediate screenshots; sixteen direct workflow steps use no model calls, and repeating that completed program dispatches no actions. Ready-state waits do not sleep, repeated unchanged snapshots hit their caches, and checkpoint retries do not repeat the preceding mutation. These are fixture measurements, not production latency benchmarks.
+Performance regressions assert structural costs rather than unreliable wall-clock promises: eight verified workflow actions complete in one model tool-call cycle plus the final response (two model calls total), with no requested intermediate screenshots; sixteen direct workflow steps use no model calls, and repeating that completed program dispatches no actions. The dashboard's optional live monitor adds sampled frames independently; a separate regression checks that its latest image adds no model round-trips and does not accumulate images in context. Ready-state waits do not sleep, repeated unchanged snapshots hit their caches, and checkpoint retries do not repeat the preceding mutation. Tests also cover permission-gated capture, capture failure, mission failure, cancellation, stale previews, explicit coordinate-image priority, focus loss and button release. These are fixture measurements, not production latency benchmarks.
 
 Browser tests execute isolated headless Chromium against local HTML fixtures, with network requests intercepted. They cover real DOM targeting, snapshot invalidation, loading waits, ambiguous controls, cancellation and simulated media properties. Discord/UIA tests use controlled fixtures. No live Discord messages or end-to-end provider-driven desktop missions were executed. CI now installs Playwright and Chromium to run the browser fixtures. Rust tests used `.jarvis/validation/rust-target` because the running daemon locked the normal output executable; the daemon was left running.
 

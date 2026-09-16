@@ -68,7 +68,11 @@ def _handle(raw: str) -> dict[str, Any]:
                     frame.pop("path", None)
                     _write({"type": "observation", "id": request_id, "frame": frame,
                             "preview": visual["content"][1]["image_url"]["url"]})
-        payload = run_agent_mission(_agent(), title, emit=progress, cancel_event=_STOPPED, allow_shell=message.get("allow_shell") is True)
+        def observation(value):
+            if not _STOPPED.is_set():
+                _write({"type": "observation", "id": request_id, **value})
+        payload = run_agent_mission(_agent(), title, emit=progress, cancel_event=_STOPPED,
+                                    allow_shell=message.get("allow_shell") is True, observation_emit=observation)
         return {"type": "result", "id": request_id, "ok": True, "payload": payload}
     except Exception as exc:
         return {"type": "result", "id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from typing import Literal
 
 from .permissions import Risk
@@ -49,8 +50,34 @@ def desktop_click_button(x: int, y: int, button: str = "left", clicks: int = 1) 
 
     chosen = _button(button)
     count = max(1, min(int(clicks), 3))
-    pyautogui.click(x=int(x), y=int(y), clicks=count, interval=0.06, button=chosen)
+    pyautogui.click(x=int(x), y=int(y), clicks=count, interval=0.06, button=chosen, _pause=False)
     return f"Clicked {chosen} at ({int(x)}, {int(y)}) x{count}"
+
+
+def move_pointer(x: int, y: int, duration: float = 0.08, *, expected_foreground: int | None = None) -> None:
+    """Smooth bounded movement with cancellation/foreground checks between samples."""
+    _windows_only()
+    import pyautogui
+    from .desktop_observation import foreground_identity
+    from .process_control import check_cancelled
+    check_cancelled()
+    hwnd = foreground_identity() if expected_foreground is None else expected_foreground
+    if not hwnd:
+        raise RuntimeError("Foreground window unavailable for pointer movement")
+    if not 0 <= duration <= 2:
+        raise ValueError("Pointer movement duration must be between 0 and 2 seconds")
+    origin = pyautogui.position()
+    start = time.monotonic()
+    while True:
+        check_cancelled()
+        if foreground_identity() != hwnd:
+            raise RuntimeError("Foreground changed during pointer movement")
+        progress = 1.0 if duration == 0 else min(1.0, (time.monotonic() - start) / duration)
+        eased = progress * progress * (3 - 2 * progress)
+        pyautogui.moveTo(round(origin.x + (x - origin.x) * eased), round(origin.y + (y - origin.y) * eased), _pause=False)
+        if progress >= 1:
+            return
+        time.sleep(min(0.016, max(0, duration - (time.monotonic() - start))))
 
 
 def desktop_drag(
@@ -66,8 +93,20 @@ def desktop_drag(
 
     chosen = _button(button)
     seconds = max(0.05, min(float(duration), 2.0))
-    pyautogui.moveTo(int(start_x), int(start_y), duration=0.05)
-    pyautogui.dragTo(int(end_x), int(end_y), duration=seconds, button=chosen)
+    from .desktop_observation import foreground_identity
+    hwnd = foreground_identity()
+    move_pointer(int(start_x), int(start_y), 0.05, expected_foreground=hwnd)
+    try:
+        if foreground_identity() != hwnd:
+            raise RuntimeError("Foreground changed before drag")
+        desktop_mouse_down(chosen)
+        move_pointer(int(end_x), int(end_y), seconds, expected_foreground=hwnd)
+    finally:
+        try:
+            desktop_mouse_up(chosen)
+        except Exception:
+            release_held_inputs()
+            raise
     point = pyautogui.position()
     if int(point.x) != int(end_x) or int(point.y) != int(end_y):
         raise RuntimeError(f"Pointer did not reach drag destination; current=({point.x},{point.y})")

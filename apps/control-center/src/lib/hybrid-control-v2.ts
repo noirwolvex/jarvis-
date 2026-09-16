@@ -162,16 +162,17 @@ async function runFullMission(task: TaskView) {
     const result = await runFullAccessMission(task.title, abort.signal, (kind, message) => {
       if (kind === "emergency_stop") { emergencyStopHybrid(); return; }
       if (kind === "observation") {
-        if (value.emergencyStopped) return;
+        if (value.emergencyStopped || abort.signal.aborted || value.accessMode !== "full") return;
         const observation = JSON.parse(message);
         const frame = observation.frame;
         if (!frame || typeof observation.preview !== "string" || observation.preview.length > 2_000_100 || !observation.preview.startsWith("data:image/jpeg;base64,")) return;
         value.observation = { daemonSimulation: false, nativeInput: true, foreground: null,
           capture: { frameId: frame.sha256, capturedAtMs: frame.captured_at_ms, sha256: frame.sha256,
             display: { id: 0, x: frame.virtual_origin_x, y: frame.virtual_origin_y, width: frame.source_width, height: frame.source_height, scale: frame.desktop_scale_x },
-            previewDataUrl: observation.preview, previewWidth: frame.width, previewHeight: frame.height } };
+            previewDataUrl: observation.preview, previewWidth: frame.width, previewHeight: frame.height, live: frame.live === true } };
         value.version += 1;
-        addEvent("SCREEN_OBSERVED", task.id, `Captured ${frame.source_width}×${frame.source_height} desktop in ${frame.capture_ms} ms; stable=${frame.stable}`);
+        // Live frames update the preview without evicting task progress from the bounded event log.
+        if (!frame.live) addEvent("SCREEN_OBSERVED", task.id, `Captured ${frame.source_width}×${frame.source_height} desktop in ${frame.capture_ms} ms; stable=${frame.stable}`);
         return;
       }
       if (!value.emergencyStopped) {

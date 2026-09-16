@@ -88,6 +88,10 @@ The daemon still does not bypass Windows secure desktop, UAC, elevated-window is
 
 ## Validation gates
 
+The Rust mTLS tests require Python 3.11+ on PATH (`JARVIS_TEST_PYTHON` can select another interpreter). They run a real Python/OpenSSL TLS 1.3 status exchange with strict certificate validation. CI installs Python 3.14 for this check.
+
+Development certificates generated before the certificate-chain fix can be rejected by Python/OpenSSL. Generate new development material in a new directory with the rebuilt `dev_pki` example; the fix gives the CA/server/client distinct subject names and leaf authority-key identifiers. Existing certificates are not modified, and certificate verification remains enabled.
+
 Before merging changes to this integration, run at minimum:
 
 ```powershell
@@ -101,3 +105,18 @@ npm run build
 ```
 
 CI runs the portable Rust test suite on Windows and Linux and compiles the native Rust adapters on Windows. Live native desktop qualification still requires supervised Windows testing because CI must not click or type into a runner desktop.
+
+## Local connection verification — September 16, 2026
+
+The JARVIS X hybrid route calls the Node Full Access bridge, which starts `core.full_access_worker`. Its agent factory registers `core.rust_engine` handlers for `desktop_click`, `desktop_type` and `desktop_click_button`. Other operations retain their Python/semantic backends.
+
+Verified locally:
+
+- A real Node child-process exchange received the Python worker's `ready` and successful `ping` replies without loading a model or executing a mission.
+- The real Python `RustDaemonClient` connected to a disposable Rust simulation daemon with mutual TLS 1.3 and ALPN `jarvis-execution/1`. Status and synthetic capture round-trips succeeded.
+- The actual dashboard agent factory registered all three Rust handlers, and its `native_engine_status` tool reached that daemon. It correctly refused to classify a simulation daemon as ready for native input.
+- Six Python Rust-adapter tests, thirteen control-center tests, and twenty Rust tests passed (three Rust tests remain ignored). Native-feature compilation and Rust formatting passed. The CI workflow was updated but was not executed remotely.
+
+The configured runtime is a separate finding: the local environment returned `mode=auto`, `backend=python`, `rust_configured=false`. No service was listening on the default Rust port 7443. The dashboard initially returned HTTP 200 with `mode=hybrid` and `bridge.runtime=python-agent-full-access`; by the final check it was no longer listening on port 3000. No persistent service or Full Access setting was changed by this verification. The disposable simulation daemon and test worker were stopped after testing.
+
+Therefore the integration is implemented and its process/protocol boundaries are verified, but the normal runtime was **not using Rust** at the final check. Activating that route still requires valid TLS paths/capability mappings and a running native daemon, followed by starting the hybrid dashboard with those settings. This verification did not perform native mouse/keyboard input or an end-to-end model-driven mission.

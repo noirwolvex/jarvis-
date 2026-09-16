@@ -1,5 +1,7 @@
 # Rust execution foundation
 
+This document describes the initial foundation. For the implemented Python bridge, foreground-bound native input, current protocol extensions and connection verification, use [Rust execution engine integration](rust-engine-integration.md). The original limitations and protocol examples below are historical and do not fully describe the current implementation.
+
 Status: real compilable reference implementation. Default mode is simulation. Windows native feature compilation is verified; live Windows input and Linux compositor behavior have not been exercised. This is not an OS sandbox or a complete desktop controller.
 
 ## Build and tests

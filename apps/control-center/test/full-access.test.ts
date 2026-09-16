@@ -15,7 +15,7 @@ test("emergency stop revokes access, cancels active worker and stays latched", {
   child.killed = false;
   child.stdin = { write: (data: string, callback: () => void) => { writes.push(data); callback?.(); } };
   child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
-  state.jarvisFullAccessWorkerV1 = { revision: 3, child, pending: new Map(), buffer: "", stderr: "" };
+  state.jarvisFullAccessWorkerV1 = { revision: 4, child, pending: new Map(), buffer: "", stderr: "" };
   try {
     setHybridAccessMode("full");
     submitHybridMission("A fixture that must never touch the desktop");
@@ -50,6 +50,47 @@ test("terminal authority is opt-in and lost on disable or emergency stop", () =>
   emergencyStopHybrid();
   assert.equal(hybridSnapshot().facts.find(item => item.key === "access.terminal")?.value, "false");
   resetHybridStop();
+});
+
+test("live previews replace the frame without flooding events or surviving revocation", { skip: process.platform !== "win32" }, async () => {
+  const globals = globalThis as any;
+  delete globals.jarvisHybridV3;
+  const child = new EventEmitter() as any;
+  child.exitCode = null;
+  child.killed = false;
+  child.stdin = { write: (_data: string, callback: () => void) => callback?.() };
+  child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
+  const worker = { revision: 4, child, pending: new Map(), buffer: "", stderr: "" };
+  globals.jarvisFullAccessWorkerV1 = worker;
+  try {
+    setHybridAccessMode("full");
+    submitHybridMission("A synthetic live preview fixture");
+    const progress = worker.pending.values().next().value.onProgress;
+    const eventsBefore = hybridSnapshot().events.length;
+    const observation = (sha256: string, live = true) => JSON.stringify({
+      frame: { sha256, captured_at_ms: 1000, virtual_origin_x: -1920, virtual_origin_y: 0,
+        source_width: 3840, source_height: 1080, desktop_scale_x: 4, width: 960, height: 270,
+        live, stable: !live, capture_ms: 3 }, preview: "data:image/jpeg;base64,fixture",
+    });
+    for (let i = 0; i < 10; i++) progress("observation", observation(`frame-${i}`));
+    assert.equal(hybridSnapshot().native?.capture?.frameId, "frame-9");
+    assert.equal(hybridSnapshot().native?.capture?.live, true);
+    assert.equal(hybridSnapshot().native?.capture?.display.x, -1920);
+    assert.equal(hybridSnapshot().events.length, eventsBefore);
+    progress("observation", observation("explicit", false));
+    assert.equal(hybridSnapshot().native?.capture?.live, false);
+    assert.equal(hybridSnapshot().events.length, eventsBefore + 1);
+    setHybridAccessMode("standard");
+    progress("observation", observation("late"));
+    assert.equal(hybridSnapshot().native?.capture?.frameId, "explicit");
+    await new Promise(resolve => setImmediate(resolve));
+  } finally {
+    setHybridAccessMode("standard");
+    await new Promise(resolve => setImmediate(resolve));
+    child.kill();
+    delete globals.jarvisFullAccessWorkerV1;
+    delete globals.jarvisHybridV3;
+  }
 });
 
 test("cancellation during old-worker replacement cannot start a new worker", { skip: process.platform !== "win32" }, async () => {

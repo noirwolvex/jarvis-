@@ -8,6 +8,8 @@ The hybrid control center now connects the existing Python agent to guarded scre
 
 Full Access also includes ordered semantic workflows: compile known steps once, execute through the existing permission gates, verify meaningful checkpoints, and recover without replaying completed actions. Bounded DOM/UIA snapshots, cancellable state waits, Discord conversation checks and verified YouTube playback reduce repeated model calls and screenshots. See the runbook for measured fixture results and live-testing limits.
 
+Authorized dashboard missions also sample changed desktop previews in the background and reuse the latest image at existing model decisions. Simple supported Arabic commands take a direct verified path without model calls. Pointer movement, dragging and scrolling check cancellation and focus during execution. Live previews stop with the mission and never replace the stable observation required for coordinate input.
+
 See the [desktop-agent runbook and validation limits](docs/autonomous-desktop-upgrade.md) for setup, controls, recovery, tests, and the remaining native qualification requirements. Full Access starts disabled in a new server session; simulation remains the default control mode.
 
 ## JARVIS X reference implementation

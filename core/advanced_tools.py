@@ -117,20 +117,32 @@ def inspect_window(title: str = "") -> str:
 
 
 def desktop_move(x: int, y: int, duration: float = 0.1) -> str:
-    import pyautogui
-    pyautogui.moveTo(x, y, duration=max(0.0, duration))
+    from .desktop_control_tools import move_pointer
+    move_pointer(x, y, duration)
     return f"Moved mouse to ({x}, {y})"
 
 
 def desktop_scroll(clicks: int) -> str:
     import pyautogui
-    pyautogui.scroll(clicks)
+    from .process_control import check_cancelled
+    from .desktop_observation import foreground_identity
+    if not -1000 <= clicks <= 1000:
+        raise ValueError("Scroll must contain at most 1000 wheel steps")
+    hwnd = foreground_identity()
+    remaining = clicks
+    while remaining:
+        check_cancelled()
+        if not hwnd or foreground_identity() != hwnd:
+            raise RuntimeError("Foreground changed during scroll")
+        chunk = min(8, abs(remaining)) * (1 if remaining > 0 else -1)
+        pyautogui.scroll(chunk, _pause=False)
+        remaining -= chunk
     return f"Scrolled desktop by {clicks}"
 
 
 def desktop_double_click(x: int, y: int) -> str:
-    import pyautogui
-    pyautogui.doubleClick(x=x, y=y, interval=0.08)
+    from .desktop_control_tools import desktop_click_button
+    desktop_click_button(x, y, clicks=2)
     return f"Double-clicked desktop at ({x}, {y})"
 
 
@@ -225,14 +237,14 @@ def register_advanced_tools(registry: ToolRegistry) -> None:
         "desktop_move",
         "Move the mouse to absolute screen coordinates without clicking.",
         Risk.LOW,
-        {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "duration": {"type": "number"}}, "required": ["x", "y"]},
+        {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "duration": {"type": "number", "minimum": 0, "maximum": 2}}, "required": ["x", "y"]},
         desktop_move,
     ))
     registry.register(ToolSpec(
         "desktop_scroll",
         "Scroll the currently active Windows application. Positive values scroll up; negative values scroll down.",
         Risk.MEDIUM,
-        {"type": "object", "properties": {"clicks": {"type": "integer"}}, "required": ["clicks"]},
+        {"type": "object", "properties": {"clicks": {"type": "integer", "minimum": -1000, "maximum": 1000}}, "required": ["clicks"]},
         desktop_scroll,
     ))
     registry.register(ToolSpec(

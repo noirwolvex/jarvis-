@@ -34,6 +34,47 @@ _NEXT_APP = re.compile(r"\s+(?:and\s+then|then|and)\s+open\s+", re.IGNORECASE)
 _TRAILING_APP_WORD = re.compile(r"\s+(?:app|application)\s*$", re.IGNORECASE)
 _NEW_TAB_SIGNAL = re.compile(r"\b(?:new|another)\s+(?:browser\s+)?tab\b", re.IGNORECASE)
 _EXTRA_ACTION = re.compile(r"(?:\b(?:and(?:\s+then)?|then)\s+|[;→]|->)\s*(?:open|navigate|go|send|write|type|play|pause|select|switch|join|save|delete|search|click|press|close|read|find|download|upload)\b", re.IGNORECASE)
+_APP_ALIASES = {"المفكرة": "Notepad", "نوت باد": "Notepad", "الحاسبة": "Calculator", "الآلة الحاسبة": "Calculator",
+                "ديسكورد": "Discord", "الديسكورد": "Discord", "واتساب": "WhatsApp", "واتس اب": "WhatsApp",
+                "كروم": "Chrome", "جوجل كروم": "Chrome", "قوقل كروم": "Chrome", "فيجوال ستوديو كود": "Visual Studio Code"}
+
+
+def _simple_semantic_steps(text: str) -> list[FastStep] | None:
+    """Strict whole-clause grammar. Unknown work always goes to the model intact."""
+    playback = {"شغل الفيديو الحالي": "play", "شغّل الفيديو الحالي": "play", "استكمل الفيديو الحالي": "play",
+                "اوقف الفيديو مؤقتا": "pause", "أوقف الفيديو مؤقتا": "pause", "وقف الفيديو الحالي": "pause",
+                "play the current youtube video": "play", "pause the current youtube video": "pause"}
+    steps = []
+    for index, clause in enumerate(re.split(r"\s+(?:ثم|وبعدين|بعدين)\s+", text), 1):
+        if not clause or index > 32:
+            return None
+        action = playback.get(clause.casefold())
+        tool, arguments = "", {}
+        if action:
+            tool, arguments = "youtube_playback", {"action": action}
+        elif match := re.fullmatch(r"(?:افتح|إفتح)\s+(?:تطبيق\s+|برنامج\s+)?(.+)", clause):
+            app = match.group(1).strip()
+            # Arabic aliases and simple literal English app names only. Trailing
+            # Arabic action prose cannot be misinterpreted as part of an app name.
+            if app in _APP_ALIASES:
+                app = _APP_ALIASES[app]
+            elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .+_-]{0,79}", app) or re.search(r"\b(and|then|send|type|open|play|search)\b", app, re.I):
+                return None
+            tool, arguments = "launch_installed_app", {"query": app, "timeout_seconds": 12}
+        elif match := re.fullmatch(r'(?:ابحث|إبحث)\s+في\s+(?:جوجل|قوقل|غوغل)\s+عن\s+["«](.+)["»]', clause):
+            query = match.group(1)
+            if len(query) > 500 or any(char in query for char in '"«»\0'):
+                return None
+            tool, arguments = "google_search", {"query": query, "new_tab": False}
+        elif match := re.fullmatch(r'(?:شغل|شغّل|play)\s+["«](.+)["»]\s+(?:على يوتيوب|on youtube)', clause, re.I):
+            query = match.group(1)
+            if len(query) > 500 or any(char in query for char in '"«»\0'):
+                return None
+            tool, arguments = "youtube_search_open", {"query": query, "new_tab": False, "play": True}
+        else:
+            return None
+        steps.append(FastStep(f"fast-{index}", clause, tool, arguments))
+    return steps
 
 
 def _enabled() -> bool:
@@ -91,6 +132,11 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     text = re.sub(r"\s+", " ", str(goal or "")).strip()
     if not text or len(text) > 8000:
         return None
+    if "\0" in text:
+        return None
+    simple = _simple_semantic_steps(text)
+    if simple:
+        return simple
 
     first = _GOOGLE_FIRST.match(text)
     if first:

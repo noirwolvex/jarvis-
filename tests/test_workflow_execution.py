@@ -187,6 +187,46 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertEqual(self.action.call_count, 1)
         self.assertTrue(any("Not executed" in message.get("content", "") for message in self.agent.messages))
 
+    def test_live_context_keeps_one_image_without_extra_model_round_trips(self):
+        from PIL import Image
+        from core.live_desktop import LiveDesktopMonitor
+        from core.vision_tools import is_internal_vision_message
+        self.agent.live_monitor = LiveDesktopMonitor(lambda: False,
+            capture=lambda: (Image.new("RGB", (30, 30)), 12, (0, 0)))
+        self.agent.live_monitor.poll()
+        self.agent.client.chat.completions.create.side_effect = [
+            self.response([("workflow_execute", {"workflow_id": "mission", "steps": [step()]})]), self.response()]
+        with patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            self.assertEqual(self.agent.run("perform this complex fixture"), "Done")
+        self.assertEqual(self.agent.client.chat.completions.create.call_count, 2)
+        for call in self.agent.client.chat.completions.create.call_args_list:
+            self.assertEqual(sum(is_internal_vision_message(item) for item in call.kwargs["messages"]), 1)
+        self.action.assert_called_once()
+
+    def test_requested_coordinate_observation_reaches_model_before_live_preview(self):
+        from core.vision_tools import VISION_MARKER
+        exact = {"role": "user", "content": [{"type": "text", "text": VISION_MARKER + " exact coordinates"}]}
+        live = {"role": "user", "content": [{"type": "text", "text": VISION_MARKER + " Live preview observed"}]}
+        self.agent.live_monitor = Mock()
+        self.agent.live_monitor.model_message.return_value = live
+        self.agent._replace_internal_vision(exact)
+        self.agent._refresh_live_vision()
+        self.assertEqual(self.agent.messages, [exact])
+        self.agent.live_monitor.model_message.assert_not_called()
+        self.agent._refresh_live_vision()
+        self.assertEqual(self.agent.messages, [live])
+
+    def test_stale_live_context_is_removed_without_removing_user_mission(self):
+        from core.vision_tools import VISION_MARKER
+        mission = {"role": "user", "content": "original mission"}
+        self.agent.messages = [mission]
+        self.agent._replace_internal_vision({"role": "user", "content": [
+            {"type": "text", "text": VISION_MARKER + " Live preview observed"}]}, live=True)
+        self.agent.live_monitor = Mock()
+        self.agent.live_monitor.model_message.return_value = None
+        self.agent._refresh_live_vision()
+        self.assertEqual(self.agent.messages, [mission])
+
     def test_fast_failure_recovers_same_task_without_restarting_completed_app(self):
         launch = Mock(side_effect=["VERIFIED: first application open", "ERROR: second still loading"])
         self.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object", "properties": {"query": {"type": "string"}, "timeout_seconds": {"type": "number"}}, "required": ["query"]})
@@ -201,6 +241,17 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertEqual(launch.call_count, 2)
         self.assertEqual(self.agent.orchestrator.current.status, "completed")
         self.assertEqual([item.status for item in self.agent.orchestrator.current.plan], ["completed", "completed"])
+
+    def test_arabic_simple_mission_verifies_steps_without_model_call(self):
+        launch = Mock(return_value="VERIFIED: requested application visible")
+        self.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object", "properties": {
+            "query": {"type": "string"}, "timeout_seconds": {"type": "number"}}, "required": ["query"]})
+        with patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            self.agent.run("افتح ديسكورد ثم افتح الحاسبة ثم افتح المفكرة")
+        self.assertEqual([call.kwargs["query"] for call in launch.call_args_list], ["Discord", "Calculator", "Notepad"])
+        self.agent.client.chat.completions.create.assert_not_called()
+        self.assertEqual(self.agent.orchestrator.current.status, "completed")
+        self.assertEqual([item.status for item in self.agent.orchestrator.current.plan], ["completed"] * 3)
 
 
 if __name__ == "__main__":

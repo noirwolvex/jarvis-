@@ -231,7 +231,7 @@ Full Access execution profile:
             return super()._browser_action_guard("browser_click")
         return super()._browser_action_guard(tool_name)
 
-    def _replace_internal_vision(self, followup: dict[str, Any]) -> None:
+    def _replace_internal_vision(self, followup: dict[str, Any], *, live: bool = False) -> None:
         # Keep only the newest screenshot in the live model context. Image bytes never enter
         # MemoryStore or tool traces, which keeps subsequent turns fast and bounded.
         self.messages = [
@@ -239,6 +239,23 @@ Full Access execution profile:
             if not (isinstance(message, dict) and is_internal_vision_message(message))
         ]
         self.messages.append(followup)
+        self._explicit_vision_pending = not live
+
+    def _refresh_live_vision(self) -> None:
+        # A requested screen observation must reach the next decision intact,
+        # including its coordinate mapping. A background preview cannot replace it.
+        if getattr(self, "_explicit_vision_pending", False):
+            self._explicit_vision_pending = False
+            return
+        monitor = getattr(self, "live_monitor", None)
+        if monitor is None:
+            return
+        observation = monitor.model_message()
+        if observation:
+            self._replace_internal_vision(observation, live=True)
+        else:
+            self.messages = [item for item in self.messages if not (is_internal_vision_message(item)
+                and "Live preview observed" in str(item["content"][0].get("text", "")))]
 
     def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None, *, resume_current: bool = False) -> str:
         self._active_emit = emit
@@ -268,6 +285,8 @@ Full Access execution profile:
                     return "CANCELLED: Emergency stop is active"
                 self.orchestrator.start_turn(turn + 1)
                 self._compact_context(user_text)
+                # Captures never trigger extra model requests or authorize raw input.
+                self._refresh_live_vision()
                 emit and emit(AgentEvent("status", f"Thinking… (turn {turn + 1})"))
                 self.orchestrator.current.metrics["model_calls"] = self.orchestrator.current.metrics.get("model_calls", 0) + 1
                 response = self.client.chat.completions.create(

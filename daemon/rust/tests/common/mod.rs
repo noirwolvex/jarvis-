@@ -1,6 +1,6 @@
 use rcgen::{
-    BasicConstraints, Certificate, CertificateParams, ExtendedKeyUsagePurpose, IsCa, Issuer,
-    KeyPair, KeyUsagePurpose,
+    BasicConstraints, Certificate, CertificateParams, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose,
 };
 
 pub struct Pki {
@@ -14,6 +14,12 @@ impl Pki {
     pub fn new() -> Self {
         let ca_key = KeyPair::generate().unwrap();
         let mut params = CertificateParams::new(vec!["jarvis-test-ca".into()]).unwrap();
+        // SANs do not replace the subject DN. Identical default subject/issuer
+        // names make OpenSSL treat the leaf as self-signed instead of building
+        // its chain. Keep the CA and both leaf identities distinct.
+        params
+            .distinguished_name
+            .push(DnType::CommonName, "JARVIS development CA");
         params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);
         params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
         let ca = params.self_signed(&ca_key).unwrap();
@@ -21,10 +27,20 @@ impl Pki {
         let server_key = KeyPair::generate().unwrap();
         let mut server_params =
             CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
+        server_params
+            .distinguished_name
+            .push(DnType::CommonName, "JARVIS localhost server");
+        server_params.use_authority_key_identifier_extension = true;
+        server_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         server_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];
         let server = server_params.signed_by(&server_key, &issuer).unwrap();
         let client_key = KeyPair::generate().unwrap();
         let mut client_params = CertificateParams::new(vec!["jarvis-test-client".into()]).unwrap();
+        client_params
+            .distinguished_name
+            .push(DnType::CommonName, "JARVIS development client");
+        client_params.use_authority_key_identifier_extension = true;
+        client_params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
         client_params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ClientAuth];
         let client = client_params.signed_by(&client_key, &issuer).unwrap();
         Self {

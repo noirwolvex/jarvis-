@@ -40,6 +40,55 @@ fn client_config(pki: &Pki, authenticated: bool) -> Arc<ClientConfig> {
 }
 
 #[tokio::test]
+async fn generated_development_identity_works_with_strict_python_openssl() {
+    let pki = Pki::new();
+    let directory = tempfile::tempdir().unwrap();
+    pki.write(directory.path());
+    let tls = ipc::tls_config(
+        &directory.path().join("server.pem"),
+        &directory.path().join("server-key.pem"),
+        &directory.path().join("ca.pem"),
+    )
+    .unwrap();
+    let dispatcher = Dispatcher::start(
+        Policy::new(true, vec![], now_ms()).unwrap(),
+        ProcessManager::new(vec![], false).unwrap(),
+        false,
+        false,
+    )
+    .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let server = tokio::spawn(ipc::serve_listener(listener, tls, dispatcher));
+    let result = tokio::time::timeout(
+        Duration::from_secs(15),
+        tokio::process::Command::new(
+            std::env::var("JARVIS_TEST_PYTHON").unwrap_or_else(|_| "python".into()),
+        )
+        .arg("-c")
+        .arg(include_str!("python_tls_probe.py"))
+        .arg(directory.path())
+        .arg(address.port().to_string())
+        .kill_on_drop(true)
+        .output(),
+    )
+    .await;
+    server.abort();
+    let output = result
+        .expect("Python TLS probe timed out")
+        .expect("Python 3.11+ is required for the mTLS interoperability test");
+    assert!(
+        output.status.success(),
+        "Python/OpenSSL rejected the development chain: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert_eq!(
+        String::from_utf8_lossy(&output.stdout).trim(),
+        "TLSv1.3 status verified"
+    );
+}
+
+#[tokio::test]
 async fn mtls_status_capture_stop_and_replay_close_connection() {
     let pki = Pki::new();
     let directory = tempfile::tempdir().unwrap();

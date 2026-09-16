@@ -8,6 +8,21 @@ from core.fast_mission import compile_fast_mission
 
 
 class FastMissionCompilerTests(unittest.TestCase):
+    def test_simple_arabic_commands_compile_in_order_without_model(self):
+        steps = compile_fast_mission("افتح ديسكورد ثم افتح الحاسبة ثم افتح المفكرة")
+        self.assertEqual([step.arguments["query"] for step in steps], ["Discord", "Calculator", "Notepad"])
+
+    def test_arabic_media_and_search_use_verified_semantic_operations(self):
+        steps = compile_fast_mission('شغل "اسم الأغنية" على يوتيوب')
+        self.assertEqual(steps[0].tool, "youtube_search_open")
+        self.assertEqual(steps[0].arguments, {"query": "اسم الأغنية", "new_tab": False, "play": True})
+        self.assertEqual(compile_fast_mission('ابحث في جوجل عن "تعلم بايثون"')[0].arguments["query"], "تعلم بايثون")
+        self.assertEqual(compile_fast_mission("اوقف الفيديو مؤقتا")[0].arguments["action"], "pause")
+
+    def test_unknown_arabic_step_falls_back_whole_mission_without_skipping(self):
+        for goal in ("افتح ديسكورد ثم ارسل رسالة", "افتح ديسكورد وارسل رسالة", 'شغل "أغنية" على يوتيوب ثم احفظها',
+                     "افتح تطبيق غير معروف", "لا تفتح ديسكورد"):
+            self.assertIsNone(compile_fast_mission(goal), goal)
     def test_google_first_result_then_apps_compiles_in_exact_order(self) -> None:
         goal = (
             "open new tab in google and search for a cat and press the first link "
