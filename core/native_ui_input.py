@@ -1,0 +1,117 @@
+from __future__ import annotations
+
+import json
+from typing import Any
+
+from .desktop_input import InputDeliveryError
+from .permissions import Risk
+from .tools import ToolRegistry, ToolSpec
+
+
+def ui_type_native(text: str, target: str = "", title: str = "") -> str:
+    """Type through the Rust daemon while UIA resolves/focuses and verifies the editor."""
+    value = str(text)
+    if not value or len(value) > 4096 or "\0" in value:
+        raise ValueError("Native semantic text must contain 1-4096 safe characters")
+
+    from .process_control import check_cancelled
+    from .semantic_ui_tools import (
+        _SNAPSHOTS,
+        _control_value,
+        _find_control,
+        _focus_control,
+        _focus_window,
+        _guard_foreground,
+        _meta,
+        _window,
+        ui_type,
+    )
+    from .ui_state import wait_until
+    from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
+
+    check_cancelled()
+    win = _window(title)
+    hwnd = _focus_window(win)
+    _guard_foreground(hwnd)
+    control = _find_control(win, target, editable=True)
+    _focus_control(control, hwnd)
+    before_value = _control_value(control)
+    if before_value is None:
+        raise InputDeliveryError(
+            "Editor value cannot be read semantically; Rust input was not dispatched"
+        )
+    expected = before_value + value
+
+    client, status = _preflight()
+    if client is None:
+        # Compatibility for manual JARVIS_NATIVE_ENGINE=auto sessions. The normal
+        # JARVIS X launcher runs strict rust mode, so it never silently reaches this path.
+        return ui_type(text=value, target=target, title=title, submit=False, replace=False)
+
+    _guard_foreground(hwnd)
+    _SNAPSHOTS.invalidate(hwnd)
+    try:
+        result = client.type_text(value, status)
+    except RustEngineUnavailable:
+        if native_engine_mode() == "auto":
+            return ui_type(text=value, target=target, title=title, submit=False, replace=False)
+        raise
+
+    if result.get("executed") is not True or result.get("simulation") is not False:
+        raise InputDeliveryError(
+            "Rust daemon did not confirm native keyboard execution; inspect before retrying"
+        )
+
+    def value_matches() -> bool:
+        _guard_foreground(hwnd)
+        return _control_value(control) == expected
+
+    try:
+        wait_until(value_matches, description="exact editor value after Rust native input")
+    except TimeoutError as exc:
+        raise InputDeliveryError(
+            "Rust keyboard input was dispatched but editor readback did not match exactly; inspect before retrying"
+        ) from exc
+
+    return "VERIFIED: " + json.dumps(
+        {
+            "action": "ui_type_native",
+            "window_hwnd": hwnd,
+            "control": _meta(control),
+            "characters": len(value),
+            "method": "rust_native_input",
+            "submitted": False,
+            "rust_executed": True,
+            "simulation": False,
+        },
+        ensure_ascii=False,
+    )
+
+
+def register_native_ui_input_tools(registry: ToolRegistry) -> None:
+    def guarded(**kwargs: Any) -> str:
+        from .semantic_ui_tools import BrowserBoundaryError
+
+        try:
+            return ui_type_native(**kwargs)
+        except BrowserBoundaryError as exc:
+            return str(exc)
+
+    registry.register(
+        ToolSpec(
+            "ui_type_native",
+            "Resolve and focus one exact Windows UI Automation editor, type through the Rust native-input daemon, then verify the exact editor value. Omitted target requires a unique editor/composer. Strict Rust mode fails closed and never falls back to Python.",
+            Risk.MEDIUM,
+            {
+                "type": "object",
+                "properties": {
+                    "text": {"type": "string", "minLength": 1, "maxLength": 4096},
+                    "target": {"type": "string"},
+                    "title": {"type": "string"},
+                },
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+            guarded,
+        )
+    )
