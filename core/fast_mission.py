@@ -32,18 +32,44 @@ _GOOGLE_SEARCH = re.compile(
 _APP_PREFIX = re.compile(r"^\s*(?:(?:and\s+then|then|and)\s+)?open\s+", re.IGNORECASE)
 _NEXT_APP = re.compile(r"\s+(?:and\s+then|then|and)\s+open\s+", re.IGNORECASE)
 _TRAILING_APP_WORD = re.compile(r"\s+(?:app|application)\s*$", re.IGNORECASE)
+_TRAILING_TYPE = re.compile(
+    r"\s+(?:(?:and\s+then|then|and)\s+)(?:write|type)(?:\s+text)?\s+(?P<text>.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _NEW_TAB_SIGNAL = re.compile(r"\b(?:new|another)\s+(?:browser\s+)?tab\b", re.IGNORECASE)
-_EXTRA_ACTION = re.compile(r"(?:\b(?:and(?:\s+then)?|then)\s+|[;→]|->)\s*(?:open|navigate|go|send|write|type|play|pause|select|switch|join|save|delete|search|click|press|close|read|find|download|upload)\b", re.IGNORECASE)
-_APP_ALIASES = {"المفكرة": "Notepad", "نوت باد": "Notepad", "الحاسبة": "Calculator", "الآلة الحاسبة": "Calculator",
-                "ديسكورد": "Discord", "الديسكورد": "Discord", "واتساب": "WhatsApp", "واتس اب": "WhatsApp",
-                "كروم": "Chrome", "جوجل كروم": "Chrome", "قوقل كروم": "Chrome", "فيجوال ستوديو كود": "Visual Studio Code"}
+_EXTRA_ACTION = re.compile(
+    r"(?:\b(?:and(?:\s+then)?|then)\s+|[;→]|->)\s*"
+    r"(?:open|navigate|go|send|write|type|play|pause|select|switch|join|save|delete|search|click|press|close|read|find|download|upload)\b",
+    re.IGNORECASE,
+)
+_APP_ALIASES = {
+    "المفكرة": "Notepad",
+    "نوت باد": "Notepad",
+    "الحاسبة": "Calculator",
+    "الآلة الحاسبة": "Calculator",
+    "ديسكورد": "Discord",
+    "الديسكورد": "Discord",
+    "واتساب": "WhatsApp",
+    "واتس اب": "WhatsApp",
+    "كروم": "Chrome",
+    "جوجل كروم": "Chrome",
+    "قوقل كروم": "Chrome",
+    "فيجوال ستوديو كود": "Visual Studio Code",
+}
 
 
 def _simple_semantic_steps(text: str) -> list[FastStep] | None:
     """Strict whole-clause grammar. Unknown work always goes to the model intact."""
-    playback = {"شغل الفيديو الحالي": "play", "شغّل الفيديو الحالي": "play", "استكمل الفيديو الحالي": "play",
-                "اوقف الفيديو مؤقتا": "pause", "أوقف الفيديو مؤقتا": "pause", "وقف الفيديو الحالي": "pause",
-                "play the current youtube video": "play", "pause the current youtube video": "pause"}
+    playback = {
+        "شغل الفيديو الحالي": "play",
+        "شغّل الفيديو الحالي": "play",
+        "استكمل الفيديو الحالي": "play",
+        "اوقف الفيديو مؤقتا": "pause",
+        "أوقف الفيديو مؤقتا": "pause",
+        "وقف الفيديو الحالي": "pause",
+        "play the current youtube video": "play",
+        "pause the current youtube video": "pause",
+    }
     steps = []
     for index, clause in enumerate(re.split(r"\s+(?:ثم|وبعدين|بعدين)\s+", text), 1):
         if not clause or index > 32:
@@ -58,7 +84,9 @@ def _simple_semantic_steps(text: str) -> list[FastStep] | None:
             # Arabic action prose cannot be misinterpreted as part of an app name.
             if app in _APP_ALIASES:
                 app = _APP_ALIASES[app]
-            elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .+_-]{0,79}", app) or re.search(r"\b(and|then|send|type|open|play|search)\b", app, re.I):
+            elif not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 .+_-]{0,79}", app) or re.search(
+                r"\b(and|then|send|type|open|play|search)\b", app, re.I
+            ):
                 return None
             tool, arguments = "launch_installed_app", {"query": app, "timeout_seconds": 12}
         elif match := re.fullmatch(r'(?:ابحث|إبحث)\s+في\s+(?:جوجل|قوقل|غوغل)\s+عن\s+["«](.+)["»]', clause):
@@ -78,7 +106,12 @@ def _simple_semantic_steps(text: str) -> list[FastStep] | None:
 
 
 def _enabled() -> bool:
-    return os.getenv("JARVIS_FAST_EXECUTION", "true").strip().casefold() not in {"0", "false", "off", "no"}
+    return os.getenv("JARVIS_FAST_EXECUTION", "true").strip().casefold() not in {
+        "0",
+        "false",
+        "off",
+        "no",
+    }
 
 
 def _clean_app_name(value: str) -> str:
@@ -89,6 +122,50 @@ def _clean_app_name(value: str) -> str:
     return text
 
 
+def _split_trailing_type(text: str) -> tuple[str, str | None]:
+    """Detach one final explicit write/type clause without swallowing later actions."""
+    match = _TRAILING_TYPE.search(text)
+    if not match:
+        return text, None
+
+    prefix = text[: match.start()].strip()
+    raw = match.group("text").strip()
+    if not prefix or not raw:
+        raise ValueError("Fast native type clause is incomplete")
+
+    quoted = len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in {'"', "'"}
+    if quoted:
+        value = raw[1:-1]
+    else:
+        # Unquoted text may contain ordinary words, but a second executable clause must
+        # fall back to the intelligent planner rather than being typed accidentally.
+        if _EXTRA_ACTION.search(raw):
+            raise ValueError("Fast native type clause contains another action")
+        if raw[:1] in {'"', "'"} or raw[-1:] in {'"', "'"}:
+            raise ValueError("Fast native type clause has unmatched quotes")
+        value = raw
+
+    if not value or len(value) > 4096 or "\0" in value:
+        raise ValueError("Fast native type text must contain 1-4096 safe characters")
+    return prefix, value
+
+
+def _append_native_type(steps: list[FastStep], text: str | None) -> list[FastStep]:
+    if text is None:
+        return steps
+    if not steps or len(steps) >= 32:
+        raise ValueError("Fast native type requires a preceding verified step")
+    return [
+        *steps,
+        FastStep(
+            id=f"fast-{len(steps) + 1}",
+            description="Type the requested text into the active verified editor through Rust",
+            tool="ui_type_native",
+            arguments={"text": text},
+        ),
+    ]
+
+
 def _parse_app_chain(rest: str, start_index: int) -> list[FastStep] | None:
     remaining = str(rest or "").strip()
     if not remaining:
@@ -97,7 +174,7 @@ def _parse_app_chain(rest: str, start_index: int) -> list[FastStep] | None:
     match = _APP_PREFIX.match(remaining)
     if not match:
         return None
-    remaining = remaining[match.end():]
+    remaining = remaining[match.end() :]
 
     pieces = _NEXT_APP.split(remaining)
     if not pieces or any(not piece.strip() for piece in pieces):
@@ -107,7 +184,11 @@ def _parse_app_chain(rest: str, start_index: int) -> list[FastStep] | None:
     for offset, piece in enumerate(pieces):
         # A fast app clause must be only an app name plus optional app/application.
         # Reject prose-like clauses so unknown work is handed back to the intelligent agent.
-        if re.search(r"\b(?:search|click|press|type|write|send|close|login|log\s+in|download|upload|navigate|join|play|pause|and|then)\b|[;→]|->", piece, re.IGNORECASE):
+        if re.search(
+            r"\b(?:search|click|press|type|write|send|close|login|log\s+in|download|upload|navigate|join|play|pause|and|then)\b|[;→]|->",
+            piece,
+            re.IGNORECASE,
+        ):
             return None
         try:
             app = _clean_app_name(piece)
@@ -134,35 +215,51 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
         return None
     if "\0" in text:
         return None
-    simple = _simple_semantic_steps(text)
-    if simple:
-        return simple
 
-    first = _GOOGLE_FIRST.match(text)
+    try:
+        base_text, trailing_type = _split_trailing_type(text)
+    except ValueError:
+        return None
+
+    simple = _simple_semantic_steps(base_text)
+    if simple:
+        try:
+            return _append_native_type(simple, trailing_type)
+        except ValueError:
+            return None
+
+    first = _GOOGLE_FIRST.match(base_text)
     if first:
         query = first.group("query").strip(" ,.;")
         if not query or len(query) > 500 or _EXTRA_ACTION.search(query):
             return None
-        new_tab = bool(_NEW_TAB_SIGNAL.search(text[: first.start("query")]))
+        new_tab = bool(_NEW_TAB_SIGNAL.search(base_text[: first.start("query")]))
         steps = [
             FastStep(
                 id="fast-1",
                 description=f"Search Google for {query} and open the first real result",
                 tool="browser_google_search_first_result",
-                arguments={"query": query, "new_tab": new_tab, "preserve_search_tab": False},
+                arguments={
+                    "query": query,
+                    "new_tab": new_tab,
+                    "preserve_search_tab": False,
+                },
             )
         ]
         apps = _parse_app_chain(first.group("rest"), 2)
         if apps is None:
             return None
-        return [*steps, *apps]
+        try:
+            return _append_native_type([*steps, *apps], trailing_type)
+        except ValueError:
+            return None
 
-    search = _GOOGLE_SEARCH.match(text)
+    search = _GOOGLE_SEARCH.match(base_text)
     if search:
         query = search.group("query").strip(" ,.;")
         if not query or len(query) > 500 or _EXTRA_ACTION.search(query):
             return None
-        new_tab = bool(_NEW_TAB_SIGNAL.search(text[: search.start("query")]))
+        new_tab = bool(_NEW_TAB_SIGNAL.search(base_text[: search.start("query")]))
         steps = [
             FastStep(
                 id="fast-1",
@@ -174,15 +271,23 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
         apps = _parse_app_chain(search.group("rest"), 2)
         if apps is None:
             return None
-        return [*steps, *apps]
+        try:
+            return _append_native_type([*steps, *apps], trailing_type)
+        except ValueError:
+            return None
 
-    apps = _parse_app_chain(text, 1)
+    apps = _parse_app_chain(base_text, 1)
     if apps:
-        return apps
+        try:
+            return _append_native_type(apps, trailing_type)
+        except ValueError:
+            return None
     return None
 
 
-def execute_fast_mission(agent: Any, goal: str, emit: Callable[[AgentEvent], None] | None = None) -> str | None:
+def execute_fast_mission(
+    agent: Any, goal: str, emit: Callable[[AgentEvent], None] | None = None
+) -> str | None:
     """Execute a compiled mission without model round-trips while preserving normal policy and traces."""
     steps = compile_fast_mission(goal)
     if not steps:
@@ -190,6 +295,7 @@ def execute_fast_mission(agent: Any, goal: str, emit: Callable[[AgentEvent], Non
 
     agent.orchestrator.begin(goal)
     from .full_access_agent import _chrome_tab_rows
+
     agent._mission_initial_tab_count = len(_chrome_tab_rows())
     agent.orchestrator.current.metrics["fast_compiled_steps"] = len(steps)
     agent.workspace_context.save_snapshot()
@@ -206,7 +312,12 @@ def execute_fast_mission(agent: Any, goal: str, emit: Callable[[AgentEvent], Non
         ]
     )
     agent.orchestrator.start_turn(1)
-    emit and emit(AgentEvent("status", f"Fast execution: {len(steps)} verified step(s) compiled; model round-trips skipped."))
+    emit and emit(
+        AgentEvent(
+            "status",
+            f"Fast execution: {len(steps)} verified step(s) compiled; model round-trips skipped.",
+        )
+    )
 
     completed: list[str] = []
     for step in steps:
@@ -223,8 +334,17 @@ def execute_fast_mission(agent: Any, goal: str, emit: Callable[[AgentEvent], Non
         result = agent._execute_tool(step.tool, dict(step.arguments), approved=approved)
         duration_ms = (time.perf_counter() - started) * 1000.0
         mutation = agent._is_mutation(step.tool)
-        mutation = mutation and not str(result).startswith(("PERMISSION_DENIED", "ERROR: Observe the last"))
-        agent.orchestrator.record_tool(step.tool, dict(step.arguments), result, duration_ms, 1, mutation=mutation)
+        mutation = mutation and not str(result).startswith(
+            ("PERMISSION_DENIED", "ERROR: Observe the last")
+        )
+        agent.orchestrator.record_tool(
+            step.tool,
+            dict(step.arguments),
+            result,
+            duration_ms,
+            1,
+            mutation=mutation,
+        )
         emit and emit(AgentEvent("tool_result", result, step.tool))
 
         if str(result).startswith("BROWSER_ACTION_BLOCKED:"):
@@ -247,11 +367,15 @@ def execute_fast_mission(agent: Any, goal: str, emit: Callable[[AgentEvent], Non
         if mutation:
             if not str(result).startswith("VERIFIED:"):
                 agent.orchestrator.update_step(step.id, "failed", str(result))
-                message = f"Fast execution refused an unverified mutation at '{step.description}'."
+                message = (
+                    f"Fast execution refused an unverified mutation at '{step.description}'."
+                )
                 agent.orchestrator.finish("incomplete", message)
                 agent.memory.add("assistant", message)
                 return message
-            agent.orchestrator.verify(f"{step.id}: {step.description}", True, str(result))
+            agent.orchestrator.verify(
+                f"{step.id}: {step.description}", True, str(result)
+            )
 
         agent.orchestrator.update_step(step.id, "completed", str(result))
         completed.append(step.description)
