@@ -28,6 +28,51 @@ def _agent():
     return _AGENT
 
 
+def _native_engine_payload() -> dict[str, Any]:
+    try:
+        from .rust_engine import native_engine_status
+
+        value = json.loads(native_engine_status())
+        return value if isinstance(value, dict) else {"backend": "unknown", "error": "invalid native engine status"}
+    except Exception as exc:
+        return {"backend": "unavailable", "rust_input_ready": False, "error": f"{type(exc).__name__}: {exc}"}
+
+
+def _native_input_probe(message: dict[str, Any]) -> dict[str, Any]:
+    """Supervised local qualification path. Disabled unless the launcher opts in explicitly."""
+    if os.environ.get("JARVIS_RUST_LIVE_PROBE", "").strip() != "1":
+        raise RuntimeError("Native input probe is disabled")
+
+    from .rust_engine import _preflight, native_engine_mode
+
+    if native_engine_mode() != "rust":
+        raise RuntimeError("Native input probe requires JARVIS_NATIVE_ENGINE=rust")
+    client, status = _preflight()
+    if client is None or status is None:
+        raise RuntimeError("Rust daemon is not ready for strict native input")
+
+    probe = message.get("probe")
+    if not isinstance(probe, dict):
+        raise ValueError("Native input probe payload must be an object")
+    kind = str(probe.get("kind") or "")
+    if kind == "click":
+        x, y = probe.get("x"), probe.get("y")
+        if not isinstance(x, int) or isinstance(x, bool) or not isinstance(y, int) or isinstance(y, bool):
+            raise ValueError("Native click probe requires integer x/y")
+        result = client.click(x, y, status)
+    elif kind == "type_text":
+        text = probe.get("text")
+        if not isinstance(text, str):
+            raise ValueError("Native keyboard probe requires text")
+        result = client.type_text(text, status)
+    else:
+        raise ValueError("Native input probe kind must be click or type_text")
+
+    if result.get("executed") is not True or result.get("simulation") is not False:
+        raise RuntimeError("Rust daemon did not confirm native execution")
+    return {"backend": "rust", "result": result}
+
+
 def _handle(raw: str) -> dict[str, Any]:
     try:
         message: Any = json.loads(raw)
@@ -45,7 +90,22 @@ def _handle(raw: str) -> dict[str, Any]:
 
     action = str(message.get("action") or "")
     if action == "ping":
-        return {"type": "result", "id": request_id, "ok": True, "payload": {"ready": True, "protocol": PROTOCOL, "agent_loaded": _AGENT is not None}}
+        return {
+            "type": "result",
+            "id": request_id,
+            "ok": True,
+            "payload": {
+                "ready": True,
+                "protocol": PROTOCOL,
+                "agent_loaded": _AGENT is not None,
+                "native_engine": _native_engine_payload(),
+            },
+        }
+    if action == "native_input_probe":
+        try:
+            return {"type": "result", "id": request_id, "ok": True, "payload": _native_input_probe(message)}
+        except Exception as exc:
+            return {"type": "result", "id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
     if action != "run":
         return {"type": "result", "id": request_id, "ok": False, "error": f"Unsupported worker action: {action}"}
 
@@ -56,23 +116,46 @@ def _handle(raw: str) -> dict[str, Any]:
     try:
         if _STOPPED.is_set():
             raise RuntimeError("Worker emergency stop is latched")
+
         def progress(event):
             from .memory import redact_secrets
-            _write({"type": "progress", "id": request_id, "kind": event.kind,
-                    "message": redact_secrets(str(event.message))[:2000]})
+
+            _write(
+                {
+                    "type": "progress",
+                    "id": request_id,
+                    "kind": event.kind,
+                    "message": redact_secrets(str(event.message))[:2000],
+                }
+            )
             if event.kind == "tool_result" and event.tool == "screen_observe":
                 from .vision_tools import _payload_from_result, vision_followup_message
+
                 frame = _payload_from_result(event.message)
                 visual = vision_followup_message(event.message)
                 if frame and visual:
                     frame.pop("path", None)
-                    _write({"type": "observation", "id": request_id, "frame": frame,
-                            "preview": visual["content"][1]["image_url"]["url"]})
+                    _write(
+                        {
+                            "type": "observation",
+                            "id": request_id,
+                            "frame": frame,
+                            "preview": visual["content"][1]["image_url"]["url"],
+                        }
+                    )
+
         def observation(value):
             if not _STOPPED.is_set():
                 _write({"type": "observation", "id": request_id, **value})
-        payload = run_agent_mission(_agent(), title, emit=progress, cancel_event=_STOPPED,
-                                    allow_shell=message.get("allow_shell") is True, observation_emit=observation)
+
+        payload = run_agent_mission(
+            _agent(),
+            title,
+            emit=progress,
+            cancel_event=_STOPPED,
+            allow_shell=message.get("allow_shell") is True,
+            observation_emit=observation,
+        )
         return {"type": "result", "id": request_id, "ok": True, "payload": payload}
     except Exception as exc:
         return {"type": "result", "id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
@@ -89,10 +172,13 @@ def main() -> int:
         # latch, while Python-held synthetic keys/buttons and child processes are also
         # released locally. All stop operations are best-effort and idempotent.
         from .rust_engine import rust_engine_emergency_stop_best_effort
+
         rust_engine_emergency_stop_best_effort()
         from .desktop_control_tools import release_held_inputs
+
         release_held_inputs()
         from .process_control import stop_processes
+
         stop_processes()
         _write({"type": "stopped"})
 
@@ -100,6 +186,7 @@ def main() -> int:
         if os.name != "nt":
             return
         import ctypes
+
         while True:
             # Ctrl+Alt+Escape works even when the control-center window has no focus.
             if all(ctypes.windll.user32.GetAsyncKeyState(key) & 0x8000 for key in (0x11, 0x12, 0x1B)):
@@ -108,7 +195,7 @@ def main() -> int:
             time.sleep(0.02)
 
     threading.Thread(target=hotkey_watch, daemon=True, name="jarvis-emergency-hotkey").start()
-    _write({"type": "ready", "protocol": PROTOCOL})
+    _write({"type": "ready", "protocol": PROTOCOL, "native_engine": _native_engine_payload()})
     for line in iter(lambda: sys.stdin.readline(65537), ""):
         if len(line) > 65536:
             stop()
@@ -125,7 +212,14 @@ def main() -> int:
             stop()
             return 0
         if active and active.is_alive():
-            _write({"type": "result", "id": message.get("id", "") if isinstance(message, dict) else "", "ok": False, "error": "Worker is busy"})
+            _write(
+                {
+                    "type": "result",
+                    "id": message.get("id", "") if isinstance(message, dict) else "",
+                    "ok": False,
+                    "error": "Worker is busy",
+                }
+            )
             continue
         active = threading.Thread(target=lambda value=raw: _write(_handle(value)), daemon=True)
         active.start()
