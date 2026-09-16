@@ -11,12 +11,31 @@ from .tools import ToolSpec
 def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
     def task_plan(steps: list[dict[str, Any]] | list[str]) -> str:
         plan = orchestrator.set_plan(steps)
-        return json.dumps([{
-            "id": step.id,
-            "description": step.description,
-            "depends_on": step.depends_on,
-            "status": step.status,
-        } for step in plan], ensure_ascii=False)
+        rows = []
+        for step in plan:
+            row = {
+                "id": step.id,
+                "description": step.description,
+                "depends_on": step.depends_on,
+                "status": step.status,
+            }
+            for key in (
+                "action",
+                "required_state",
+                "execution_method",
+                "expected_result",
+                "verification_method",
+                "fallback_strategy",
+                "retry_policy",
+                "phase",
+                "execution_backend",
+                "resolution_backend",
+                "verification_result",
+            ):
+                if hasattr(step, key):
+                    row[key] = getattr(step, key)
+            rows.append(row)
+        return json.dumps(rows, ensure_ascii=False)
 
     def task_update_step(step_id: str, status: str, result: str = "") -> str:
         normalized = str(status).strip().lower().replace("-", "_")
@@ -78,7 +97,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             if not candidates:
                 return json.dumps({"status": "no_previous_checkpoint"})
             task_id = candidates[0].stem
-        previous = TaskOrchestrator(str(orchestrator.trace_dir))
+        previous = type(orchestrator)(str(orchestrator.trace_dir))
         restored = previous.restore(task_id)
         from dataclasses import asdict
         return json.dumps({"summary": previous.summary(), "plan": [asdict(step) for step in restored.plan],
@@ -88,7 +107,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
 
     registry.register(ToolSpec(
         "task_plan",
-        "Create or replace the ordered execution plan for the current task. Use this before complex multi-step work.",
+        "Create or replace the ordered execution plan for the current task. For complex work, include execution method, required state, expected result, verification method, fallback strategy, and retry policy when known.",
         Risk.SAFE,
         {
             "type": "object",
@@ -101,12 +120,36 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                             {"type": "object", "properties": {
                                 "id": {"type": "string"},
                                 "description": {"type": "string"},
+                                "action": {"type": "string"},
                                 "depends_on": {"type": "array", "items": {"type": "string"}},
-                            }, "required": ["description"]},
+                                "required_state": {"type": "array", "items": {"type": "string"}},
+                                "execution_method": {
+                                    "type": "string",
+                                    "enum": ["AUTO", "DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                },
+                                "expected_result": {"type": "string"},
+                                "verification_method": {"type": "string"},
+                                "fallback_strategy": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                    },
+                                },
+                                "retry_policy": {
+                                    "type": "object",
+                                    "properties": {
+                                        "max_attempts": {"type": "integer", "minimum": 0, "maximum": 10},
+                                        "retry_only_if_safe": {"type": "boolean"},
+                                        "backoff_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+                                    },
+                                    "additionalProperties": False,
+                                },
+                            }, "required": ["description"], "additionalProperties": False},
                         ]
                     },
                     "minItems": 1,
-                    "maxItems": 20,
+                    "maxItems": 100,
                 }
             },
             "required": ["steps"],
@@ -142,7 +185,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
     ))
     registry.register(ToolSpec(
         "task_status",
-        "Return the current task plan, progress, failures, recoveries, and verification summary.",
+        "Return the current live task graph, progress, execution backends, failures, recoveries, and verification summary.",
         Risk.SAFE,
         {"type": "object", "properties": {}, "additionalProperties": False},
         task_status,
