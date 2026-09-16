@@ -23,6 +23,7 @@ def build_full_access_agent():
     from .discord_tools import register_discord_tools
     from .fast_execution_agent import FastExecutionFullAccessAgent
     from .full_access_browser_routing import register_full_access_browser_routing
+    from .native_ui_input import register_native_ui_input_tools
     from .permissions import Risk
     from .rust_engine import register_rust_engine_tools
     from .semantic_ui_guard import guard_semantic_ui_tools
@@ -54,12 +55,17 @@ def build_full_access_agent():
     # keeps the Python path as a pre-dispatch fallback when the Rust daemon is not ready;
     # strict rust mode fails closed instead of silently bypassing the daemon.
     register_rust_engine_tools(agent.tools)
+    # Semantic focus/readback plus Rust-native keyboard delivery. This tool is used by
+    # the deterministic app-chain fast path for final "write/type" clauses.
+    register_native_ui_input_tools(agent.tools)
     # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
     # to a second unmanaged browser after the guarded CDP tools are installed.
     register_full_access_browser_routing(agent.tools)
     from .browser_semantic import register_browser_semantic_tools
+
     register_browser_semantic_tools(agent.tools)
     from .workflow_tools import register_workflow_tools
+
     register_workflow_tools(agent)
 
     # Desktop/browser/workspace mutations are approved by explicit session-level Full Access.
@@ -76,7 +82,14 @@ def build_full_access_agent():
     return agent
 
 
-def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shell: bool = False, observation_emit=None) -> dict[str, Any]:
+def run_agent_mission(
+    agent,
+    goal: str,
+    emit=None,
+    cancel_event=None,
+    allow_shell: bool = False,
+    observation_emit=None,
+) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
 
@@ -89,17 +102,28 @@ def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shel
     agent.cancel_event = cancel_event
     agent.allow_shell = allow_shell
     from .process_control import set_cancellation
+
     set_cancellation(agent._is_stopped)
     from .live_desktop import LiveDesktopMonitor, enabled as live_enabled
+
     monitor = None
     agent.live_monitor = None
     agent._explicit_vision_pending = False
     try:
         permissions = agent.tools.permissions
-        if (observation_emit is not None and live_enabled() and not agent._is_stopped()
-                and permissions.access_mode == "full" and "screen_observe" not in permissions.deny_tools):
-            monitor = LiveDesktopMonitor(lambda: agent._is_stopped() or permissions.access_mode != "full"
-                                         or "screen_observe" in permissions.deny_tools, observation_emit)
+        if (
+            observation_emit is not None
+            and live_enabled()
+            and not agent._is_stopped()
+            and permissions.access_mode == "full"
+            and "screen_observe" not in permissions.deny_tools
+        ):
+            monitor = LiveDesktopMonitor(
+                lambda: agent._is_stopped()
+                or permissions.access_mode != "full"
+                or "screen_observe" in permissions.deny_tools,
+                observation_emit,
+            )
             agent.live_monitor = monitor
             monitor.start()
         result = agent.run(goal, emit=emit)
@@ -108,8 +132,11 @@ def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shel
             if monitor:
                 monitor.stop()
                 if agent.orchestrator.current:
-                    agent.orchestrator.current.metrics.update(live_captures=monitor.captures,
-                        live_changes=monitor.changes, live_capture_errors=monitor.errors)
+                    agent.orchestrator.current.metrics.update(
+                        live_captures=monitor.captures,
+                        live_changes=monitor.changes,
+                        live_capture_errors=monitor.errors,
+                    )
                     agent.orchestrator._persist(agent.orchestrator.current)
         finally:
             agent.live_monitor = None
@@ -131,18 +158,29 @@ def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shel
     else:
         incomplete = []
     if current is not None:
-        incomplete.extend(f"{item['id']}/{step['id']}" for item in current.workflows
-                          for step in item["steps"] if step["status"] != "completed")
+        incomplete.extend(
+            f"{item['id']}/{step['id']}"
+            for item in current.workflows
+            for step in item["steps"]
+            if step["status"] != "completed"
+        )
 
     requires_user_action = status == "waiting_user"
     completion_evidence = verified or observation_verified
-    mission_completed = status == "completed" and tools_used > 0 and not incomplete and completion_evidence
+    mission_completed = (
+        status == "completed"
+        and tools_used > 0
+        and not incomplete
+        and completion_evidence
+    )
     ok = requires_user_action or mission_completed
 
     if status == "completed" and not mission_completed:
         status = "incomplete"
         if not completion_evidence:
-            result = f"{result} Verification is required before Full Access reports mission completion."
+            result = (
+                f"{result} Verification is required before Full Access reports mission completion."
+            )
 
     return {
         "ok": ok,
@@ -171,7 +209,12 @@ def run_mission(goal: str) -> dict[str, Any]:
 
 def main() -> int:
     if len(sys.argv) < 3 or sys.argv[1] != "run":
-        _emit({"ok": False, "error": "Usage: python -m core.full_access_bridge run <mission>"})
+        _emit(
+            {
+                "ok": False,
+                "error": "Usage: python -m core.full_access_bridge run <mission>",
+            }
+        )
         return 2
     mission = sys.argv[2]
     try:
