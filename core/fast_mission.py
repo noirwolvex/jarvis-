@@ -33,6 +33,7 @@ _APP_PREFIX = re.compile(r"^\s*(?:(?:and\s+then|then|and)\s+)?open\s+", re.IGNOR
 _NEXT_APP = re.compile(r"\s+(?:and\s+then|then|and)\s+open\s+", re.IGNORECASE)
 _TRAILING_APP_WORD = re.compile(r"\s+(?:app|application)\s*$", re.IGNORECASE)
 _NEW_TAB_SIGNAL = re.compile(r"\b(?:new|another)\s+(?:browser\s+)?tab\b", re.IGNORECASE)
+_EXTRA_ACTION = re.compile(r"(?:\b(?:and(?:\s+then)?|then)\s+|[;→]|->)\s*(?:open|navigate|go|send|write|type|play|pause|select|switch|join|save|delete|search|click|press|close|read|find|download|upload)\b", re.IGNORECASE)
 
 
 def _enabled() -> bool:
@@ -65,9 +66,12 @@ def _parse_app_chain(rest: str, start_index: int) -> list[FastStep] | None:
     for offset, piece in enumerate(pieces):
         # A fast app clause must be only an app name plus optional app/application.
         # Reject prose-like clauses so unknown work is handed back to the intelligent agent.
-        if re.search(r"\b(?:search|click|press|type|write|send|close|login|log\s+in|download|upload)\b", piece, re.IGNORECASE):
+        if re.search(r"\b(?:search|click|press|type|write|send|close|login|log\s+in|download|upload|navigate|join|play|pause|and|then)\b|[;→]|->", piece, re.IGNORECASE):
             return None
-        app = _clean_app_name(piece)
+        try:
+            app = _clean_app_name(piece)
+        except ValueError:
+            return None
         index = start_index + offset
         steps.append(
             FastStep(
@@ -77,7 +81,7 @@ def _parse_app_chain(rest: str, start_index: int) -> list[FastStep] | None:
                 arguments={"query": app, "timeout_seconds": 12},
             )
         )
-    return steps
+    return steps if len(steps) <= 32 else None
 
 
 def compile_fast_mission(goal: str) -> list[FastStep] | None:
@@ -91,7 +95,7 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     first = _GOOGLE_FIRST.match(text)
     if first:
         query = first.group("query").strip(" ,.;")
-        if not query or len(query) > 500:
+        if not query or len(query) > 500 or _EXTRA_ACTION.search(query):
             return None
         new_tab = bool(_NEW_TAB_SIGNAL.search(text[: first.start("query")]))
         steps = [
@@ -110,7 +114,7 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     search = _GOOGLE_SEARCH.match(text)
     if search:
         query = search.group("query").strip(" ,.;")
-        if not query or len(query) > 500:
+        if not query or len(query) > 500 or _EXTRA_ACTION.search(query):
             return None
         new_tab = bool(_NEW_TAB_SIGNAL.search(text[: search.start("query")]))
         steps = [
@@ -139,6 +143,9 @@ def execute_fast_mission(agent: Any, goal: str, emit: Callable[[AgentEvent], Non
         return None
 
     agent.orchestrator.begin(goal)
+    from .full_access_agent import _chrome_tab_rows
+    agent._mission_initial_tab_count = len(_chrome_tab_rows())
+    agent.orchestrator.current.metrics["fast_compiled_steps"] = len(steps)
     agent.workspace_context.save_snapshot()
     agent.messages.append({"role": "user", "content": goal})
     agent.memory.add("user", goal)

@@ -95,6 +95,11 @@ _READ_ONLY_EVIDENCE_TOOLS = {
     "inspect_window",
     "dialog_inspect",
     "find_installed_app",
+    "ui_inspect",
+    "ui_wait_state",
+    "browser_semantic_snapshot",
+    "browser_wait_state",
+    "workflow_status",
     "task_status",
 }
 
@@ -129,12 +134,12 @@ def read_only_observation_verified(goal: str, current: Any) -> bool:
         result = str(getattr(trace, "result", ""))
         if not success:
             return False
-        if name.startswith("task_"):
+        if name.startswith("task_") or name == "workflow_status":
             continue
         if name not in _READ_ONLY_EVIDENCE_TOOLS:
             return False
         if name == "screen_observe" and result.startswith("VERIFIED:"):
             evidence_seen = True
-        elif name in {"take_screenshot", "browser_read_page", "browser_links", "browser_page_state", "chrome_tabs", "chrome_current_tab", "list_windows", "inspect_window", "dialog_inspect", "find_installed_app"}:
+        elif name in {"take_screenshot", "browser_read_page", "browser_links", "browser_page_state", "chrome_tabs", "chrome_current_tab", "list_windows", "inspect_window", "dialog_inspect", "find_installed_app", "ui_inspect", "ui_wait_state", "browser_semantic_snapshot", "browser_wait_state"}:
             evidence_seen = True
     return evidence_seen

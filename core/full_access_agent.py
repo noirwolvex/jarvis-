@@ -62,7 +62,7 @@ _BROWSER_PROFILE_EXPLICIT = {
     "open_application_and_type",
     "open_url",
 }
-_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_")
+_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "discord_", "youtube_", "workflow_")
 
 
 def _chrome_tab_rows() -> list[dict]:
@@ -120,6 +120,7 @@ class FullAccessJarvisAgent(JarvisAgent):
         self.max_turns = max(1, min(int(os.getenv("JARVIS_FULL_ACCESS_MAX_TURNS", str(max(160, self.max_turns)))), 512))
         self._stop = threading.Event()
         self._desktop_observation = DesktopObservationGate()
+        self.orchestrator.strict_order = True
 
     def request_stop(self) -> None:
         self._stop.set()
@@ -140,9 +141,12 @@ class FullAccessJarvisAgent(JarvisAgent):
             self.messages = [{"role": "user", "content": goal}, *self.messages[starts[-12]:]]
 
     def _is_mutation(self, name: str) -> bool:
+        # Containers journal their child actions; they are not additional device actions.
+        if name.startswith("workflow_"):
+            return False
         spec = self.tools._tools.get(name)
         return bool(spec and (spec.risk >= Risk.MEDIUM or name.startswith("desktop_") and name != "desktop_cursor"
-                             or name in {"open_url", "browser_navigate", "open_application", "focus_window", "focus_window_advanced", "chrome_new_tab", "chrome_select_tab"}))
+                             or name in {"ui_focus", "open_url", "browser_navigate", "open_application", "focus_window", "focus_window_advanced", "chrome_new_tab", "chrome_select_tab"}))
 
     def _execute_tool(self, name: str, arguments: dict[str, Any], approved: bool = False) -> str:
         def dispatch():
@@ -167,6 +171,15 @@ class FullAccessJarvisAgent(JarvisAgent):
 
         if self._is_stopped():
             return "CANCELLED: Emergency stop is active"
+        # The browser guard itself dispatches a read tool. Run it before submitting
+        # to the single worker, otherwise that nested read would deadlock the queue.
+        guard_result = self._browser_action_guard(name)
+        if guard_result:
+            return guard_result
+        if name.startswith("workflow_"):
+            # The container runs outside the single tool executor so child dispatches
+            # can use that executor without deadlocking. Each child is policy-checked.
+            return self.tools.execute(name, arguments, approved)
         future = self._tool_executor.submit(dispatch)
         while True:
             try:
@@ -227,15 +240,24 @@ Full Access execution profile:
         ]
         self.messages.append(followup)
 
-    def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None) -> str:
-        self.orchestrator.begin(user_text)
-        self.workspace_context.save_snapshot()
-        self.messages.append({"role": "user", "content": user_text})
-        self.memory.add("user", user_text)
+    def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None, *, resume_current: bool = False) -> str:
+        self._active_emit = emit
+        if not resume_current:
+            self.orchestrator.begin(user_text)
+            self.workspace_context.save_snapshot()
+            self.messages.append({"role": "user", "content": user_text})
+            self.memory.add("user", user_text)
+        else:
+            current = self.orchestrator.current
+            if current is None or current.goal != user_text:
+                raise ValueError("Recovery must retain the original active mission")
+            current.status, current.finished_at = "running", None
+            self.orchestrator._persist(current)
+            self.messages.append({"role": "user", "content": "The deterministic path stopped. Continue this SAME mission from its failed step. Completed steps must not be replayed. Observe the live state and review any uncertain mutation before recovery. Current state: " + json.dumps(self.orchestrator.summary()) + " Recent evidence: " + json.dumps([{"tool": trace.name, "result": trace.result} for trace in current.traces[-4:]])})
 
         requested_new_tab_count = required_new_tabs(user_text)
         requested_google_search_count = required_google_searches(user_text)
-        initial_tab_count = len(_chrome_tab_rows())
+        initial_tab_count = getattr(self, "_mission_initial_tab_count", len(_chrome_tab_rows())) if resume_current else len(_chrome_tab_rows())
         minimum_required_tabs = minimum_tab_count(initial_tab_count, requested_new_tab_count)
         turn_tool_schemas = self._tool_schemas_for_goal(user_text)
 
@@ -247,6 +269,7 @@ Full Access execution profile:
                 self.orchestrator.start_turn(turn + 1)
                 self._compact_context(user_text)
                 emit and emit(AgentEvent("status", f"Thinking… (turn {turn + 1})"))
+                self.orchestrator.current.metrics["model_calls"] = self.orchestrator.current.metrics.get("model_calls", 0) + 1
                 response = self.client.chat.completions.create(
                     model=self.model,
                     messages=[{"role": "system", "content": self._system_prompt(user_text)}, *self.messages],
@@ -262,6 +285,10 @@ Full Access execution profile:
                 if not tool_calls:
                     if self.orchestrator.needs_action_review():
                         self.messages.append({"role": "user", "content": "An action is still unverified. Inspect its result and use task_verify with observed evidence before completing the mission."})
+                        continue
+                    unfinished_workflows = [item["id"] for item in self.orchestrator.current.workflows if item["status"] != "completed"]
+                    if unfinished_workflows:
+                        self.messages.append({"role": "user", "content": "Required workflow steps remain incomplete: " + ", ".join(unfinished_workflows) + ". Inspect and recover the current step; never skip it or restart completed actions."})
                         continue
                     rows = _chrome_tab_rows()
                     actual_tab_count = len(rows)
@@ -299,13 +326,11 @@ Full Access execution profile:
                     if self.orchestrator.current and self.orchestrator.current.plan:
                         pending = [
                             step for step in self.orchestrator.current.plan
-                            if step.status not in {"completed", "skipped"}
+                            if step.status != "completed"
                         ]
                         if pending:
-                            result = "I stopped before all planned steps were completed: " + ", ".join(step.id for step in pending)
-                            self.orchestrator.finish("incomplete", result)
-                            self.memory.add("assistant", result)
-                            return result
+                            self.messages.append({"role": "user", "content": "Required plan steps remain: " + ", ".join(step.id for step in pending) + ". Continue in order using observed evidence; do not silently skip these steps."})
+                            continue
                     self.memory.add("assistant", result)
                     self.orchestrator.finish("completed", result)
                     return result
@@ -325,15 +350,9 @@ Full Access execution profile:
                         arguments = {}
                     else:
                         emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
-                        guard_result = self._browser_action_guard(name)
-                        if guard_result:
-                            result = guard_result
-                            challenge_pause = result.startswith("BROWSER_ACTION_BLOCKED:")
-                        else:
-                            approved = self.approval(name, arguments)
-                            result = self._execute_tool(name, arguments, approved=approved)
-                            # Fast-path navigation tools can detect a challenge after navigation.
-                            challenge_pause = str(result).startswith("BROWSER_ACTION_BLOCKED:")
+                        approved = self.approval(name, arguments)
+                        result = self._execute_tool(name, arguments, approved=approved)
+                        challenge_pause = str(result).startswith("BROWSER_ACTION_BLOCKED:")
 
                     duration_ms = (time.perf_counter() - started) * 1000.0
                     mutation = self._is_mutation(name)
@@ -377,11 +396,18 @@ Full Access execution profile:
                     hint = self.orchestrator.recovery_hint(result, name)
                     if hint:
                         emit and emit(AgentEvent("status", hint, name))
-                        self.messages.append({"role": "user", "content": hint})
                         if self.orchestrator.repeated_failure(name, arguments):
                             result = f"Stopped after three failed {name} attempts without new successful observation. Inspect the saved checkpoint before continuing."
                             self.orchestrator.finish("incomplete", result)
                             return result
+                        # A later action may depend on the failed action even if it
+                        # targets another application. Return all undelivered calls
+                        # to the model together; do not silently run the remainder.
+                        for remaining in tool_calls[tool_calls.index(call) + 1:]:
+                            self.messages.append({"role": "tool", "tool_call_id": remaining.id,
+                                                  "content": "ERROR: Not executed because an earlier ordered action failed. Recover that step first."})
+                        self.messages.append({"role": "user", "content": hint})
+                        break
 
                 # Append multimodal context only after every tool_call has a matching tool result,
                 # preserving the Chat Completions tool-call protocol for parallel tool responses.

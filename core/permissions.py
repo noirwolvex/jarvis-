@@ -88,6 +88,7 @@ class PermissionEngine:
             return False, f"Tool {tool_name} is explicitly denied by policy."
         if self.access_mode == "restricted" and (
             tool_name.startswith("desktop_") and tool_name != "desktop_cursor"
+            or tool_name.startswith(("ui_", "discord_", "youtube_", "workflow_")) and tool_name not in {"ui_inspect", "ui_wait_state", "workflow_review", "workflow_status"}
             or tool_name in {"open_application", "open_application_and_type", "launch_installed_app", "focus_window", "focus_window_advanced", "close_window", "vscode_open"}
         ):
             return False, "Desktop interaction is disabled in restricted mode."
@@ -98,8 +99,12 @@ class PermissionEngine:
                 return False, "Git write operations are disabled by policy."
         if tool_name in {"write_file", "notepad_save_as", "file_copy", "directory_create"} and not self.allow_filesystem_write:
             return False, "Filesystem writes are disabled by policy."
+        if tool_name.startswith("youtube_") and (not self.allow_browser_write or not self.allow_network):
+            return False, "YouTube interaction is disabled by browser/network policy."
+        if tool_name.startswith("discord_") and not self.allow_network:
+            return False, "Discord interaction is disabled by network policy."
         if tool_name.startswith(("browser_", "chrome_", "dialog_")) and tool_name not in {
-            "browser_read_page", "browser_links", "browser_page_state", "browser_check_challenge", "browser_screenshot", "browser_wait",
+            "browser_read_page", "browser_links", "browser_page_state", "browser_check_challenge", "browser_screenshot", "browser_wait", "browser_semantic_snapshot", "browser_wait_state",
             "chrome_tabs", "chrome_current_tab", "chrome_is_connected", "dialog_inspect",
         } and not self.allow_browser_write:
             return False, "Browser write interactions are disabled by policy."

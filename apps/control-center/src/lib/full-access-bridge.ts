@@ -20,6 +20,7 @@ export type FullAccessMissionResult = {
   requires_user_action: boolean;
   mission_completed: boolean;
   high_risk_requires_separate_approval: boolean;
+  execution_metrics?: Record<string, number>;
 };
 
 type WorkerEnvelope = {
@@ -50,7 +51,7 @@ type WorkerState = {
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-const WORKER_REVISION = 2;
+const WORKER_REVISION = 3;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
@@ -86,6 +87,14 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
     throw new Error("Full Access completion lacks verified evidence");
   }
   if (parsed.requires_user_action && parsed.status !== "waiting_user") throw new Error("Invalid user-action checkpoint status");
+  if (parsed.execution_metrics !== undefined) {
+    const metrics = parsed.execution_metrics;
+    if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)
+        || Object.keys(metrics).length > 20
+        || !Object.entries(metrics).every(([key, value]) => /^[a-z_]{1,64}$/.test(key) && Number.isSafeInteger(value) && value >= 0)) {
+      throw new Error("Invalid execution metrics");
+    }
+  }
   return input as FullAccessMissionResult;
 }
 

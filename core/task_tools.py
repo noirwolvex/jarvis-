@@ -35,7 +35,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                 recent.append(trace)
             evidence = [
                 trace for trace in recent
-                if trace.success and not trace.name.startswith("task_")
+                if trace.success and not trace.name.startswith(("task_", "workflow_"))
             ]
             if not evidence:
                 raise ValueError(
@@ -60,7 +60,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         if current is None:
             raise ValueError("No active task")
         observed = [trace for index, trace in enumerate(current.traces)
-                    if trace.success and not trace.name.startswith("task_")
+                    if trace.success and not trace.name.startswith(("task_", "workflow_"))
                     and (index > current.last_mutation_index
                          or index == current.last_mutation_index and trace.result.startswith("VERIFIED:") and not trace.name.startswith("desktop_"))]
         if not observed or not evidence.strip():
@@ -82,6 +82,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
         restored = previous.restore(task_id)
         from dataclasses import asdict
         return json.dumps({"summary": previous.summary(), "plan": [asdict(step) for step in restored.plan],
+                           "workflows": restored.workflows,
                            "uncertain_action": restored.in_flight, "recent_evidence": [asdict(trace) for trace in restored.traces[-8:]],
                            "instruction": "Re-observe current state before continuing. An uncertain action must never be automatically replayed."}, ensure_ascii=False)
 

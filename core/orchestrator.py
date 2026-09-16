@@ -66,6 +66,8 @@ class TaskRun:
     finished_at: float | None = None
     in_flight: dict[str, Any] | None = None
     last_mutation_index: int = -1
+    workflows: list[dict[str, Any]] = field(default_factory=list)
+    metrics: dict[str, int] = field(default_factory=dict)
 
     @property
     def elapsed_ms(self) -> float:
@@ -81,6 +83,7 @@ class TaskOrchestrator:
         self.trace_dir = Path(trace_dir or (workspace / ".jarvis" / "traces")).resolve()
         self.trace_dir.mkdir(parents=True, exist_ok=True)
         self.current: TaskRun | None = None
+        self.strict_order = False
 
     def begin(self, goal: str) -> TaskRun:
         self.current = TaskRun(
@@ -107,6 +110,20 @@ class TaskOrchestrator:
                     depends_on=list(raw.get("depends_on") or []),
                 ))
         ids = [step.id for step in plan]
+        if self.strict_order:
+            existing = {step.id: step for step in self.current.plan}
+            if any(step_id not in ids for step_id in existing):
+                raise ValueError("Required plan steps cannot be silently removed; preserve their IDs when revising a plan")
+            if [step_id for step_id in ids if step_id in existing] != list(existing):
+                raise ValueError("Existing mission steps must retain their original order")
+            for index, step in enumerate(plan):
+                if index and plan[index - 1].id not in step.depends_on:
+                    step.depends_on.append(plan[index - 1].id)
+                old = existing.get(step.id)
+                if old:
+                    if step.description != old.description:
+                        raise ValueError("A required step cannot be rewritten as different work; add a recovery step instead")
+                    step.status, step.result = old.status, old.result
         if not plan or len(plan) > 100 or len(set(ids)) != len(ids) or any(not item for item in ids):
             raise ValueError("Plan must contain 1-100 uniquely identified steps")
         dependencies = {step.id: set(step.depends_on) for step in plan}
@@ -129,6 +146,8 @@ class TaskOrchestrator:
             if step.id == step_id:
                 if status not in {"pending", "running", "completed", "failed", "skipped"}:
                     raise ValueError("Invalid step status")
+                if self.strict_order and status == "skipped":
+                    raise ValueError("Required mission steps cannot be skipped; report the blocking state instead")
                 completed = {s.id for s in self.current.plan if s.status in {"completed", "skipped"}}
                 if status in {"running", "completed"} and not set(step.depends_on) <= completed:
                     raise ValueError("Step dependencies have not completed")
@@ -291,6 +310,10 @@ class TaskOrchestrator:
             "verifications": len(self.current.verifications),
             "verified": self.all_required_verifications_passed() if self.current.verifications else False,
             "elapsed_ms": round(self.current.elapsed_ms, 2),
+            "workflows": [{"id": item["id"], "status": item["status"],
+                           "remaining": [step["id"] for step in item["steps"] if step["status"] != "completed"]}
+                          for item in self.current.workflows],
+            "metrics": dict(self.current.metrics),
         }
 
     def _persist(self, task: TaskRun) -> None:

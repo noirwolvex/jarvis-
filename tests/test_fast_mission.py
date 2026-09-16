@@ -48,6 +48,12 @@ class FastMissionCompilerTests(unittest.TestCase):
         with patch.dict(os.environ, {"JARVIS_FAST_EXECUTION": "false"}, clear=False):
             self.assertIsNone(compile_fast_mission("open discord app"))
 
+    def test_action_clauses_are_not_swallowed_into_search_query_or_app_name(self) -> None:
+        for goal in ("search for cats then send hello", "search for cats and play a song",
+                     "open Discord → navigate to channel", "open Discord and join voice",
+                     "search for cats then save the image and click the first result"):
+            self.assertIsNone(compile_fast_mission(goal), goal)
+
 
 if __name__ == "__main__":
     unittest.main()

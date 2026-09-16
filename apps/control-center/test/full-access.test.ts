@@ -15,7 +15,7 @@ test("emergency stop revokes access, cancels active worker and stays latched", {
   child.killed = false;
   child.stdin = { write: (data: string, callback: () => void) => { writes.push(data); callback?.(); } };
   child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
-  state.jarvisFullAccessWorkerV1 = { revision: 2, child, pending: new Map(), buffer: "", stderr: "" };
+  state.jarvisFullAccessWorkerV1 = { revision: 3, child, pending: new Map(), buffer: "", stderr: "" };
   try {
     setHybridAccessMode("full");
     submitHybridMission("A fixture that must never touch the desktop");
@@ -91,6 +91,8 @@ test("completion rejects missing evidence and retains actionable failure checkpo
   assert.throws(() => validateMissionResult({ ...result, read_only_observation_verified: false }), /evidence/);
   assert.throws(() => validateMissionResult({ ...result, tools_used: undefined }), /executed mission/);
   assert.throws(() => validateMissionResult({ ...result, incomplete_steps: ["unfinished"] }), /evidence/);
+  assert.equal(validateMissionResult({ ...result, execution_metrics: { model_calls: 2, workflow_batches: 1 } }).execution_metrics?.model_calls, 2);
+  assert.throws(() => validateMissionResult({ ...result, execution_metrics: { model_calls: -1 } }), /metrics/);
   assert.throws(() => validateMissionResult({ ok: false, result: "Provider timeout", task_id: "task-1-01234567" }), /Provider timeout.*checkpoint/);
 });
 

@@ -15,7 +15,7 @@ class _ChromeRuntime:
     """Own all Playwright Sync API objects on one dedicated Python thread."""
 
     def __init__(self) -> None:
-        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any]]] = queue.Queue()
+        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any], threading.Event]] = queue.Queue()
         self._ready = threading.Event()
         self._startup_error: Exception | None = None
         self._browser: Any = None
@@ -24,6 +24,7 @@ class _ChromeRuntime:
         self._page: Any = None
         self._session_type = "unknown"
         self._endpoint = ""
+        self._active_cancel: threading.Event | None = None
         self._thread = threading.Thread(target=self._run, name="jarvis-chrome-cdp", daemon=True)
         self._thread.start()
 
@@ -31,7 +32,8 @@ class _ChromeRuntime:
         try:
             self._ready.set()
             while True:
-                command, args, reply = self._commands.get()
+                command, args, reply, cancelled = self._commands.get()
+                self._active_cancel = cancelled
                 if command == "shutdown":
                     try:
                         if self._browser is not None:
@@ -42,28 +44,51 @@ class _ChromeRuntime:
                     reply.put(None)
                     return
                 try:
+                    self._check_cancelled()
                     result = getattr(self, f"_cmd_{command}")(**args)
                     reply.put((True, result))
                 except Exception as exc:
                     reply.put((False, exc))
+                finally:
+                    self._active_cancel = None
         except Exception as exc:
             self._startup_error = exc
             self._ready.set()
 
     def call(self, command: str, **args: Any) -> Any:
+        from .process_control import check_cancelled
+        check_cancelled()
         if not self._ready.wait(timeout=5):
             raise TimeoutError("Chrome runtime thread did not become ready")
         if self._startup_error is not None:
             raise RuntimeError(f"Chrome runtime thread failed: {self._startup_error}")
         reply: queue.Queue[Any] = queue.Queue(maxsize=1)
-        self._commands.put((command, args, reply))
+        cancelled = threading.Event()
+        self._commands.put((command, args, reply, cancelled))
+        deadline = time.monotonic() + 60
         try:
-            ok, value = reply.get(timeout=60)
-        except queue.Empty as exc:
-            raise TimeoutError(f"Chrome runtime command timed out: {command}") from exc
+            while True:
+                check_cancelled()
+                try:
+                    ok, value = reply.get(timeout=0.05)
+                    check_cancelled()
+                    break
+                except queue.Empty:
+                    if time.monotonic() >= deadline:
+                        raise TimeoutError(f"Chrome runtime command timed out: {command}")
+        except BaseException:
+            # A caller that abandons a queued command must never execute it later.
+            cancelled.set()
+            raise
         if ok:
             return value
         raise value
+
+    def _check_cancelled(self) -> None:
+        from .process_control import check_cancelled
+        check_cancelled()
+        if self._active_cancel is not None and self._active_cancel.is_set():
+            raise RuntimeError("CANCELLED: Browser command was abandoned")
 
     def _cmd_connect(self, endpoint: str, session_type: str = "real") -> dict[str, Any]:
         from playwright.sync_api import sync_playwright
@@ -86,7 +111,7 @@ class _ChromeRuntime:
             context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
             self._page = context.new_page()
             pages = [self._page]
-        else:
+        elif self._page not in pages:
             self._page = pages[-1]
         self._pages = pages
         self._session_type = session_type
@@ -109,6 +134,8 @@ class _ChromeRuntime:
         self._pages = pages
         if self._page not in pages and pages:
             self._page = pages[-1]
+        elif not pages:
+            self._page = None
         return pages
 
     def _cmd_tabs(self) -> list[dict[str, Any]]:
@@ -119,6 +146,8 @@ class _ChromeRuntime:
         if index < 0 or index >= len(pages):
             raise IndexError(f"Tab index {index} is out of range; {len(pages)} tabs are available.")
         self._page = pages[index]
+        self._check_cancelled()
+        self._page.bring_to_front()
         return {
             "selected": index,
             "session_type": self._session_type,
@@ -136,9 +165,13 @@ class _ChromeRuntime:
         }
 
     def _cmd_page(self, operation: str, **args: Any) -> Any:
+        self._check_cancelled()
         if self._page is None:
             raise RuntimeError("No browser page is open")
         page = self._page
+        if operation in {"semantic_snapshot", "semantic_action", "wait_state", "challenge_state", "youtube_state", "youtube_playback", "youtube_results"}:
+            from .browser_semantic import run_browser_operation
+            return run_browser_operation(page, operation, args, self._check_cancelled)
         if operation == "goto":
             page.goto(args["url"], wait_until="domcontentloaded", timeout=30000)
             return {"title": page.title(), "url": page.url}
@@ -179,16 +212,21 @@ class _ChromeRuntime:
             locator = page.get_by_text(selector, exact=True)
             if locator.count() == 0:
                 locator = page.locator(selector)
-            locator.first.click(timeout=15000)
+            if locator.count() != 1:
+                raise RuntimeError("Browser click target is missing or ambiguous; observe and use an exact unique target")
+            self._check_cancelled()
+            locator.click(timeout=1500)
             return True
         if operation == "fill":
-            page.locator(args["selector"]).first.fill(args["text"], timeout=15000)
+            locator = page.locator(args["selector"])
+            if locator.count() != 1:
+                raise RuntimeError("Browser fill target is missing or ambiguous; observe and use an exact unique target")
+            self._check_cancelled()
+            locator.fill(args["text"], timeout=1500)
             return True
         if operation == "wait":
-            page.locator(args["selector"]).first.wait_for(
-                state="visible",
-                timeout=max(500, min(int(args.get("timeout_ms", 15000)), 60000)),
-            )
+            from .browser_semantic import run_browser_operation
+            run_browser_operation(page, "wait_state", {"target": {"selector": args["selector"]}, "state": "visible", "timeout_ms": args.get("timeout_ms", 15000)}, self._check_cancelled)
             return True
         if operation == "press":
             page.keyboard.press(args["key"])
@@ -248,6 +286,8 @@ def _cdp_port(endpoint: str) -> int:
 
 
 def chrome_start_managed() -> str:
+    from .process_control import check_cancelled
+    check_cancelled()
     endpoint = _cdp_url()
     port = _cdp_port(endpoint)
     exe = _chrome_executable()
@@ -285,6 +325,7 @@ def chrome_start_managed() -> str:
     deadline = time.time() + 15
     last_error = "unknown error"
     while time.time() < deadline:
+        check_cancelled()
         if process.poll() is not None:
             recent_log = log_path.read_text(encoding="utf-8", errors="replace")[-4000:]
             raise RuntimeError(
@@ -349,12 +390,15 @@ def chrome_current_tab() -> str:
 
 
 def chrome_is_connected() -> bool:
+    from .process_control import check_cancelled
+    check_cancelled()
     if _RUNTIME is None:
         return False
     try:
         _RUNTIME.call("current")
         return True
     except Exception:
+        check_cancelled()
         return False
 
 

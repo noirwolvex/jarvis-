@@ -203,6 +203,10 @@ async function runFullMission(task: TaskView) {
     value.version += 1;
     value.status = "COMPLETED";
     addEvent("ACTION_EXECUTED", task.id, `Python agent executed ${result.tools_used} tool calls`);
+    if (result.execution_metrics) {
+      const metrics = result.execution_metrics;
+      addEvent("EXECUTION_METRICS", task.id, `Model calls: ${metrics.model_calls ?? 0}; workflow batches: ${metrics.workflow_batches ?? 0}; deterministic steps: ${metrics.fast_compiled_steps ?? 0}`);
+    }
     addEvent("ACTION_VERIFIED", task.id, "Agent verification records passed");
     addEvent("TASK_COMPLETED", task.id, task.summary);
   } catch (error) {

@@ -6,6 +6,8 @@ A Windows-first desktop AI agent powered by Claude.
 
 The hybrid control center now connects the existing Python agent to guarded screen, mouse, keyboard, browser, application, file, Git and terminal tools. It adds atomic task checkpoints, recovery recall, action-review gates, live progress and desktop previews, and a Full Access emergency-stop latch with **Ctrl+Alt+Escape**. Terminal commands require an additional explicit session permission.
 
+Full Access also includes ordered semantic workflows: compile known steps once, execute through the existing permission gates, verify meaningful checkpoints, and recover without replaying completed actions. Bounded DOM/UIA snapshots, cancellable state waits, Discord conversation checks and verified YouTube playback reduce repeated model calls and screenshots. See the runbook for measured fixture results and live-testing limits.
+
 See the [desktop-agent runbook and validation limits](docs/autonomous-desktop-upgrade.md) for setup, controls, recovery, tests, and the remaining native qualification requirements. Full Access starts disabled in a new server session; simulation remains the default control mode.
 
 ## JARVIS X reference implementation

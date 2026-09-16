@@ -24,6 +24,22 @@ from core.tools import ToolRegistry, ToolSpec
 
 
 class DurableExecutionTests(unittest.TestCase):
+    def test_shortcut_has_no_per_key_pause_and_releases_after_failed_press(self):
+        from core.tools import _desktop_hotkey
+        import core.desktop_control_tools as controls
+        fake = SimpleNamespace(KEYBOARD_KEYS=["ctrl", "k"], PAUSE=0.1,
+                               keyDown=Mock(), keyUp=Mock())
+        with patch.dict(sys.modules, {"pyautogui": fake}), patch.object(controls, "_windows_only"):
+            _desktop_hotkey(["ctrl", "k"])
+            self.assertEqual(fake.keyDown.call_args_list[0].kwargs, {"_pause": False})
+            self.assertEqual(fake.keyUp.call_args_list[0].kwargs, {"_pause": False})
+            self.assertEqual(fake.PAUSE, 0.1)
+            self.assertFalse(controls._HELD_KEYS)
+            fake.keyDown.side_effect = [None, RuntimeError("delivery failed")]
+            with self.assertRaisesRegex(RuntimeError, "delivery failed"):
+                _desktop_hotkey(["ctrl", "k"])
+            self.assertFalse(controls._HELD_KEYS)
+
     def test_checkpoint_captures_uncertain_action_and_redacts_secrets(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = TaskOrchestrator(tmp)

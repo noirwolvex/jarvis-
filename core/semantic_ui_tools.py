@@ -1,15 +1,25 @@
 from __future__ import annotations
 
 import ctypes
+import ctypes.wintypes
 import json
 import os
 import re
-import time
-from typing import Any
+from typing import Any, Callable
+
+from jsonschema import Draft202012Validator
 
 from .desktop_input import InputDeliveryError, paste_text
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
+from .process_control import check_cancelled
+from .ui_state import SnapshotCache, cancellable_delay, wait_until
+
+_SNAPSHOTS = SnapshotCache()
+
+
+class BrowserBoundaryError(RuntimeError):
+    pass
 
 _ACTIONABLE_TYPES = {
     "Button",
@@ -34,7 +44,10 @@ def _windows_only() -> None:
 
 def _foreground_hwnd() -> int:
     _windows_only()
-    hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+    get_foreground = ctypes.windll.user32.GetForegroundWindow
+    get_foreground.argtypes = []
+    get_foreground.restype = ctypes.wintypes.HWND
+    hwnd = int(get_foreground() or 0)
     if not hwnd:
         raise RuntimeError("No foreground Windows window is available")
     return hwnd
@@ -47,9 +60,12 @@ def _window(title: str = ""):
     desktop = Desktop(backend="uia")
     cleaned = str(title or "").strip()
     if cleaned:
-        win = desktop.window(title_re=f".*{re.escape(cleaned)}.*")
-        win.wait("visible", timeout=3)
-        return win
+        candidates = desktop.windows(title_re=f".*{re.escape(cleaned)}.*", visible_only=True)
+        exact = [win for win in candidates if _text(win.window_text()).casefold() == _text(cleaned).casefold()]
+        candidates = exact or candidates
+        if len(candidates) != 1:
+            raise RuntimeError(f"Window title {cleaned!r} matched {len(candidates)} visible windows; specify an unambiguous title")
+        return candidates[0]
     return desktop.window(handle=_foreground_hwnd())
 
 
@@ -91,9 +107,9 @@ def _rect(control: Any) -> list[int]:
 
 def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
     row: dict[str, Any] = {
-        "name": _control_name(control),
-        "type": _control_type(control),
-        "automation_id": _automation_id(control),
+        "name": _control_name(control)[:512],
+        "type": _control_type(control)[:80],
+        "automation_id": _automation_id(control)[:256],
         "rect": _rect(control),
     }
     if index is not None:
@@ -101,21 +117,87 @@ def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
     try:
         row["enabled"] = bool(control.is_enabled())
     except Exception:
-        row["enabled"] = True
+        row["enabled"] = None
     try:
         row["visible"] = bool(control.is_visible())
     except Exception:
-        row["visible"] = True
+        row["visible"] = None
     try:
         row["selected"] = bool(control.is_selected())
     except Exception:
         pass
+    try:
+        row["focused"] = bool(control.has_keyboard_focus())
+    except Exception:
+        row["focused"] = None
     return row
 
 
-def _descendants(win: Any) -> list[Any]:
+def _node_identity(control: Any) -> tuple:
     try:
-        return list(win.descendants())
+        runtime_id = tuple(control.element_info.runtime_id)
+        if runtime_id:
+            return ("uia", *runtime_id)
+    except Exception:
+        pass
+    return ("object", id(control))
+
+
+def _add_hierarchy(win: Any, controls: list[tuple[Any, dict]]) -> list[dict]:
+    """Attach bounded ancestor metadata, reusing common container reads within a snapshot."""
+    root = _node_identity(win)
+    refs: dict[tuple, str] = {root: "window"}
+    parents: dict[tuple, Any | None] = {}
+    containers: list[dict] = []
+    for control, row in controls:
+        check_cancelled()
+        node = control
+        chain: list[str] = []
+        seen = {_node_identity(control)}
+        for _ in range(4):
+            identity = _node_identity(node)
+            if identity not in parents:
+                try:
+                    parents[identity] = node.parent()
+                except Exception:
+                    parents[identity] = None
+            parent = parents[identity]
+            if parent is None:
+                break
+            key = _node_identity(parent)
+            if key in seen:
+                break
+            seen.add(key)
+            if key not in refs:
+                if len(containers) >= 80:
+                    break
+                refs[key] = f"container-{len(containers)}"
+                containers.append({"ref": refs[key], **_meta(parent)})
+            chain.append(refs[key])
+            if key == root:
+                break
+            node = parent
+        row["ancestors"] = chain
+        row["parent_ref"] = chain[0] if chain else None
+        row["depth"] = len(chain) if chain and chain[-1] == "window" else None
+    return containers
+
+
+def _invalidate_control(control: Any, hwnd: int | None = None) -> None:
+    if hwnd is None:
+        try:
+            hwnd = int(control.top_level_parent().handle)
+        except Exception:
+            pass
+    _SNAPSHOTS.invalidate(hwnd)
+
+
+def _descendants(win: Any) -> list[Any]:
+    check_cancelled()
+    try:
+        result = list(win.descendants())[:700]
+        check_cancelled()
+        return result
     except Exception as exc:
         raise RuntimeError(f"UI Automation inspection failed: {type(exc).__name__}: {exc}") from exc
 
@@ -150,11 +232,12 @@ def _score(control: Any, target: str, control_type: str = "") -> float:
 def _candidate_controls(win: Any, target: str = "", control_type: str = "") -> list[tuple[float, int, Any]]:
     rows: list[tuple[float, int, Any]] = []
     for index, control in enumerate(_descendants(win)[:700]):
+        check_cancelled()
         try:
             if not control.is_visible() or not control.is_enabled():
                 continue
         except Exception:
-            pass
+            continue
         score = _score(control, target, control_type)
         if score < 0:
             continue
@@ -167,34 +250,29 @@ def _find_control(win: Any, target: str = "", control_type: str = "", editable: 
     candidates = _candidate_controls(win, target, control_type)
     if editable:
         candidates = [row for row in candidates if _control_type(row[2]) in _EDIT_TYPES]
-        if not target and candidates:
-            # Chat/message composers are normally named and placed near the bottom of the app.
-            def edit_score(item: tuple[float, int, Any]) -> tuple[float, int]:
-                control = item[2]
-                name = _control_name(control).casefold()
-                bonus = 0.0
-                for signal, weight in (("message", 80.0), ("chat", 55.0), ("reply", 45.0), ("type", 25.0)):
-                    if signal in name:
-                        bonus = max(bonus, weight)
-                rect = _rect(control)
-                bottom = rect[3] if len(rect) == 4 else 0
-                return (bonus + item[0], bottom)
-
-            candidates.sort(key=edit_score, reverse=True)
+        if not target and len(candidates) > 1:
+            composers = [row for row in candidates if re.search(r"\b(message|chat|reply)\b", _control_name(row[2]), re.I)]
+            if len(composers) == 1:
+                candidates = composers
     if not candidates:
         qualifier = f" type={control_type!r}" if control_type else ""
         raise RuntimeError(f"No visible enabled UI control matches target={target!r}{qualifier}")
 
-    best_score = candidates[0][0]
-    equally_good = [row for row in candidates if abs(row[0] - best_score) < 0.001]
-    if target and len(equally_good) > 1 and best_score < 100.0:
-        # Prefer a deterministic best match by screen position only after exact matching failed.
-        equally_good.sort(key=lambda row: (_rect(row[2])[1], _rect(row[2])[0]))
-        return equally_good[0][2]
+    if target:
+        candidates = [row for row in candidates if row[0] == 100.0]
+    if len(candidates) != 1:
+        raise RuntimeError(f"Target {target!r} has {len(candidates)} exact visible enabled matches; inspect and specify an unambiguous name/automation ID and type")
     return candidates[0][2]
 
 
 def _focus_window(win: Any) -> int:
+    check_cancelled()
+    hwnd = int(win.handle)
+    foreground = _foreground_hwnd()
+    if foreground == hwnd:
+        return hwnd
+    _SNAPSHOTS.invalidate(foreground)
+    _SNAPSHOTS.invalidate(hwnd)
     try:
         win.set_focus()
     except Exception:
@@ -203,47 +281,74 @@ def _focus_window(win: Any) -> int:
             win.set_focus()
         except Exception as exc:
             raise RuntimeError(f"Could not focus target window: {type(exc).__name__}: {exc}") from exc
-    time.sleep(0.08)
-    try:
-        hwnd = int(win.handle)
-    except Exception:
-        hwnd = _foreground_hwnd()
-    if _foreground_hwnd() != hwnd:
-        raise RuntimeError("Target window did not become foreground")
+    wait_until(lambda: _foreground_hwnd() == hwnd, description="target window foreground")
     return hwnd
 
 
-def _invoke(control: Any) -> str:
-    # Prefer semantic patterns that do not move the physical mouse.
-    try:
-        control.invoke()
-        return "invoke"
-    except Exception:
-        pass
-    try:
-        control.select()
-        return "select"
-    except Exception:
-        pass
-    try:
-        control.click()
-        return "click"
-    except Exception:
-        pass
-    try:
-        control.click_input()
-        return "click_input"
-    except Exception as exc:
-        raise RuntimeError(f"UI control could not be activated: {type(exc).__name__}: {exc}") from exc
+def _invoke(control: Any, hwnd: int | None = None) -> str:
+    # Resolve support BEFORE delivery. An invocation exception may occur after a side effect.
+    for attribute, method, name in (("iface_invoke", "Invoke", "invoke"), ("iface_selection_item", "Select", "select")):
+        try:
+            pattern = getattr(control, attribute)
+        except Exception as exc:
+            if isinstance(exc, AttributeError) or type(exc).__name__ == "NoPatternInterfaceError":
+                continue
+            raise
+        check_cancelled()
+        _invalidate_control(control, hwnd)
+        try:
+            getattr(pattern, method)()
+        except Exception as exc:
+            raise InputDeliveryError(f"Semantic {name} outcome is uncertain; inspect before retrying") from exc
+        return name
+    raise RuntimeError("Control has no supported semantic activation pattern; use fresh screen observation and the guarded desktop input tool")
 
 
-def ui_inspect(title: str = "", query: str = "", actionable_only: bool = True, max_controls: int = 120) -> str:
+def _guard_foreground(hwnd: int, state_guard: Callable[[], None] | None = None) -> None:
+    check_cancelled()
+    if _foreground_hwnd() != hwnd:
+        raise InputDeliveryError("Target window lost foreground; inspect before further input")
+    from .semantic_ui_guard import _browser_block
+    blocked = _browser_block()
+    if blocked:
+        raise BrowserBoundaryError(blocked)
+    if state_guard:
+        state_guard()
+    check_cancelled()
+
+
+def _has_focus(control: Any) -> bool:
+    try:
+        return bool(control.has_keyboard_focus())
+    except Exception:
+        return False
+
+
+def _focus_control(control: Any, hwnd: int, state_guard: Callable[[], None] | None = None) -> None:
+    _guard_foreground(hwnd, state_guard)
+    if not _has_focus(control):
+        _SNAPSHOTS.invalidate(hwnd)
+        control.set_focus()
+    def focused():
+        _guard_foreground(hwnd, state_guard)
+        return _has_focus(control)
+    wait_until(focused, description="resolved control keyboard focus")
+
+
+def ui_inspect(title: str = "", query: str = "", actionable_only: bool = True, max_controls: int = 120,
+               force_refresh: bool = False) -> str:
     """Return a compact UIA snapshot optimized for fast agent decisions."""
     win = _window(title)
-    hwnd = _focus_window(win)
+    hwnd = int(win.handle)
     wanted = _text(query).casefold()
     limit = max(1, min(int(max_controls), 250))
+    key = (hwnd, title, wanted, actionable_only, limit)
+    cached = None if force_refresh else _SNAPSHOTS.get(key)
+    if cached is not None:
+        return json.dumps(cached, ensure_ascii=False)
+    generation = _SNAPSHOTS.generation
     controls: list[dict[str, Any]] = []
+    returned: list[tuple[Any, dict]] = []
     for index, control in enumerate(_descendants(win)[:700]):
         row = _meta(control, index)
         if actionable_only and row.get("type") not in _ACTIONABLE_TYPES:
@@ -255,13 +360,34 @@ def ui_inspect(title: str = "", query: str = "", actionable_only: bool = True, m
         if row.get("visible") is False:
             continue
         controls.append(row)
+        returned.append((control, row))
         if len(controls) >= limit:
             break
     try:
         window_title = _text(win.window_text())
     except Exception:
         window_title = _text(title)
-    return json.dumps({"hwnd": hwnd, "title": window_title, "controls": controls}, ensure_ascii=False)
+    containers = _add_hierarchy(win, returned)
+    window_meta = _meta(win)
+    for field in ("process_id", "framework_id", "class_name"):
+        try:
+            value = getattr(win.element_info, field)
+            window_meta[field] = value if isinstance(value, int) else str(value)[:160]
+        except Exception:
+            pass
+    try:
+        foreground = _foreground_hwnd()
+    except RuntimeError:
+        foreground = None
+    data = {"hwnd": hwnd, "title": window_title, "controls": controls, "cached": False,
+            "cache_age_ms": 0, "cache_ttl_ms": 250, "generation": generation,
+            "window": window_meta, "foreground_hwnd": foreground, "is_foreground": hwnd == foreground,
+            "focused_controls": [row["index"] for row in controls if row.get("focused")],
+            "containers": containers, "hierarchy_depth_limit": 4,
+            "truncated": len(controls) >= limit,
+            "note": "Read snapshot only; actions resolve live controls. Use force_refresh after external UI changes."}
+    _SNAPSHOTS.put(key, data, generation)
+    return json.dumps(data, ensure_ascii=False)
 
 
 def ui_focus(target: str = "", title: str = "", control_type: str = "") -> str:
@@ -270,8 +396,7 @@ def ui_focus(target: str = "", title: str = "", control_type: str = "") -> str:
     if not _text(target):
         return f"VERIFIED: focused window hwnd={hwnd}"
     control = _find_control(win, target, control_type)
-    control.set_focus()
-    time.sleep(0.05)
+    _focus_control(control, hwnd)
     return "VERIFIED: " + json.dumps({"action": "ui_focus", "window_hwnd": hwnd, "control": _meta(control)}, ensure_ascii=False)
 
 
@@ -280,28 +405,41 @@ def ui_activate(target: str, title: str = "", control_type: str = "") -> str:
     hwnd = _focus_window(win)
     control = _find_control(win, target, control_type)
     before = _meta(control)
-    method = _invoke(control)
-    time.sleep(0.12)
+    _guard_foreground(hwnd)
+    method = _invoke(control, hwnd)
     if _foreground_hwnd() != hwnd:
         # Some controls intentionally open another foreground window; report this instead of
         # pretending the original app remained active.
         foreground = _foreground_hwnd()
+        _SNAPSHOTS.invalidate(foreground)
     else:
         foreground = hwnd
-    return "VERIFIED: " + json.dumps(
+    return "DELIVERED: " + json.dumps(
         {"action": "ui_activate", "method": method, "window_hwnd": hwnd, "foreground_hwnd": foreground, "control": before},
         ensure_ascii=False,
     )
 
 
 def _control_value(control: Any) -> str | None:
-    for getter in ("get_value", "window_text"):
-        try:
-            value = getattr(control, getter)()
-            if value is not None:
-                return str(value)
-        except Exception:
-            continue
+    try:
+        value = control.get_value()
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        value = control.iface_value.CurrentValue
+        if value is not None:
+            return str(value)
+    except Exception:
+        pass
+    try:
+        # Electron contenteditable surfaces may expose TextPattern but no ValuePattern.
+        # The returned text is bounded and comes from the editor, never its label/name.
+        value = str(control.iface_text.DocumentRange.GetText(4097))
+        return value if len(value) <= 4096 else None
+    except Exception:
+        pass
     return None
 
 
@@ -311,74 +449,84 @@ def ui_type(
     title: str = "",
     submit: bool = False,
     replace: bool = False,
+    *,
+    state_guard: Callable[[], None] | None = None,
 ) -> str:
     if len(str(text)) > 4096 or "\0" in str(text):
         raise ValueError("Semantic UI text must contain at most 4096 characters and no NUL")
+    check_cancelled()
+    if state_guard:
+        state_guard()
     win = _window(title)
     hwnd = _focus_window(win)
+    _guard_foreground(hwnd, state_guard)
     control = _find_control(win, target, editable=True)
-    control.set_focus()
-    time.sleep(0.04)
-
-    wrote_with = "unicode_input"
-    if replace:
-        replaced = False
-        try:
-            control.set_edit_text(str(text))
-            replaced = True
-            wrote_with = "uia_set_edit_text"
-        except Exception:
-            pass
-        if not replaced:
-            try:
-                control.iface_value.SetValue(str(text))
-                replaced = True
-                wrote_with = "uia_value_pattern"
-            except Exception:
-                pass
-        if not replaced:
-            # Controlled semantic fallback: focus is already bound to the resolved edit control.
-            try:
-                from pywinauto.keyboard import send_keys
-                send_keys("^a{BACKSPACE}")
-            except Exception:
-                pass
+    _focus_control(control, hwnd, state_guard)
+    before_value = _control_value(control)
+    if before_value is None:
+        raise InputDeliveryError("Editor value cannot be read semantically; use fresh observation and guarded desktop input")
+    if submit and not replace and before_value:
+        raise InputDeliveryError("Composer already contains text; inspect before submitting an existing draft")
+    expected = str(text) if replace else before_value + str(text)
+    wanted = _text(text)
+    def echo_count():
+        return sum(1 for candidate in _descendants(win) if candidate != control
+                   and _control_type(candidate) not in _EDIT_TYPES and _control_name(candidate) == wanted)
+    before_echoes = echo_count() if submit else 0
+    _guard_foreground(hwnd, state_guard)
+    # Prefer one Value-pattern write. If not supported, only an empty composer can use
+    # focused Unicode delivery without relying on an unknown caret/selection position.
+    try:
+        pattern = control.iface_value
+    except Exception as exc:
+        if not isinstance(exc, AttributeError) and type(exc).__name__ != "NoPatternInterfaceError":
+            raise
+        pattern = None
+    wrote_with = "uia_value_pattern" if pattern is not None else "unicode_input"
+    if pattern is None and (before_value or replace):
+        raise InputDeliveryError("Editor has no writable Value pattern; use guarded input to control selection explicitly")
+    if pattern is None and any(char in str(text) for char in "\r\n"):
+        raise InputDeliveryError("Multiline composer text requires a writable Value pattern; Unicode newlines could submit messages prematurely")
+    _SNAPSHOTS.invalidate(hwnd)
+    try:
+        if pattern is not None:
+            pattern.SetValue(expected)
+        else:
             paste_text(str(text))
-    else:
-        paste_text(str(text))
+    except Exception as exc:
+        raise InputDeliveryError("Text delivery is uncertain; inspect the editor before retrying") from exc
 
-    time.sleep(0.06)
+    def value_matches():
+        _guard_foreground(hwnd, state_guard)
+        return _control_value(control) == expected
+    try:
+        wait_until(value_matches, description="exact editor value readback")
+    except TimeoutError as exc:
+        raise InputDeliveryError("Editor value did not match exactly; inspect before retrying") from exc
     if not submit:
-        value = _control_value(control)
-        if value is not None and str(text) not in value and replace:
-            raise InputDeliveryError("Semantic editor value did not verify after replacement; inspect before retrying")
         return "VERIFIED: " + json.dumps(
             {"action": "ui_type", "window_hwnd": hwnd, "control": _meta(control), "characters": len(str(text)), "method": wrote_with, "submitted": False},
             ensure_ascii=False,
         )
 
+    _guard_foreground(hwnd, state_guard)
+    if not _has_focus(control):
+        raise InputDeliveryError("Editor lost keyboard focus before submit; text was not submitted")
     try:
-        from pywinauto.keyboard import send_keys
-        send_keys("{ENTER}")
+        from .tools import _desktop_press
+        _desktop_press("enter")
     except Exception as exc:
         raise InputDeliveryError("Text was entered but Enter delivery failed; do not retry blindly") from exc
-    time.sleep(0.25)
-
-    # Sending can be verified either because the composer clears or because the sent text is
-    # now exposed by UI Automation in the conversation surface.
-    value_after = _control_value(control)
-    cleared = value_after is not None and not _text(value_after)
-    echoed = False
-    wanted = _text(text)
-    if wanted:
-        for candidate in _descendants(win)[:700]:
-            if _control_name(candidate) == wanted:
-                echoed = True
-                break
-    if not cleared and not echoed:
-        raise InputDeliveryError(
-            "Text may have been submitted, but the resulting UI state could not be verified; do not resend automatically"
-        )
+    state = {"cleared": False, "echoed": False}
+    def submitted():
+        _guard_foreground(hwnd, state_guard)
+        state["cleared"] = bool(expected) and _control_value(control) == ""
+        state["echoed"] = bool(wanted) and echo_count() > before_echoes
+        return state["cleared"] or state["echoed"]
+    try:
+        wait_until(submitted, timeout=2.0, description="new post-submit evidence")
+    except Exception as exc:
+        raise InputDeliveryError("Text may have been submitted; inspect the conversation and do not resend automatically") from exc
     return "VERIFIED: " + json.dumps(
         {
             "action": "ui_type",
@@ -387,8 +535,8 @@ def ui_type(
             "characters": len(str(text)),
             "method": wrote_with,
             "submitted": True,
-            "composer_cleared": cleared,
-            "message_visible": echoed,
+            "composer_cleared": state["cleared"],
+            "new_message_visible": state["echoed"],
         },
         ensure_ascii=False,
     )
@@ -417,66 +565,144 @@ def ui_hotkey(keys: list[str], title: str = "") -> str:
     win = _window(title)
     hwnd = _focus_window(win)
     normalized = _hotkey_tokens(keys)
-    import pyautogui
-
     aliases = {"control": "ctrl", "windows": "win", "escape": "esc"}
-    pyautogui.hotkey(*[aliases.get(value, value) for value in normalized])
-    time.sleep(0.08)
-    return "VERIFIED: " + json.dumps({"action": "ui_hotkey", "window_hwnd": hwnd, "keys": normalized}, ensure_ascii=False)
+    _guard_foreground(hwnd)
+    _SNAPSHOTS.invalidate(hwnd)
+    from .tools import _desktop_hotkey
+    _desktop_hotkey([aliases.get(value, value) for value in normalized])
+    return "DELIVERED: " + json.dumps({"action": "ui_hotkey", "window_hwnd": hwnd, "keys": normalized}, ensure_ascii=False)
 
 
-def ui_batch(actions: list[dict[str, Any]], title: str = "") -> str:
-    """Execute a compact semantic UI sequence without model round-trips between known steps."""
-    if not isinstance(actions, list) or not actions or len(actions) > 20:
-        raise ValueError("ui_batch requires 1-20 actions")
+def ui_wait_state(target: str, title: str = "", control_type: str = "", state: str = "visible",
+                  timeout_ms: int = 1500) -> str:
+    """Read a fresh live target until a condition holds; never focus a window/control."""
+    if not _text(target) or state not in {"visible", "focused"}:
+        raise ValueError("Provide an exact target and state visible or focused")
+    def probe():
+        try:
+            win = _window(title)
+            control = _find_control(win, target, control_type)
+        except RuntimeError as exc:
+            if "Emergency stop" in str(exc):
+                raise
+            return False
+        if state == "focused" and (int(win.handle) != _foreground_hwnd() or not _has_focus(control)):
+            return False
+        return {"action": "ui_wait_state", "state": state, "window_hwnd": int(win.handle), "control": _meta(control)}
+    result = wait_until(probe, timeout=max(0, min(timeout_ms, 15000)) / 1000, description=f"{target!r} {state}")
+    _SNAPSHOTS.invalidate(result["window_hwnd"])
+    return "VERIFIED: " + json.dumps(result, ensure_ascii=False)
+
+
+_TARGET_FIELDS = {"target": {"type": "string", "maxLength": 500}, "title": {"type": "string", "maxLength": 500},
+                  "control_type": {"type": "string", "maxLength": 80}}
+
+
+def _action_schema(op: str, fields: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {"type": "object", "properties": {"op": {"const": op}, **fields},
+            "required": ["op", *required], "additionalProperties": False}
+
+
+_NAMED_FIELDS = {**_TARGET_FIELDS, "target": {"type": "string", "maxLength": 500, "pattern": r"\S"}}
+_KEYS = {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 5}
+_BATCH_SCHEMA = {"type": "object", "properties": {
+    "title": {"type": "string", "maxLength": 500},
+    "actions": {"type": "array", "minItems": 1, "maxItems": 20, "items": {"oneOf": [
+        _action_schema("activate", _NAMED_FIELDS, ["target"]),
+        _action_schema("focus", _TARGET_FIELDS, []),
+        _action_schema("type", {"target": _NAMED_FIELDS["target"], "title": _TARGET_FIELDS["title"],
+                               "text": {"type": "string", "maxLength": 4096},
+                               "submit": {"type": "boolean"}, "replace": {"type": "boolean"}}, ["target", "text"]),
+        _action_schema("hotkey", {"title": _TARGET_FIELDS["title"], "keys": _KEYS}, ["keys"]),
+        _action_schema("wait", {"seconds": {"type": "number", "minimum": 0, "maximum": 5}}, ["seconds"]),
+        _action_schema("assert_visible", {**_NAMED_FIELDS, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 15000}}, ["target"]),
+    ]}},
+}, "required": ["actions"], "additionalProperties": False}
+
+
+def ui_batch(actions: list[dict[str, Any]], title: str = "", *,
+             authorize: Callable[[str], None] | None = None) -> str:
+    """Preflight a whole ordered batch, dispatch each action once, preserve partial outcomes."""
+    encoded = json.dumps({"actions": actions, "title": title}, allow_nan=False)
+    if len(encoded.encode("utf-8")) > 65536 or "\\u0000" in encoded:
+        raise ValueError("Batch arguments exceed 64 KiB or contain NUL")
+    Draft202012Validator(_BATCH_SCHEMA).validate({"actions": actions, "title": title})
+    for action in actions:
+        if action["op"] == "hotkey":
+            _hotkey_tokens(action["keys"])
+        if authorize:
+            authorize(action["op"])
+    # A read checkpoint must follow delivery-only navigation; reject malformed sequences
+    # before side effects rather than completing an unverifiable batch.
+    pending = False
+    for action in actions:
+        if pending and action["op"] not in {"wait", "assert_visible"}:
+            raise ValueError("Batch requires assert_visible after every activation/hotkey before another mutation; a text write cannot stand in for navigation/send verification")
+        if action["op"] in {"activate", "hotkey"}:
+            pending = True
+        elif action["op"] == "assert_visible":
+            pending = False
+    significant = [action for action in actions if action["op"] != "wait"]
+    if pending or not significant or significant[-1]["op"] not in {"assert_visible", "type"}:
+        raise ValueError("Batch needs a final assert_visible or verified text outcome; elapsed waits and delivered actions are not completion evidence")
+
     results: list[dict[str, Any]] = []
     for index, action in enumerate(actions):
-        if not isinstance(action, dict):
-            raise ValueError(f"ui_batch action {index} must be an object")
-        op = str(action.get("op") or "").strip().casefold()
-        target = str(action.get("target") or "")
-        action_title = str(action.get("title") or title or "")
-        control_type = str(action.get("control_type") or "")
-
-        if op == "activate":
-            raw = ui_activate(target=target, title=action_title, control_type=control_type)
-        elif op == "focus":
-            raw = ui_focus(target=target, title=action_title, control_type=control_type)
-        elif op == "type":
-            raw = ui_type(
-                text=str(action.get("text") or ""),
-                target=target,
-                title=action_title,
-                submit=bool(action.get("submit", False)),
-                replace=bool(action.get("replace", False)),
-            )
-        elif op == "hotkey":
-            keys = action.get("keys")
-            if not isinstance(keys, list):
-                raise ValueError("ui_batch hotkey action requires keys[]")
-            raw = ui_hotkey([str(key) for key in keys], title=action_title)
-        elif op == "wait":
-            seconds = max(0.0, min(float(action.get("seconds", 0.15)), 5.0))
-            time.sleep(seconds)
-            raw = f"VERIFIED: waited {seconds:.2f}s"
-        elif op == "assert_visible":
-            win = _window(action_title)
-            _focus_window(win)
-            control = _find_control(win, target, control_type)
-            raw = "VERIFIED: " + json.dumps({"action": "assert_visible", "control": _meta(control)}, ensure_ascii=False)
-        else:
-            raise ValueError(f"Unsupported ui_batch operation: {op}")
-
-        if not str(raw).startswith("VERIFIED:"):
-            raise RuntimeError(f"Semantic UI batch action {index} did not verify: {raw}")
-        results.append({"index": index, "op": op, "result": str(raw)[:2000]})
-    return "VERIFIED: " + json.dumps({"action": "ui_batch", "steps": results}, ensure_ascii=False)
+        op = action["op"]
+        action_title = action.get("title") or title
+        common = {"target": action.get("target", ""), "title": action_title,
+                  "control_type": action.get("control_type", "")}
+        try:
+            check_cancelled()
+            if authorize:
+                authorize(op)
+            if op == "activate":
+                raw = ui_activate(**common)
+            elif op == "focus":
+                raw = ui_focus(**common)
+            elif op == "type":
+                raw = ui_type(text=action["text"], target=common["target"], title=action_title,
+                              submit=action.get("submit", False), replace=action.get("replace", False))
+            elif op == "hotkey":
+                raw = ui_hotkey(action["keys"], title=action_title)
+            elif op == "wait":
+                cancellable_delay(action["seconds"])
+                raw = "WAITED: elapsed delay is not verification evidence"
+            else:
+                raw = ui_wait_state(**common, timeout_ms=action.get("timeout_ms", 1500))
+            if not raw.startswith(("VERIFIED:", "DELIVERED:", "WAITED:")):
+                raise RuntimeError(raw)
+            results.append({"index": index, "op": op,
+                            "status": "verified" if raw.startswith("VERIFIED:") else "delivered",
+                            "result": raw[:2000]})
+        except Exception as exc:
+            prefix = "BROWSER_ACTION_BLOCKED: " if isinstance(exc, BrowserBoundaryError) else "PERMISSION_DENIED: " if isinstance(exc, PermissionError) else "ERROR: "
+            failure = {"action": "ui_batch", "status": "interrupted", "failed_index": index,
+                       "completed_count": len(results), "steps": results,
+                       "failed": {"index": index, "op": op, "error": str(exc)[:2000],
+                                  "outcome": "uncertain" if isinstance(exc, InputDeliveryError) else "failed"},
+                       "not_run": list(range(index + 1, len(actions))),
+                       "recovery": "Inspect current state and resume only remaining steps; never replay the whole batch."}
+            return prefix + json.dumps(failure, ensure_ascii=False)
+    return "VERIFIED: " + json.dumps({"action": "ui_batch", "status": "completed", "completed_count": len(results),
+                                      "steps": results, "not_run": []}, ensure_ascii=False)
 
 
 def register_semantic_ui_tools(registry: ToolRegistry) -> None:
+    def authorize_batch_op(op: str) -> None:
+        name = {"activate": "ui_activate", "focus": "ui_focus", "type": "ui_type",
+                "hotkey": "ui_hotkey", "wait": "wait", "assert_visible": "ui_wait_state"}[op]
+        spec = registry._tools.get(name)
+        allowed, reason = registry.permissions.check(name, spec.risk if spec else Risk.SAFE, approved=True)
+        if not allowed:
+            raise PermissionError(reason)
+
+    def registered_batch(actions: list[dict[str, Any]], title: str = "") -> str:
+        return ui_batch(actions, title, authorize=authorize_batch_op)
+
     registry.register(ToolSpec(
         "ui_inspect",
-        "Fast compact Windows UI Automation snapshot of the foreground or named application. Returns actionable controls with semantic names/types/automation IDs/rectangles. Prefer this over screenshots for labeled desktop interfaces.",
+        "Compact read-only Windows UI Automation snapshot. Reuses detached metadata for up to 250 ms; force_refresh bypasses cache. Actions always resolve live exact controls. Does not focus the window.",
         Risk.LOW,
         {
             "type": "object",
@@ -485,6 +711,7 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
                 "query": {"type": "string"},
                 "actionable_only": {"type": "boolean"},
                 "max_controls": {"type": "integer", "minimum": 1, "maximum": 250},
+                "force_refresh": {"type": "boolean"},
             },
             "additionalProperties": False,
         },
@@ -493,7 +720,7 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
     registry.register(ToolSpec(
         "ui_focus",
         "Focus a named Windows application/control through UI Automation without guessing screen coordinates.",
-        Risk.LOW,
+        Risk.MEDIUM,
         {
             "type": "object",
             "properties": {"target": {"type": "string"}, "title": {"type": "string"}, "control_type": {"type": "string"}},
@@ -503,7 +730,7 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolSpec(
         "ui_activate",
-        "Activate a visible enabled Windows control by semantic name/automation ID and optional type. Uses UIA Invoke/Select first and physical clicking only as a final fallback. Prefer this over coordinate clicks.",
+        "Activate one exact unambiguous visible enabled control using UIA Invoke/Select. Reports delivery only; follow with ui_wait_state for the expected result. No physical fallback or blind retry.",
         Risk.MEDIUM,
         {
             "type": "object",
@@ -515,7 +742,7 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolSpec(
         "ui_type",
-        "Focus a semantic editable Windows control and enter text quickly. target may be omitted to choose the most likely visible message/chat editor. submit=true presses Enter and verifies that the composer cleared or the submitted text became visible; uncertain sends fail closed to prevent duplicates.",
+        "Enter text in an exact semantic editor, verifying the entire value before optional Enter. Omitted target requires a unique editor/composer. submit refuses existing drafts and verifies new post-submit evidence; uncertain delivery must never be resent automatically.",
         Risk.MEDIUM,
         {
             "type": "object",
@@ -533,7 +760,7 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolSpec(
         "ui_hotkey",
-        "Focus a named Windows application and send a short keyboard shortcut. Use semantic app targeting instead of alt-tab or blind keyboard input.",
+        "Focus a named Windows application and deliver a tracked keyboard shortcut. Reports delivery only; verify the intended result with ui_wait_state.",
         Risk.MEDIUM,
         {
             "type": "object",
@@ -544,37 +771,19 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
         ui_hotkey,
     ))
     registry.register(ToolSpec(
+        "ui_wait_state",
+        "Read a fresh exact UIA target until it is visible/enabled or keyboard-focused. Cancellable bounded polling without focusing, typing, or clicking; returns verified read evidence for a preceding action.",
+        Risk.LOW,
+        {"type": "object", "properties": {**_NAMED_FIELDS,
+            "state": {"type": "string", "enum": ["visible", "focused"]},
+            "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 15000}},
+         "required": ["target"], "additionalProperties": False},
+        ui_wait_state,
+    ))
+    registry.register(ToolSpec(
         "ui_batch",
-        "Execute 1-20 already-known semantic Windows UI actions in order inside one verified tool call, avoiding model round-trips between clicks/focus/text/hotkeys. Supported ops: activate, focus, type, hotkey, wait, assert_visible.",
+        "Preflight and execute 1-20 known semantic actions in order with cancellation, nested permission checks, and live targets. Each delivery-only activate/hotkey requires assert_visible before another mutation; end with assert_visible or verified text. First failure returns partial ledger and remaining indexes; never replay completed or uncertain actions. Supported ops: activate, focus, type, hotkey, wait, assert_visible.",
         Risk.MEDIUM,
-        {
-            "type": "object",
-            "properties": {
-                "title": {"type": "string"},
-                "actions": {
-                    "type": "array",
-                    "minItems": 1,
-                    "maxItems": 20,
-                    "items": {
-                        "type": "object",
-                        "properties": {
-                            "op": {"type": "string", "enum": ["activate", "focus", "type", "hotkey", "wait", "assert_visible"]},
-                            "target": {"type": "string"},
-                            "title": {"type": "string"},
-                            "control_type": {"type": "string"},
-                            "text": {"type": "string", "maxLength": 4096},
-                            "submit": {"type": "boolean"},
-                            "replace": {"type": "boolean"},
-                            "keys": {"type": "array", "items": {"type": "string"}, "maxItems": 5},
-                            "seconds": {"type": "number", "minimum": 0, "maximum": 5},
-                        },
-                        "required": ["op"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["actions"],
-            "additionalProperties": False,
-        },
-        ui_batch,
+        _BATCH_SCHEMA,
+        registered_batch,
     ))

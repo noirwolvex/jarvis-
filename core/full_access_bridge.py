@@ -57,6 +57,10 @@ def build_full_access_agent():
     # Register last so browser_navigate/open_url/Chrome app launch cannot fall back
     # to a second unmanaged browser after the guarded CDP tools are installed.
     register_full_access_browser_routing(agent.tools)
+    from .browser_semantic import register_browser_semantic_tools
+    register_browser_semantic_tools(agent.tools)
+    from .workflow_tools import register_workflow_tools
+    register_workflow_tools(agent)
 
     # Desktop/browser/workspace mutations are approved by explicit session-level Full Access.
     # HIGH/CRITICAL tools still require a separate approval surface and fail closed here.
@@ -104,9 +108,12 @@ def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shel
     observation_verified = read_only_observation_verified(goal, current)
 
     if current is not None and current.plan:
-        incomplete = [step.id for step in current.plan if step.status not in {"completed", "skipped"}]
+        incomplete = [step.id for step in current.plan if step.status != "completed"]
     else:
         incomplete = []
+    if current is not None:
+        incomplete.extend(f"{item['id']}/{step['id']}" for item in current.workflows
+                          for step in item["steps"] if step["status"] != "completed")
 
     requires_user_action = status == "waiting_user"
     completion_evidence = verified or observation_verified
@@ -135,6 +142,7 @@ def run_agent_mission(agent, goal: str, emit=None, cancel_event=None, allow_shel
         "requires_user_action": requires_user_action,
         "mission_completed": mission_completed,
         "high_risk_requires_separate_approval": True,
+        "execution_metrics": dict(current.metrics) if current else {},
     }
 
 

@@ -82,7 +82,7 @@ def desktop_mouse_down(button: str = "left") -> str:
     from .process_control import check_cancelled
     check_cancelled()
     _HELD_MOUSE_BUTTONS.add(chosen)
-    pyautogui.mouseDown(button=chosen)
+    pyautogui.mouseDown(button=chosen, _pause=False)
     return f"Mouse {chosen} button down"
 
 
@@ -91,7 +91,7 @@ def desktop_mouse_up(button: str = "left") -> str:
     import pyautogui
 
     chosen = _button(button)
-    pyautogui.mouseUp(button=chosen)
+    pyautogui.mouseUp(button=chosen, _pause=False)
     _HELD_MOUSE_BUTTONS.discard(chosen)
     return f"Mouse {chosen} button up"
 
@@ -106,7 +106,9 @@ def desktop_key_down(key: str) -> str:
     if value not in pyautogui.KEYBOARD_KEYS:
         raise ValueError("Unsupported keyboard key")
     _HELD_KEYS.add(value)
-    pyautogui.keyDown(value)
+    # Per-call pause suppression preserves PyAutoGUI's fail-safe check and avoids
+    # four global 100ms pauses for an ordinary two-key shortcut.
+    pyautogui.keyDown(value, _pause=False)
     return f"Key down: {value}"
 
 
@@ -115,7 +117,7 @@ def desktop_key_up(key: str) -> str:
     import pyautogui
 
     value = _key(key)
-    pyautogui.keyUp(value)
+    pyautogui.keyUp(value, _pause=False)
     _HELD_KEYS.discard(value)
     return f"Key up: {value}"
 

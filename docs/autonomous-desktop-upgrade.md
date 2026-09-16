@@ -43,6 +43,34 @@ Windows Unicode input now uses the complete native `INPUT` union: 40 bytes on 64
 
 ## Planning, verification and recovery
 
+### High-speed semantic execution
+
+The Full Access factory now registers `workflow_execute`, `workflow_status`, `workflow_review`, `browser_semantic_snapshot`, `browser_semantic_action`, `browser_wait_state`, and `ui_wait_state` on the existing `FastExecutionFullAccessAgent`. This is the same agent used by the persistent dashboard worker. Worker revision 3 replaces an outdated idle worker before the next mission; an active older worker must finish or stop first.
+
+For an unfamiliar interface, the model obtains a compact semantic snapshot, chooses exact targets, and submits known steps as one ordered workflow. Browser actions use DOM/CDP; native applications use UI Automation; existing application/file/Git/native tools remain available. Raw coordinates remain on the existing screen-bound path and are deliberately excluded from deterministic workflows.
+
+`workflow_execute` accepts up to 32 steps per call. Every step has an ID, description, tool and arguments, plus an optional read-only semantic checkpoint. The entire program is schema- and permission-checked before the first action; each child still goes through the normal Full Access dispatcher. There is no additional model request between known steps. Compound UI operations also enforce their nested tool policies. Full Access, terminal permission, Rust overlays, foreground validation and emergency cancellation remain in force.
+
+Each workflow stores its immutable program and per-step journal in the task checkpoint. Repeating the same workflow ID resumes only unfinished work. A delivered action with a pending checkpoint retries only the observation. An uncertain send, write or click is never automatically replayed: inspect the live outcome, record a fresh `task_verify` claim, then use `workflow_review` before continuing. `workflow_status` restores program context after chat trimming; metadata alone cannot verify an action. Workflow budgets are 20 programs, 100 steps and 256 KiB of program data per mission.
+
+The narrow text compiler still handles unambiguous app-opening and Google-search chains without a model request. Unknown action clauses fall back to the model instead of being swallowed into a search query. A fast-path failure now continues the same task through model recovery, retaining completed steps and the original browser baseline. Full Access plans preserve required steps and their order; unfinished workflows or skipped steps cannot produce mission completion.
+
+### Observation reuse and checkpoint behavior
+
+- Browser snapshots include visible semantic controls, hierarchy, focus, dialogs, page state, viewport and explicit iframe context. A per-document mutation/focus/layout version invalidates observed node references. Detached snapshots are reused for up to 500 ms when their version remains valid. Closed shadow DOM is not exposed; iframe inspection needs an explicit frame selector.
+- UIA snapshots include bounded controls, parent context, focus and window/process/framework metadata. Detached read metadata is cached for up to 250 ms; JARVIS mutations invalidate the affected window. External native UI changes are bounded by that TTL or `force_refresh`, rather than a system-wide UIA event subscription. Actions always resolve live controls and never act on cached wrappers.
+- Ready states return immediately. Loading states use cancellable polling rather than fixed post-action sleeps. Missing/ambiguous controls do not trigger blind clicks. Browser commands abandoned while queued are cancelled before dispatch; an already-delivered action cannot be undone.
+- Native activation and shortcuts report delivery rather than success. A semantic assertion verifies the intended result before another dependent mutation. `ui_batch` performs those checks inside one call. Text entry requires exact readback; submission requires new post-submit evidence. Semantic paths do not automatically capture screenshots.
+- Tracked keyboard and mouse down/up primitives disable only PyAutoGUI's per-call pause. Fail-safe checks, input tracking and cancellation remain active; the global pause setting is unchanged.
+
+### Reusable application operations
+
+Discord navigation resolves an exact server/channel/DM and verifies selected context and its composer. The Quick Switcher is used only when direct semantic navigation is unavailable. An optional `server` disambiguates channel names. `discord_navigate_and_send` carries the verified context through one explicitly requested send, refuses drafts and never retries uncertain submission. Unsupported layouts, missing UIA selection/value/runtime identities and unsupported labels require fresh inspection; the current specialized label matching is English-oriented. Composer clearing/new visible message evidence is a local UI postcondition, not proof of server delivery or recipient receipt.
+
+`youtube_search_open(query, new_tab=false, play=true)` searches, opens the first resolved watch result, checks its video ID and verifies advancing content playback in one call. `youtube_playback` supports status, play and pause. Playback checks require matching selected/loaded IDs, and reject ads, blocked autoplay or unavailable evidence. The first result is not a guarantee of relevance to every natural-language music request; the model must assess the returned title/identity when the request requires a specific rendition. CAPTCHA checks run before and after browser mutations and fail closed.
+
+Existing VS Code, Git, file and Windows application tools are reusable workflow steps. A tool that only reports delivery needs an explicit semantic checkpoint; the workflow does not turn a launch request into verified application success.
+
 Plans have unique step identifiers, known dependencies and no cycles. Starting or completing a step requires its dependencies to finish. Plan size is bounded to 100 entries in the orchestrator; the model-facing plan tool currently exposes a 20-step plan, which can be revised as a mission progresses.
 
 An intent checkpoint is flushed and atomically replaced before dispatch. Tool results, plan changes and verification records also update the checkpoint. If a process exits between intent and result, the action remains uncertain. Cancellation preserves that uncertainty. Checkpoints live in `.jarvis/traces/task-*.json`; known token and password patterns are redacted before persistence. This redaction is best effort and does not make arbitrary user content public or safe to share.
@@ -71,11 +99,11 @@ The upgrade includes tests for dependency cycles, crash checkpoints, continuatio
 
 The control-center browser inspection confirmed the rendered hybrid interface, the real emergency controls and the permission descriptions. It did not enable additional device permissions or execute a live model-driven desktop mission. Existing Python, TypeScript, database and Rust regressions are checked alongside the new cases. CI is configured to install Python test dependencies and run Windows and Linux coverage; Windows-specific cases are explicitly skipped on Linux. The CI matrix itself was not executed locally.
 
-Local Windows validation recorded on September 15, 2026:
+Local Windows validation updated on September 16, 2026:
 
 | Check | Result |
 | --- | --- |
-| Python unit and integration suite | 88 passed |
+| Python unit and integration suite | 218 passed |
 | Control-center tests | 12 passed |
 | TypeScript runtime tests | 21 passed |
 | Database migration/invariant tests | 6 passed, including the parent test |
@@ -83,7 +111,12 @@ Local Windows validation recorded on September 15, 2026:
 | Workspace TypeScript checks | Passed |
 | Next.js production build | Passed |
 | Python source compilation | Passed |
+| Native Rust adapters | `cargo check --features native` passed |
+| Prisma schema validation | Passed |
+| npm dependency audit | 0 vulnerabilities |
 
-The production build passed before the final worker-stop listener ordering adjustment; the complete TypeScript test suite and type checks passed after that adjustment.
+Performance regressions assert structural costs rather than unreliable wall-clock promises: eight verified workflow actions complete in one model tool-call cycle plus the final response (two model calls total), with no intermediate screenshots; sixteen direct workflow steps use no model calls, and repeating that completed program dispatches no actions. Ready-state waits do not sleep, repeated unchanged snapshots hit their caches, and checkpoint retries do not repeat the preceding mutation. These are fixture measurements, not production latency benchmarks.
+
+Browser tests execute isolated headless Chromium against local HTML fixtures, with network requests intercepted. They cover real DOM targeting, snapshot invalidation, loading waits, ambiguous controls, cancellation and simulated media properties. Discord/UIA tests use controlled fixtures. No live Discord messages or end-to-end provider-driven desktop missions were executed. CI now installs Playwright and Chromium to run the browser fixtures. Rust tests used `.jarvis/validation/rust-target` because the running daemon locked the normal output executable; the daemon was left running.
 
 Production qualification still requires supervised native missions against representative apps, multi-monitor/DPI and keyboard layouts, loading animations and unexpected popups, real provider latency, protected/elevated windows, browser disconnection, abrupt OS termination, and measured stop latency under load. Capture and hotkey timings above are configured polling budgets, not hard real-time guarantees. Full Access does not bypass Windows secure desktop/UAC or provide guaranteed completion of every complex task.
