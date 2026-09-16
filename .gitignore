@@ -24,3 +24,4 @@ daemon/rust/target/
 
 database/node_modules/
 database/generated/
+daemon/rust/local-pki/
