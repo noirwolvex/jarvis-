@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Callable, Any
 
 from .agent import AgentEvent
+from .autonomous_orchestrator import AutonomousTaskOrchestrator
 from .fast_mission import execute_fast_mission
 from .full_access_agent import FullAccessJarvisAgent
+from .task_tools import register_task_tools
 
 _DEV_SIGNALS = (
     " git", "git ", "github", "repo", "repository", "code", "coding", "vscode", "visual studio code",
@@ -45,6 +47,15 @@ _DESKTOP_FAST_PREFIXES = (
 class FastExecutionFullAccessAgent(FullAccessJarvisAgent):
     """Full Access agent with a deterministic fast lane and lower-latency model behavior."""
 
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        previous = self.orchestrator
+        self.orchestrator = AutonomousTaskOrchestrator(str(previous.trace_dir))
+        self.orchestrator.strict_order = True
+        # Task tools close over their orchestrator. Re-registering replaces the handlers
+        # atomically in ToolRegistry so task_plan/task_status now expose the rich graph.
+        register_task_tools(self.tools, self.orchestrator)
+
     def _system_prompt(self, user_text: str = "") -> str:
         return super()._system_prompt(user_text) + """
 
@@ -63,6 +74,7 @@ High-speed autonomous execution rules:
 - Use fresh vision/UI inspection only when the next action genuinely depends on visual state, unlabeled controls, or a changed/uncertain scene.
 - Long missions must preserve the exact requested order and every clause. Never silently skip a step because later steps succeeded.
 - If a deterministic path fails, inspect the resulting live state and recover from the failed step; do not restart the whole mission blindly.
+- Every task node should carry its required state, preferred execution method, expected result, verification method, fallback strategy, and retry policy when those values are known. task_status exposes the live execution graph and the actual backend used by completed tool calls.
 """
 
     def _tool_schemas_for_goal(self, user_text: str) -> list[dict[str, Any]]:
