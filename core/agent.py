@@ -394,6 +394,9 @@ class JarvisAgent:
                         if guard_result:
                             result = guard_result
                         else:
+                            mutation_intent = self._is_mutation(name) if hasattr(self, "_is_mutation") else not name.startswith(("task_", "workflow_"))
+                            if mutation_intent:
+                                self.orchestrator.start_action(name, dict(arguments))
                             approved = self.approval(name, arguments)
                             result = self._execute_tool(name, arguments, approved=approved)
                     duration_ms = (time.perf_counter() - started) * 1000.0
