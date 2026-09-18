@@ -565,7 +565,11 @@ mod windows_input {
             let mut events = Vec::with_capacity(chunk.len() * 2);
             for unit in chunk {
                 events.push(keyboard_input(0, *unit, KEYEVENTF_UNICODE));
-                events.push(keyboard_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+                events.push(keyboard_input(
+                    0,
+                    *unit,
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                ));
             }
             send(&events, "unicode keyboard input")?;
         }
