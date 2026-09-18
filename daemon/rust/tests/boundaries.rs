@@ -4,7 +4,7 @@ use jarvis_execution_daemon::{
     input::{InputController, SimulationInput},
     ipc::{MAX_WIRE_BYTES, Session, read_frame},
     process::{ProcessManager, validate_argv},
-    types::{Action, ForegroundBinding, Request, now_ms},
+    types::{Action, ForegroundBinding, MouseButton, Request, now_ms},
 };
 use std::time::{Duration, Instant};
 use tokio::io::AsyncWriteExt;
@@ -130,6 +130,23 @@ fn input_capability_authorizes_click_and_keyboard_but_not_capture() {
         foreground: foreground(),
     };
     assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_ok());
+    req.action = Action::Hotkey {
+        display_id: 0,
+        frame_id: Uuid::new_v4(),
+        keys: vec!["ctrl".into(), "l".into()],
+        foreground: foreground(),
+    };
+    assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_ok());
+    req.action = Action::ClickButton {
+        display_id: 0,
+        frame_id: Uuid::new_v4(),
+        x: 1,
+        y: 1,
+        button: MouseButton::Right,
+        clicks: 2,
+        foreground: foreground(),
+    };
+    assert!(policy.authorize(&"a".repeat(64), &req, now, &latch).is_ok());
     req.action = Action::Capture { display_id: 0 };
     assert!(
         policy
@@ -204,6 +221,44 @@ fn stale_frames_out_of_display_coordinates_and_invalid_pixels_are_rejected() {
             .type_text(
                 &frame,
                 &"x".repeat(4097),
+                &foreground(),
+                &EmergencyLatch::default()
+            )
+            .is_err()
+    );
+    assert!(
+        SimulationInput
+            .click_button(
+                &frame,
+                1,
+                1,
+                MouseButton::Right,
+                4,
+                &foreground(),
+                &EmergencyLatch::default()
+            )
+            .is_err()
+    );
+    assert!(
+        SimulationInput
+            .hotkey(
+                &frame,
+                &vec!["ctrl".into(); 9],
+                &foreground(),
+                &EmergencyLatch::default()
+            )
+            .is_err()
+    );
+    assert!(
+        SimulationInput
+            .drag(
+                &frame,
+                1,
+                1,
+                2,
+                2,
+                2_001,
+                MouseButton::Left,
                 &foreground(),
                 &EmergencyLatch::default()
             )
