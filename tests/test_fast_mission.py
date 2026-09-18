@@ -8,6 +8,55 @@ from core.fast_mission import compile_fast_mission
 
 
 class FastMissionCompilerTests(unittest.TestCase):
+    def test_mixed_multi_app_whatsapp_and_google_chain_compiles_without_model(self) -> None:
+        steps = compile_fast_mission(
+            "open WhatsApp and press the first chat, then open Discord, then open Instagram, "
+            "then open Google and search for cats"
+        )
+        self.assertIsNotNone(steps)
+        assert steps is not None
+        self.assertEqual(
+            [step.tool for step in steps],
+            [
+                "launch_installed_app",
+                "whatsapp_select_chat_native",
+                "launch_installed_app",
+                "launch_installed_app",
+                "google_search",
+            ],
+        )
+        self.assertEqual(steps[0].arguments["query"], "WhatsApp")
+        self.assertEqual(steps[1].arguments, {"position": 1})
+        self.assertEqual(steps[2].arguments["query"].casefold(), "discord")
+        self.assertEqual(steps[3].arguments["query"].casefold(), "instagram")
+        self.assertEqual(steps[4].arguments, {"query": "cats", "new_tab": False})
+
+    def test_mixed_whatsapp_clause_can_type_after_selecting_chat(self) -> None:
+        steps = compile_fast_mission(
+            'open WhatsApp and select the second conversation and type "hello there", '
+            'then open Calculator'
+        )
+        self.assertIsNotNone(steps)
+        assert steps is not None
+        self.assertEqual(
+            [step.tool for step in steps],
+            [
+                "launch_installed_app",
+                "whatsapp_select_chat_native",
+                "ui_type_native",
+                "launch_installed_app",
+            ],
+        )
+        self.assertEqual(steps[1].arguments, {"position": 2})
+        self.assertEqual(steps[2].arguments, {"text": "hello there"})
+
+    def test_mixed_unknown_clause_falls_back_whole_mission(self) -> None:
+        self.assertIsNone(
+            compile_fast_mission(
+                "open WhatsApp and press the first chat, then delete the chat, then open Discord"
+            )
+        )
+
     def test_simple_arabic_commands_compile_in_order_without_model(self):
         steps = compile_fast_mission("افتح ديسكورد ثم افتح الحاسبة ثم افتح المفكرة")
         self.assertEqual(
