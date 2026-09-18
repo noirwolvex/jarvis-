@@ -341,7 +341,11 @@ fn native_key(value: &str) -> Result<enigo::Key> {
         "f10" => Key::F10,
         "f11" => Key::F11,
         "f12" => Key::F12,
-        _ => return Err(Error::Unsupported("keyboard key is not supported by native input")),
+        _ => {
+            return Err(Error::Unsupported(
+                "keyboard key is not supported by native input",
+            ));
+        }
     };
     Ok(key)
 }
@@ -378,7 +382,9 @@ impl InputController for NativeInput {
 
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         if !(1..=3).contains(&clicks) {
             return Err(Error::Limit("mouse click count"));
@@ -416,7 +422,9 @@ impl InputController for NativeInput {
 
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         verify_foreground(foreground)?;
         let mut input = Enigo::new(&Settings::default())
@@ -445,7 +453,9 @@ impl InputController for NativeInput {
         validate_frame(frame, start_x, start_y, emergency)?;
         validate_frame(frame, end_x, end_y, emergency)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         if duration_ms > 2_000 {
             return Err(Error::Limit("drag duration"));
@@ -465,14 +475,20 @@ impl InputController for NativeInput {
         let steps = ((duration_ms.max(16) + 15) / 16).clamp(1, 125);
         let mut movement_result = Ok(());
         for step in 1..=steps {
-            if let Err(error) = emergency.check().and_then(|_| verify_foreground(foreground)) {
+            if let Err(error) = emergency
+                .check()
+                .and_then(|_| verify_foreground(foreground))
+            {
                 movement_result = Err(error);
                 break;
             }
             let progress = step as f64 / steps as f64;
             let x = start_x as f64 + (end_x - start_x) as f64 * progress;
             let y = start_y as f64 + (end_y - start_y) as f64 * progress;
-            if input.move_mouse(x.round() as i32, y.round() as i32, Coordinate::Abs).is_err() {
+            if input
+                .move_mouse(x.round() as i32, y.round() as i32, Coordinate::Abs)
+                .is_err()
+            {
                 movement_result = Err(Error::Operation("drag movement failed".into()));
                 break;
             }
@@ -499,7 +515,9 @@ impl InputController for NativeInput {
 
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         if !(-1000..=1000).contains(&clicks) {
             return Err(Error::Limit("scroll steps"));
@@ -534,7 +552,9 @@ impl InputController for NativeInput {
 
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         let key = native_key(key)?;
         verify_foreground(foreground)?;
@@ -559,7 +579,9 @@ impl InputController for NativeInput {
         validate_keyboard_frame(frame, emergency)?;
         validate_hotkey(keys)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         let mapped: Vec<_> = keys
             .iter()
@@ -570,7 +592,10 @@ impl InputController for NativeInput {
             .map_err(|_| Error::Operation("input connection failed".into()))?;
         let mut pressed = Vec::new();
         for key in &mapped {
-            if let Err(error) = emergency.check().and_then(|_| verify_foreground(foreground)) {
+            if let Err(error) = emergency
+                .check()
+                .and_then(|_| verify_foreground(foreground))
+            {
                 for prior in pressed.iter().rev() {
                     let _ = input.key(*prior, Direction::Release);
                 }
@@ -603,7 +628,9 @@ impl InputController for NativeInput {
 
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
-            return Err(Error::Denied("simulation evidence cannot authorize native input"));
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
         }
         if text.len() > 4096 || text.contains('\0') {
             return Err(Error::Limit("keyboard text"));
@@ -621,28 +648,86 @@ impl InputController for NativeInput {
 
 #[cfg(all(feature = "native", not(target_os = "windows")))]
 impl InputController for NativeInput {
-    fn click(&self, _frame: &Frame, _x: i32, _y: i32, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn click(
+        &self,
+        _frame: &Frame,
+        _x: i32,
+        _y: i32,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn click_button(&self, _frame: &Frame, _x: i32, _y: i32, _button: MouseButton, _clicks: u8, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn click_button(
+        &self,
+        _frame: &Frame,
+        _x: i32,
+        _y: i32,
+        _button: MouseButton,
+        _clicks: u8,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn pointer_move(&self, _frame: &Frame, _x: i32, _y: i32, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn pointer_move(
+        &self,
+        _frame: &Frame,
+        _x: i32,
+        _y: i32,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn drag(&self, _frame: &Frame, _start_x: i32, _start_y: i32, _end_x: i32, _end_y: i32, _duration_ms: u64, _button: MouseButton, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn drag(
+        &self,
+        _frame: &Frame,
+        _start_x: i32,
+        _start_y: i32,
+        _end_x: i32,
+        _end_y: i32,
+        _duration_ms: u64,
+        _button: MouseButton,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn scroll(&self, _frame: &Frame, _clicks: i32, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn scroll(
+        &self,
+        _frame: &Frame,
+        _clicks: i32,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn press_key(&self, _frame: &Frame, _key: &str, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn press_key(
+        &self,
+        _frame: &Frame,
+        _key: &str,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn hotkey(&self, _frame: &Frame, _keys: &[String], _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn hotkey(
+        &self,
+        _frame: &Frame,
+        _keys: &[String],
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-    fn type_text(&self, _frame: &Frame, _text: &str, _foreground: &ForegroundBinding, _emergency: &EmergencyLatch) -> Result<()> {
+    fn type_text(
+        &self,
+        _frame: &Frame,
+        _text: &str,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
 }
