@@ -10,7 +10,7 @@ from .orchestrator import PlanStep, tool_succeeded
 
 _CHAT_ACTION = re.compile(
     r"\s+(?:(?:and\s+then|then|and)\s+)"
-    r"(?:press|click|open)(?:\s+on)?\s+(?:the\s+)?"
+    r"(?:press|click|open|select|choose|tap)(?:\\s+on)?\\s+(?:the\\s+)?"
     r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)\s+chat\s*$",
     re.IGNORECASE,
 )
