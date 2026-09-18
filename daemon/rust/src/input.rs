@@ -298,19 +298,123 @@ fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
 }
 
 #[cfg(all(feature = "native", target_os = "windows"))]
-mod windows_pointer {
+mod windows_input {
     use super::*;
+    use std::mem::size_of;
+
+    const INPUT_MOUSE: u32 = 0;
+    const INPUT_KEYBOARD: u32 = 1;
+
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+    const MOUSEEVENTF_MIDDLEDOWN: u32 = 0x0020;
+    const MOUSEEVENTF_MIDDLEUP: u32 = 0x0040;
+    const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    const WHEEL_DELTA: i32 = 120;
+
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const KEYEVENTF_UNICODE: u32 = 0x0004;
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MouseInput {
+        dx: i32,
+        dy: i32,
+        mouse_data: u32,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyboardInput {
+        vk: u16,
+        scan: u16,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    union InputData {
+        mouse: MouseInput,
+        keyboard: KeyboardInput,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Input {
+        kind: u32,
+        data: InputData,
     }
 
     #[link(name = "user32")]
     unsafe extern "system" {
         fn SetPhysicalCursorPos(x: i32, y: i32) -> i32;
         fn GetPhysicalCursorPos(point: *mut Point) -> i32;
+        fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+    }
+
+    fn mouse_input(flags: u32, mouse_data: u32) -> Input {
+        Input {
+            kind: INPUT_MOUSE,
+            data: InputData {
+                mouse: MouseInput {
+                    dx: 0,
+                    dy: 0,
+                    mouse_data,
+                    flags,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        }
+    }
+
+    fn keyboard_input(vk: u16, scan: u16, flags: u32) -> Input {
+        Input {
+            kind: INPUT_KEYBOARD,
+            data: InputData {
+                keyboard: KeyboardInput {
+                    vk,
+                    scan,
+                    flags,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        }
+    }
+
+    fn send(inputs: &[Input], operation: &'static str) -> Result<()> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let inserted = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<Input>() as i32,
+            )
+        };
+        if inserted != inputs.len() as u32 {
+            return Err(Error::Operation(format!(
+                "{operation} inserted {inserted}/{} events; Windows may be blocking synthetic input at an integrity/UIPI boundary",
+                inputs.len()
+            )));
+        }
+        Ok(())
     }
 
     pub fn move_to(x: i32, y: i32) -> Result<()> {
@@ -331,64 +435,142 @@ mod windows_pointer {
         }
         Ok(())
     }
-}
 
-#[cfg(all(feature = "native", target_os = "windows"))]
-fn native_button(button: MouseButton) -> enigo::Button {
-    match button {
-        MouseButton::Left => enigo::Button::Left,
-        MouseButton::Right => enigo::Button::Right,
-        MouseButton::Middle => enigo::Button::Middle,
-    }
-}
-
-#[cfg(all(feature = "native", target_os = "windows"))]
-fn native_key(value: &str) -> Result<enigo::Key> {
-    use enigo::Key;
-
-    validate_key_name(value)?;
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.chars().count() == 1 {
-        return Ok(Key::Unicode(normalized.chars().next().unwrap()));
-    }
-    let key = match normalized.as_str() {
-        "ctrl" | "control" => Key::Control,
-        "alt" => Key::Alt,
-        "shift" => Key::Shift,
-        "win" | "windows" | "meta" | "super" => Key::Meta,
-        "enter" | "return" => Key::Return,
-        "esc" | "escape" => Key::Escape,
-        "tab" => Key::Tab,
-        "space" => Key::Space,
-        "backspace" => Key::Backspace,
-        "delete" | "del" => Key::Delete,
-        "home" => Key::Home,
-        "end" => Key::End,
-        "pageup" | "page_up" => Key::PageUp,
-        "pagedown" | "page_down" => Key::PageDown,
-        "left" | "leftarrow" => Key::LeftArrow,
-        "right" | "rightarrow" => Key::RightArrow,
-        "up" | "uparrow" => Key::UpArrow,
-        "down" | "downarrow" => Key::DownArrow,
-        "f1" => Key::F1,
-        "f2" => Key::F2,
-        "f3" => Key::F3,
-        "f4" => Key::F4,
-        "f5" => Key::F5,
-        "f6" => Key::F6,
-        "f7" => Key::F7,
-        "f8" => Key::F8,
-        "f9" => Key::F9,
-        "f10" => Key::F10,
-        "f11" => Key::F11,
-        "f12" => Key::F12,
-        _ => {
-            return Err(Error::Unsupported(
-                "keyboard key is not supported by native input",
-            ));
+    fn button_flags(button: MouseButton) -> (u32, u32) {
+        match button {
+            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
         }
-    };
-    Ok(key)
+    }
+
+    pub fn click(button: MouseButton) -> Result<()> {
+        let (down, up) = button_flags(button);
+        send(&[mouse_input(down, 0), mouse_input(up, 0)], "mouse click")
+    }
+
+    pub fn button_down(button: MouseButton) -> Result<()> {
+        let (down, _) = button_flags(button);
+        send(&[mouse_input(down, 0)], "mouse button press")
+    }
+
+    pub fn button_up(button: MouseButton) -> Result<()> {
+        let (_, up) = button_flags(button);
+        send(&[mouse_input(up, 0)], "mouse button release")
+    }
+
+    pub fn scroll(clicks: i32) -> Result<()> {
+        let data = clicks.saturating_mul(WHEEL_DELTA) as u32;
+        send(&[mouse_input(MOUSEEVENTF_WHEEL, data)], "mouse wheel")
+    }
+
+    fn virtual_key(value: &str) -> Result<u16> {
+        validate_key_name(value)?;
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.len() == 1 {
+            let byte = normalized.as_bytes()[0];
+            if byte.is_ascii_alphabetic() {
+                return Ok(byte.to_ascii_uppercase() as u16);
+            }
+            if byte.is_ascii_digit() {
+                return Ok(byte as u16);
+            }
+        }
+        let key = match normalized.as_str() {
+            "ctrl" | "control" => 0x11,
+            "alt" => 0x12,
+            "shift" => 0x10,
+            "win" | "windows" | "meta" | "super" => 0x5B,
+            "enter" | "return" => 0x0D,
+            "esc" | "escape" => 0x1B,
+            "tab" => 0x09,
+            "space" => 0x20,
+            "backspace" => 0x08,
+            "delete" | "del" => 0x2E,
+            "home" => 0x24,
+            "end" => 0x23,
+            "pageup" | "page_up" => 0x21,
+            "pagedown" | "page_down" => 0x22,
+            "left" | "leftarrow" => 0x25,
+            "up" | "uparrow" => 0x26,
+            "right" | "rightarrow" => 0x27,
+            "down" | "downarrow" => 0x28,
+            "f1" => 0x70,
+            "f2" => 0x71,
+            "f3" => 0x72,
+            "f4" => 0x73,
+            "f5" => 0x74,
+            "f6" => 0x75,
+            "f7" => 0x76,
+            "f8" => 0x77,
+            "f9" => 0x78,
+            "f10" => 0x79,
+            "f11" => 0x7A,
+            "f12" => 0x7B,
+            _ => {
+                return Err(Error::Unsupported(
+                    "keyboard key is not supported by Windows native input",
+                ));
+            }
+        };
+        Ok(key)
+    }
+
+    pub fn press_key(value: &str) -> Result<()> {
+        let key = virtual_key(value)?;
+        send(
+            &[
+                keyboard_input(key, 0, 0),
+                keyboard_input(key, 0, KEYEVENTF_KEYUP),
+            ],
+            "keyboard key press",
+        )
+    }
+
+    pub fn hotkey(values: &[String]) -> Result<()> {
+        let keys = values
+            .iter()
+            .map(|value| virtual_key(value))
+            .collect::<Result<Vec<_>>>()?;
+        let mut events = Vec::with_capacity(keys.len() * 2);
+        for key in &keys {
+            events.push(keyboard_input(*key, 0, 0));
+        }
+        for key in keys.iter().rev() {
+            events.push(keyboard_input(*key, 0, KEYEVENTF_KEYUP));
+        }
+        match send(&events, "keyboard hotkey") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let releases = keys
+                    .iter()
+                    .rev()
+                    .map(|key| keyboard_input(*key, 0, KEYEVENTF_KEYUP))
+                    .collect::<Vec<_>>();
+                let _ = send(&releases, "keyboard hotkey cleanup");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn type_text(
+        text: &str,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        let units = text.encode_utf16().collect::<Vec<_>>();
+        for chunk in units.chunks(64) {
+            emergency.check()?;
+            verify_foreground(foreground)?;
+            let mut events = Vec::with_capacity(chunk.len() * 2);
+            for unit in chunk {
+                events.push(keyboard_input(0, *unit, KEYEVENTF_UNICODE));
+                events.push(keyboard_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP));
+            }
+            send(&events, "unicode keyboard input")?;
+        }
+        Ok(())
+    }
 }
 
 /// Native input is exposed only on Windows and only after the caller binds the action
