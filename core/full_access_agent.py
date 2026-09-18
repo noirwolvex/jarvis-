@@ -371,6 +371,9 @@ Full Access execution profile:
                         arguments = {}
                     else:
                         emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
+                        mutation_intent = self._is_mutation(name)
+                        if mutation_intent:
+                            self.orchestrator.start_action(name, dict(arguments))
                         approved = self.approval(name, arguments)
                         result = self._execute_tool(name, arguments, approved=approved)
                         challenge_pause = str(result).startswith("BROWSER_ACTION_BLOCKED:")
