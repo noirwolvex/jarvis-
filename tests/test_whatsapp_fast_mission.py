@@ -6,6 +6,27 @@ from core.whatsapp_fast_mission import compile_whatsapp_ordinal_mission
 
 
 class WhatsAppOrdinalFastMissionTests(unittest.TestCase):
+    def test_exact_reported_first_chat_phrase_compiles(self) -> None:
+        steps = compile_whatsapp_ordinal_mission(
+            "open WhatsApp and press the first chat"
+        )
+        self.assertIsNotNone(steps)
+        assert steps is not None
+        self.assertEqual(
+            [step.tool for step in steps],
+            ["launch_installed_app", "whatsapp_select_chat_native"],
+        )
+        self.assertEqual(steps[1].arguments, {"position": 1})
+
+    def test_conversation_synonym_and_select_verb_compile(self) -> None:
+        steps = compile_whatsapp_ordinal_mission(
+            "open WhatsApp and select the second conversation"
+        )
+        self.assertIsNotNone(steps)
+        assert steps is not None
+        self.assertEqual(steps[-1].tool, "whatsapp_select_chat_native")
+        self.assertEqual(steps[-1].arguments, {"position": 2})
+
     def test_reported_second_chat_then_type_compiles_in_exact_order(self) -> None:
         steps = compile_whatsapp_ordinal_mission(
             "open discord app and then open WhatsApp app and then press the second chat and write c"
