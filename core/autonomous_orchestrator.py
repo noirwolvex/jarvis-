@@ -268,8 +268,17 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         duration_ms: float,
         turn: int,
         mutation: bool = False,
+        review_required: bool | None = None,
     ) -> None:
-        super().record_tool(name, arguments, result, duration_ms, turn, mutation=mutation)
+        super().record_tool(
+            name,
+            arguments,
+            result,
+            duration_ms,
+            turn,
+            mutation=mutation,
+            review_required=review_required,
+        )
         if not self.current or not self.current.traces:
             return
 
