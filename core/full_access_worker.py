@@ -33,7 +33,10 @@ _STOPPED = threading.Event()
 
 def _write(payload: dict[str, Any]) -> None:
     with _OUTPUT_LOCK:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        # Keep the wire protocol ASCII-safe even if a host launches Python with a
+        # legacy Windows pipe encoding such as cp1252. JSON decoding restores the
+        # original Unicode text on the receiver.
+        sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
         sys.stdout.flush()
 
 
