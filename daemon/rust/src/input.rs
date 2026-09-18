@@ -91,8 +91,8 @@ fn validate_keyboard_frame(frame: &Frame, emergency: &EmergencyLatch) -> Result<
 }
 
 fn validate_binding(binding: &ForegroundBinding) -> Result<()> {
-    if binding.process_id == 0
-        || binding.title.trim().is_empty()
+    if binding.hwnd == 0
+        || binding.process_id == 0
         || binding.title.len() > 512
         || binding.title.contains('\0')
     {
@@ -261,11 +261,16 @@ mod windows_foreground {
         }
         let mut buffer = [0u16; 513];
         let length = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
-        if length <= 0 {
-            return Ok(None);
-        }
-        let title = String::from_utf16_lossy(&buffer[..length as usize]);
-        let binding = ForegroundBinding { process_id, title };
+        let title = if length > 0 {
+            String::from_utf16_lossy(&buffer[..length as usize])
+        } else {
+            String::new()
+        };
+        let binding = ForegroundBinding {
+            hwnd: hwnd as u64,
+            process_id,
+            title,
+        };
         validate_binding(&binding)?;
         Ok(Some(binding))
     }
@@ -286,10 +291,44 @@ fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
     validate_binding(expected)?;
     let actual =
         current_foreground_binding()?.ok_or(Error::Denied("foreground window unavailable"))?;
-    if actual.process_id != expected.process_id || actual.title != expected.title {
+    if actual.hwnd != expected.hwnd || actual.process_id != expected.process_id {
         return Err(Error::Denied("foreground window changed"));
     }
     Ok(())
+}
+
+#[cfg(all(feature = "native", target_os = "windows"))]
+mod windows_pointer {
+    use super::*;
+
+    #[repr(C)]
+    struct Point {
+        x: i32,
+        y: i32,
+    }
+
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetPhysicalCursorPos(x: i32, y: i32) -> i32;
+        fn GetPhysicalCursorPos(point: *mut Point) -> i32;
+    }
+
+    pub fn move_to(x: i32, y: i32) -> Result<()> {
+        if unsafe { SetPhysicalCursorPos(x, y) } == 0 {
+            return Err(Error::Operation("physical pointer movement failed".into()));
+        }
+        let mut point = Point { x: 0, y: 0 };
+        if unsafe { GetPhysicalCursorPos(&mut point) } == 0 {
+            return Err(Error::Operation("physical pointer verification failed".into()));
+        }
+        if point.x != x || point.y != y {
+            return Err(Error::Operation(format!(
+                "physical pointer reached ({}, {}) instead of ({}, {})",
+                point.x, point.y, x, y
+            )));
+        }
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "native", target_os = "windows"))]
@@ -351,7 +390,8 @@ fn native_key(value: &str) -> Result<enigo::Key> {
 }
 
 /// Native input is exposed only on Windows and only after the caller binds the action
-/// to the exact foreground process/title observed immediately before execution.
+/// to the exact foreground HWND/process observed immediately before execution. Window
+/// titles are diagnostic only because legitimate applications change titles frequently.
 #[cfg(feature = "native")]
 pub struct NativeInput;
 
@@ -378,7 +418,7 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Coordinate, Direction, Enigo, Mouse, Settings};
+        use enigo::{Direction, Enigo, Mouse, Settings};
 
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
@@ -394,9 +434,7 @@ impl InputController for NativeInput {
             .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .move_mouse(x, y, Coordinate::Abs)
-            .map_err(|_| Error::Operation("pointer movement failed".into()))?;
+        windows_pointer::move_to(x, y)?;
         for index in 0..clicks {
             emergency.check()?;
             verify_foreground(foreground)?;
@@ -418,8 +456,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Coordinate, Enigo, Mouse, Settings};
-
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -427,13 +463,9 @@ impl InputController for NativeInput {
             ));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .move_mouse(x, y, Coordinate::Abs)
-            .map_err(|_| Error::Operation("pointer movement failed".into()))
+        windows_pointer::move_to(x, y)
     }
 
     fn drag(
@@ -448,7 +480,7 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Coordinate, Direction, Enigo, Mouse, Settings};
+        use enigo::{Direction, Enigo, Mouse, Settings};
 
         validate_frame(frame, start_x, start_y, emergency)?;
         validate_frame(frame, end_x, end_y, emergency)?;
@@ -463,9 +495,7 @@ impl InputController for NativeInput {
         verify_foreground(foreground)?;
         let mut input = Enigo::new(&Settings::default())
             .map_err(|_| Error::Operation("input connection failed".into()))?;
-        input
-            .move_mouse(start_x, start_y, Coordinate::Abs)
-            .map_err(|_| Error::Operation("drag start movement failed".into()))?;
+        windows_pointer::move_to(start_x, start_y)?;
         emergency.check()?;
         verify_foreground(foreground)?;
         input
@@ -485,11 +515,8 @@ impl InputController for NativeInput {
             let progress = step as f64 / steps as f64;
             let x = start_x as f64 + (end_x - start_x) as f64 * progress;
             let y = start_y as f64 + (end_y - start_y) as f64 * progress;
-            if input
-                .move_mouse(x.round() as i32, y.round() as i32, Coordinate::Abs)
-                .is_err()
-            {
-                movement_result = Err(Error::Operation("drag movement failed".into()));
+            if let Err(error) = windows_pointer::move_to(x.round() as i32, y.round() as i32) {
+                movement_result = Err(error);
                 break;
             }
             if step < steps && duration_ms > 0 {
