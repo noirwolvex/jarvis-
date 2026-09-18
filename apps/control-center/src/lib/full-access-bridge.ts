@@ -21,6 +21,30 @@ export type FullAccessMissionResult = {
   mission_completed: boolean;
   high_risk_requires_separate_approval: boolean;
   execution_metrics?: Record<string, number>;
+  task_graph?: Array<{
+    id: string;
+    action: string;
+    description: string;
+    dependencies: string[];
+    status: string;
+    execution_backend?: string;
+    resolution_backend?: string;
+    result?: string;
+  }>;
+  engine_visibility?: Array<{
+    tool: string;
+    success: boolean;
+    duration_ms: number;
+    execution_backend?: string;
+    resolution_backend?: string;
+  }>;
+  recovery_history?: Array<{
+    step_id: string;
+    failure: string;
+    recovery_action: string;
+    selected_backend?: string;
+    outcome?: string;
+  }>;
 };
 
 type WorkerEnvelope = {
@@ -87,6 +111,21 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
     throw new Error("Full Access completion lacks verified evidence");
   }
   if (parsed.requires_user_action && parsed.status !== "waiting_user") throw new Error("Invalid user-action checkpoint status");
+  if (parsed.task_graph !== undefined) {
+    if (!Array.isArray(parsed.task_graph) || parsed.task_graph.length > 100 || !parsed.task_graph.every(item => {
+      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+      const row = item as Record<string, unknown>;
+      return typeof row.id === "string" && typeof row.action === "string" && typeof row.description === "string"
+        && typeof row.status === "string" && Array.isArray(row.dependencies)
+        && row.dependencies.every(dep => typeof dep === "string");
+    })) throw new Error("Invalid autonomous task graph");
+  }
+  if (parsed.engine_visibility !== undefined && (!Array.isArray(parsed.engine_visibility) || parsed.engine_visibility.length > 50)) {
+    throw new Error("Invalid engine visibility");
+  }
+  if (parsed.recovery_history !== undefined && (!Array.isArray(parsed.recovery_history) || parsed.recovery_history.length > 100)) {
+    throw new Error("Invalid recovery history");
+  }
   if (parsed.execution_metrics !== undefined) {
     const metrics = parsed.execution_metrics;
     if (!metrics || typeof metrics !== "object" || Array.isArray(metrics)
