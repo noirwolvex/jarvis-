@@ -42,6 +42,14 @@ pub struct ForegroundBinding {
     pub title: String,
 }
 
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum MouseButton {
+    Left,
+    Right,
+    Middle,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum Action {
@@ -54,6 +62,51 @@ pub enum Action {
         frame_id: Uuid,
         x: i32,
         y: i32,
+        foreground: ForegroundBinding,
+    },
+    ClickButton {
+        display_id: u32,
+        frame_id: Uuid,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        clicks: u8,
+        foreground: ForegroundBinding,
+    },
+    PointerMove {
+        display_id: u32,
+        frame_id: Uuid,
+        x: i32,
+        y: i32,
+        foreground: ForegroundBinding,
+    },
+    Drag {
+        display_id: u32,
+        frame_id: Uuid,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        button: MouseButton,
+        foreground: ForegroundBinding,
+    },
+    Scroll {
+        display_id: u32,
+        frame_id: Uuid,
+        clicks: i32,
+        foreground: ForegroundBinding,
+    },
+    PressKey {
+        display_id: u32,
+        frame_id: Uuid,
+        key: String,
+        foreground: ForegroundBinding,
+    },
+    Hotkey {
+        display_id: u32,
+        frame_id: Uuid,
+        keys: Vec<String>,
         foreground: ForegroundBinding,
     },
     TypeText {
