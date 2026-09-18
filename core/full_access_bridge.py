@@ -123,6 +123,10 @@ def run_agent_mission(
                 or permissions.access_mode != "full"
                 or "screen_observe" in permissions.deny_tools,
                 observation_emit,
+                busy=lambda: bool(
+                    getattr(agent, "_device_action_active", None)
+                    and agent._device_action_active.is_set()
+                ),
             )
             agent.live_monitor = monitor
             monitor.start()
