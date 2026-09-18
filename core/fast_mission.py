@@ -481,8 +481,6 @@ def execute_fast_mission(
         emit and emit(AgentEvent("tool", f"Fast step: {step.description}", step.tool))
         started = time.perf_counter()
         mutation = agent._is_mutation(step.tool)
-        if mutation:
-            agent.orchestrator.start_action(step.tool, dict(step.arguments))
         approved = agent.approval(step.tool, step.arguments)
         result = agent._execute_tool(step.tool, dict(step.arguments), approved=approved)
         duration_ms = (time.perf_counter() - started) * 1000.0
