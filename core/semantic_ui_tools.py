@@ -530,6 +530,10 @@ def _rust_hotkey_or_python(keys: list[str]) -> str:
     client, status = _preflight()
     if client is None:
         if native_engine_mode() == "auto":
+            if len(keys) == 1:
+                from .tools import _desktop_press
+                _desktop_press(keys[0])
+                return "python_key_press"
             from .tools import _desktop_hotkey
             _desktop_hotkey(keys)
             return "python_hotkey"
@@ -541,6 +545,10 @@ def _rust_hotkey_or_python(keys: list[str]) -> str:
     except RustEngineUnavailable:
         if native_engine_mode() != "auto":
             raise
+        if len(keys) == 1:
+            from .tools import _desktop_press
+            _desktop_press(keys[0])
+            return "python_key_press"
         from .tools import _desktop_hotkey
         _desktop_hotkey(keys)
         return "python_hotkey"
