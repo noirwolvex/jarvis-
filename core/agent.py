@@ -303,7 +303,7 @@ class JarvisAgent:
             return response
 
     def pop_provider_failover_notice(self) -> str:
-        notice = self._provider_failover_notice
+        notice = getattr(self, "_provider_failover_notice", "")
         self._provider_failover_notice = ""
         return notice
 
