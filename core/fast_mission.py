@@ -226,6 +226,8 @@ def _compile_explicit_sequence(text: str) -> list[FastStep] | None:
 
         app_match = _MIXED_APP_ONLY.fullmatch(clause)
         if app_match:
+            if _EXTRA_ACTION.search(clause):
+                return None
             app = app_match.group("app").strip()
             # Browser launches are routed through guarded CDP operations. Bare browser
             # clauses need model/browser routing unless they include a deterministic search.
