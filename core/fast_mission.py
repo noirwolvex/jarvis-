@@ -42,6 +42,39 @@ _EXTRA_ACTION = re.compile(
     r"(?:open|navigate|go|send|write|type|play|pause|select|switch|join|save|delete|search|click|press|close|read|find|download|upload)\b",
     re.IGNORECASE,
 )
+_EXPLICIT_SEQUENCE = re.compile(
+    r"\s*(?:;|(?:,\s*)?(?:and\s+then|then))\s*",
+    re.IGNORECASE,
+)
+_MIXED_GOOGLE_SEARCH = re.compile(
+    r"^(?:(?:open|use)\s+(?:(?:a|another)\s+)?(?:(?:new)\s+)?(?:(?:browser)\s+)?(?:(?:tab)\s+)?"
+    r"(?:(?:in|on|with)\s+)?(?:google|chrome|google\s+chrome)(?:\s+(?:app|application))?\s+(?:and\s+)?)?"
+    r"(?:google\s+)?search(?:\s+for)?\s+(?P<query>.+)$",
+    re.IGNORECASE,
+)
+_MIXED_APP_CHAT = re.compile(
+    r"^open\s+(?:the\s+)?(?:whatsapp)(?:\s+(?:app|application))?\s+and\s+"
+    r"(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
+    r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
+    r"\s+(?:chat|conversation)$",
+    re.IGNORECASE,
+)
+_MIXED_CHAT_ONLY = re.compile(
+    r"^(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
+    r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
+    r"\s+(?:chat|conversation)$",
+    re.IGNORECASE,
+)
+_MIXED_APP_ONLY = re.compile(
+    r"^open\s+(?:the\s+)?(?P<app>[A-Za-z0-9][A-Za-z0-9 .+_-]{0,79}?)(?:\s+(?:app|application))?$",
+    re.IGNORECASE,
+)
+_MIXED_ORDINALS = {
+    "first": 1, "second": 2, "third": 3, "fourth": 4, "fifth": 5,
+    "sixth": 6, "seventh": 7, "eighth": 8, "ninth": 9, "tenth": 10,
+}
+
+
 _APP_ALIASES = {
     "المفكرة": "Notepad",
     "نوت باد": "Notepad",
@@ -103,6 +136,117 @@ def _simple_semantic_steps(text: str) -> list[FastStep] | None:
             return None
         steps.append(FastStep(f"fast-{index}", clause, tool, arguments))
     return steps
+
+
+def _mixed_ordinal(value: str) -> int:
+    normalized = str(value).strip().casefold()
+    if normalized in _MIXED_ORDINALS:
+        return _MIXED_ORDINALS[normalized]
+    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)", normalized)
+    if not match:
+        raise ValueError("Unsupported chat ordinal")
+    position = int(match.group(1))
+    if not 1 <= position <= 20:
+        raise ValueError("Chat ordinal must be between 1 and 20")
+    return position
+
+
+def _compile_explicit_sequence(text: str) -> list[FastStep] | None:
+    """Compile explicit English then-chains without model calls.
+
+    This grammar is deliberately narrow: app launches, WhatsApp ordinal selection and
+    Google search. Any unknown or side-effectful clause falls back to the intelligent
+    planner intact rather than being guessed.
+    """
+    if not re.search(r"\b(?:and\s+then|then)\b|;", text, re.IGNORECASE):
+        return None
+    clauses = [part.strip(" ,.;") for part in _EXPLICIT_SEQUENCE.split(text) if part.strip(" ,.;")]
+    if not 2 <= len(clauses) <= 32:
+        return None
+
+    steps: list[FastStep] = []
+    last_app = ""
+    for clause in clauses:
+        google = _MIXED_GOOGLE_SEARCH.fullmatch(clause)
+        if google:
+            query = google.group("query").strip(" ,.;")
+            if (
+                not query
+                or len(query) > 500
+                or "\0" in query
+                or _EXTRA_ACTION.search(query)
+            ):
+                return None
+            new_tab = bool(_NEW_TAB_SIGNAL.search(clause))
+            steps.append(FastStep(
+                id=f"fast-{len(steps) + 1}",
+                description=f"Search Google for {query}",
+                tool="google_search",
+                arguments={"query": query, "new_tab": new_tab},
+            ))
+            last_app = "browser"
+            continue
+
+        app_chat = _MIXED_APP_CHAT.fullmatch(clause)
+        if app_chat:
+            steps.append(FastStep(
+                id=f"fast-{len(steps) + 1}",
+                description="Open and verify WhatsApp",
+                tool="launch_installed_app",
+                arguments={"query": "WhatsApp", "timeout_seconds": 12},
+            ))
+            try:
+                position = _mixed_ordinal(app_chat.group("ordinal"))
+            except ValueError:
+                return None
+            steps.append(FastStep(
+                id=f"fast-{len(steps) + 1}",
+                description=f"Select and verify WhatsApp chat position {position}",
+                tool="whatsapp_select_chat_native",
+                arguments={"position": position},
+            ))
+            last_app = "whatsapp"
+            continue
+
+        chat = _MIXED_CHAT_ONLY.fullmatch(clause)
+        if chat:
+            if last_app != "whatsapp":
+                return None
+            try:
+                position = _mixed_ordinal(chat.group("ordinal"))
+            except ValueError:
+                return None
+            steps.append(FastStep(
+                id=f"fast-{len(steps) + 1}",
+                description=f"Select and verify WhatsApp chat position {position}",
+                tool="whatsapp_select_chat_native",
+                arguments={"position": position},
+            ))
+            continue
+
+        app_match = _MIXED_APP_ONLY.fullmatch(clause)
+        if app_match:
+            app = app_match.group("app").strip()
+            # Browser launches are routed through guarded CDP operations. Bare browser
+            # clauses need model/browser routing unless they include a deterministic search.
+            if app.replace(" ", "").casefold() in {"google", "chrome", "googlechrome"}:
+                return None
+            try:
+                app = _clean_app_name(app)
+            except ValueError:
+                return None
+            steps.append(FastStep(
+                id=f"fast-{len(steps) + 1}",
+                description=f"Open and verify {app}",
+                tool="launch_installed_app",
+                arguments={"query": app, "timeout_seconds": 12},
+            ))
+            last_app = app.replace(" ", "").casefold()
+            continue
+
+        return None
+
+    return steps if steps and len(steps) <= 32 else None
 
 
 def _enabled() -> bool:
@@ -215,6 +359,10 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
         return None
     if "\0" in text:
         return None
+
+    mixed = _compile_explicit_sequence(text)
+    if mixed:
+        return mixed
 
     try:
         base_text, trailing_type = _split_trailing_type(text)
