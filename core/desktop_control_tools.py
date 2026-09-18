@@ -110,7 +110,7 @@ def desktop_drag(
     point = pyautogui.position()
     if int(point.x) != int(end_x) or int(point.y) != int(end_y):
         raise RuntimeError(f"Pointer did not reach drag destination; current=({point.x},{point.y})")
-    return f"VERIFIED: dragged {chosen} from ({int(start_x)}, {int(start_y)}) to ({int(end_x)}, {int(end_y)})"
+    return f"DELIVERED: dragged {chosen} from ({int(start_x)}, {int(start_y)}) to ({int(end_x)}, {int(end_y)}); pointer destination verified, application outcome requires fresh observation"
 
 
 def desktop_mouse_down(button: str = "left") -> str:
