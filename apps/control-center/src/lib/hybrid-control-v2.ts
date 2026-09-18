@@ -183,6 +183,33 @@ async function runFullMission(task: TaskView) {
     if (abort.signal.aborted) throw new Error("Full Access mission stopped");
     execute.status = "VERIFIED";
 
+    if (result.task_graph?.length) {
+      const idMap = new Map(result.task_graph.map(node => [node.id, `${task.id}:agent:${node.id}`]));
+      task.nodes = result.task_graph.map(node => ({
+        id: idMap.get(node.id)!,
+        title: node.description || node.action,
+        action: [node.execution_backend, node.resolution_backend, node.action].filter(Boolean).join(" · "),
+        dependencies: node.dependencies.map(dep => idMap.get(dep) ?? `${task.id}:agent:${dep}`),
+        status: node.status,
+      }));
+      value.version += 1;
+      addEvent("TASK_GRAPH_SYNCED", task.id, `Loaded ${task.nodes.length} agent execution nodes`);
+    }
+    for (const route of result.engine_visibility ?? []) {
+      addEvent(
+        "ENGINE_ROUTE",
+        task.id,
+        `${route.tool}: ${route.execution_backend || "UNKNOWN"}${route.resolution_backend ? ` via ${route.resolution_backend}` : ""} · ${Math.round(route.duration_ms)} ms`,
+      );
+    }
+    for (const recovery of result.recovery_history ?? []) {
+      addEvent(
+        "RECOVERY",
+        task.id,
+        `${recovery.step_id || "step"}: ${recovery.selected_backend || "inspect"} · ${recovery.outcome || "pending"}`,
+      );
+    }
+
     if (result.requires_user_action || result.status === "waiting_user") {
       verify.status = "WAITING_USER";
       task.status = "WAITING_USER";
