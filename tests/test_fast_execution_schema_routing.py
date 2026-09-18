@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from core.discord_tools import register_discord_tools
+from core.browser_fast_tools import register_browser_fast_tools
 from core.fast_execution_agent import FastExecutionFullAccessAgent
 from core.semantic_ui_tools import register_semantic_ui_tools
 from core.tools import ToolRegistry
@@ -15,6 +16,7 @@ class FastExecutionSchemaRoutingTests(unittest.TestCase):
         agent = FastExecutionFullAccessAgent.__new__(FastExecutionFullAccessAgent)
         agent.tools = ToolRegistry()
         register_semantic_ui_tools(agent.tools)
+        register_browser_fast_tools(agent.tools)
         register_discord_tools(agent.tools)
         register_youtube_fast_tools(agent.tools)
         register_whatsapp_native_tools(agent.tools)
