@@ -325,10 +325,15 @@ class RustDaemonClient:
         foreground = status.get("foreground")
         if not isinstance(foreground, dict):
             raise RustEngineUnavailable("Rust daemon did not report a foreground window")
+        hwnd = foreground.get("hwnd")
         process_id, title = foreground.get("process_id"), foreground.get("title")
-        if not isinstance(process_id, int) or process_id < 1 or not isinstance(title, str) or not title.strip():
+        if (
+            not isinstance(hwnd, int) or hwnd < 1
+            or not isinstance(process_id, int) or process_id < 1
+            or not isinstance(title, str) or len(title) > 512 or "\0" in title
+        ):
             raise RustEngineUnavailable("Rust daemon returned an invalid foreground binding")
-        return {"process_id": process_id, "title": title}
+        return {"hwnd": hwnd, "process_id": process_id, "title": title}
 
     def _input_context_for_display(
         self,
