@@ -9,6 +9,22 @@ use jarvis_execution_daemon::{
 use serde::Deserialize;
 use std::{net::SocketAddr, path::PathBuf};
 
+#[cfg(target_os = "windows")]
+fn enable_per_monitor_dpi_awareness() {
+    #[link(name = "user32")]
+    unsafe extern "system" {
+        fn SetProcessDpiAwarenessContext(value: isize) -> i32;
+    }
+
+    // DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 == ((HANDLE)-4).
+    // This runs before xcap/monitor enumeration so all daemon display geometry and
+    // physical cursor coordinates share one Windows virtual-desktop coordinate space.
+    let _ = unsafe { SetProcessDpiAwarenessContext(-4isize) };
+}
+
+#[cfg(not(target_os = "windows"))]
+fn enable_per_monitor_dpi_awareness() {}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Config {
@@ -35,6 +51,7 @@ fn default_true() -> bool {
 
 #[tokio::main(worker_threads = 4)]
 async fn main() -> Result<()> {
+    enable_per_monitor_dpi_awareness();
     let mut args = std::env::args_os().skip(1);
     let path = args
         .next()

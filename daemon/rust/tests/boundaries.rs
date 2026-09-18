@@ -31,6 +31,7 @@ fn grant(now: u64) -> Capability {
 }
 fn foreground() -> ForegroundBinding {
     ForegroundBinding {
+        hwnd: 1001,
         process_id: 42,
         title: "Test window".into(),
     }
@@ -158,8 +159,11 @@ fn input_capability_authorizes_click_and_keyboard_but_not_capture() {
 #[test]
 fn capability_max_ttl_and_duplicate_identifiers_are_rejected() {
     let now = now_ms();
+    let mut allowed = grant(now);
+    allowed.expires_at_ms = now + 24 * 60 * 60 * 1000;
+    assert!(Policy::new(true, vec![allowed], now).is_ok());
     let mut cap = grant(now);
-    cap.expires_at_ms = now + 1_800_001;
+    cap.expires_at_ms = now + 24 * 60 * 60 * 1000 + 1;
     assert!(Policy::new(true, vec![cap], now).is_err());
     assert!(Policy::new(true, vec![grant(now), grant(now)], now).is_err());
 }

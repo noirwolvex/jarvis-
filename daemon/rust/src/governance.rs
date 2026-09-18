@@ -14,9 +14,11 @@ use std::{
 use tokio_util::sync::CancellationToken;
 
 pub const MAX_REQUEST_TTL_MS: u64 = 30_000;
-// Full Access dashboard missions are bounded to 30 minutes. Capability grants may
-// cover that same window, while every individual request still carries a short TTL.
-pub const MAX_CAPABILITY_TTL_MS: u64 = 30 * 60 * 1000;
+// Runtime-native capabilities may span a normal workstation session while every
+// individual IPC request remains short-lived and re-authorized. The launcher kills
+// the loopback daemon when the JARVIS runtime exits, so a long-running dashboard does
+// not silently lose mouse/keyboard authority after thirty minutes.
+pub const MAX_CAPABILITY_TTL_MS: u64 = 24 * 60 * 60 * 1000;
 
 #[derive(Clone, Default)]
 pub struct EmergencyLatch {

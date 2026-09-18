@@ -82,6 +82,28 @@ class RustEngineTests(unittest.TestCase):
         with self.assertRaises(RustEngineUnavailable):
             RustDaemonClient._display_for_point(status, 5000, 100)
 
+
+    def test_foreground_binding_is_hwnd_stable_and_allows_empty_title(self) -> None:
+        config = RustEngineConfig(
+            host="127.0.0.1",
+            port=7443,
+            server_name="localhost",
+            ca_path=Path("ca.pem"),
+            client_cert_path=Path("client.pem"),
+            client_key_path=Path("client-key.pem"),
+            observe_capabilities={},
+            input_capabilities={},
+        )
+        client = RustDaemonClient(config)
+        self.assertEqual(
+            client._foreground({"foreground": {"hwnd": 1001, "process_id": 42, "title": ""}}),
+            {"hwnd": 1001, "process_id": 42, "title": ""},
+        )
+        with self.assertRaises(RustEngineUnavailable):
+            client._foreground({"foreground": {"process_id": 42, "title": "Fixture"}})
+        with self.assertRaises(RustEngineUnavailable):
+            client._foreground({"foreground": {"hwnd": 0, "process_id": 42, "title": "Fixture"}})
+
     def test_expanded_client_actions_bind_fresh_frame_and_input_capability(self) -> None:
         config = RustEngineConfig(
             host="127.0.0.1",
@@ -96,9 +118,9 @@ class RustEngineTests(unittest.TestCase):
         client = RustDaemonClient(config)
         status = {
             "displays": [{"id": 0, "x": 0, "y": 0, "width": 1920, "height": 1080}],
-            "foreground": {"process_id": 42, "title": "Fixture"},
+            "foreground": {"hwnd": 1001, "process_id": 42, "title": "Fixture"},
         }
-        foreground = {"process_id": 42, "title": "Fixture"}
+        foreground = {"hwnd": 1001, "process_id": 42, "title": "Fixture"}
         frame = {"id": "frame-1"}
         with patch.object(client, "_input_context_for_display", return_value=(foreground, frame)), \
              patch.object(client, "_request", return_value={"executed": True}) as request:
