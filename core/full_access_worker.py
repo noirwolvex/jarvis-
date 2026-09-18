@@ -10,6 +10,22 @@ from typing import Any
 from .full_access_bridge import build_full_access_agent, run_agent_mission
 
 PROTOCOL = 1
+
+def _configure_utf8_stdio() -> None:
+    """Force the JSON-lines worker protocol to UTF-8 on Windows and all pipe hosts."""
+    for stream_name, errors in (("stdin", "strict"), ("stdout", "strict"), ("stderr", "backslashreplace")):
+        stream = getattr(sys, stream_name, None)
+        reconfigure = getattr(stream, "reconfigure", None)
+        if callable(reconfigure):
+            try:
+                reconfigure(encoding="utf-8", errors=errors, newline="\n")
+            except (TypeError, ValueError, OSError):
+                try:
+                    reconfigure(encoding="utf-8", errors=errors)
+                except (TypeError, ValueError, OSError):
+                    pass
+
+
 _AGENT = None
 _OUTPUT_LOCK = threading.Lock()
 _STOPPED = threading.Event()
@@ -17,7 +33,10 @@ _STOPPED = threading.Event()
 
 def _write(payload: dict[str, Any]) -> None:
     with _OUTPUT_LOCK:
-        sys.stdout.write(json.dumps(payload, ensure_ascii=False) + "\n")
+        # Keep the wire protocol ASCII-safe even if a host launches Python with a
+        # legacy Windows pipe encoding such as cp1252. JSON decoding restores the
+        # original Unicode text on the receiver.
+        sys.stdout.write(json.dumps(payload, ensure_ascii=True) + "\n")
         sys.stdout.flush()
 
 
@@ -177,6 +196,7 @@ def _handle(raw: str) -> dict[str, Any]:
 
 
 def main() -> int:
+    _configure_utf8_stdio()
     active: threading.Thread | None = None
 
     def stop() -> None:

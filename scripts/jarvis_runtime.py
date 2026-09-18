@@ -243,6 +243,8 @@ def _runtime_env(session_dir: Path, observe: dict[str, str], input_caps: dict[st
             "JARVIS_DAEMON_INPUT_CAPABILITY": "",
             "JARVIS_DAEMON_OBSERVE_CAPABILITIES_JSON": json.dumps(observe, separators=(",", ":")),
             "JARVIS_DAEMON_INPUT_CAPABILITIES_JSON": json.dumps(input_caps, separators=(",", ":")),
+            "PYTHONUTF8": "1",
+            "PYTHONIOENCODING": "utf-8",
         }
     )
     return env
