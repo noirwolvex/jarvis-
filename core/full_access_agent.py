@@ -289,12 +289,14 @@ Full Access execution profile:
                 self._refresh_live_vision()
                 emit and emit(AgentEvent("status", f"Thinking… (turn {turn + 1})"))
                 self.orchestrator.current.metrics["model_calls"] = self.orchestrator.current.metrics.get("model_calls", 0) + 1
-                response = self.client.chat.completions.create(
-                    model=self.model,
+                response = self._chat_completion(
                     messages=[{"role": "system", "content": self._system_prompt(user_text)}, *self.messages],
                     tools=turn_tool_schemas,
                     tool_choice="auto",
                 )
+                failover_notice = self.pop_provider_failover_notice()
+                if failover_notice:
+                    emit and emit(AgentEvent("status", failover_notice))
                 if self._is_stopped():
                     self.orchestrator.finish("cancelled", "Emergency stop is active")
                     return "CANCELLED: Emergency stop is active"

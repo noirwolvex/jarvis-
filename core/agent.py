@@ -172,6 +172,28 @@ class JarvisAgent:
         self.model = os.getenv("AI_MODEL", "claude-sonnet-4-5")
         self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "40"))
         self.client = OpenAI(api_key=api_key, base_url=self.base_url)
+        self._fallback_client = None
+        self._fallback_provider = ""
+        self._fallback_base_url = ""
+        self._fallback_model = ""
+        self._provider_failover_notice = ""
+
+        fallback_key = os.getenv("AI_FALLBACK_API_KEY", "").strip()
+        fallback_base_url = os.getenv("AI_FALLBACK_BASE_URL", "").strip().rstrip("/")
+        fallback_model = os.getenv("AI_FALLBACK_MODEL", "").strip()
+        fallback_provider = os.getenv("AI_FALLBACK_PROVIDER", "fallback").strip() or "fallback"
+        fallback_values = (fallback_key, fallback_base_url, fallback_model)
+        if any(fallback_values) and not all(fallback_values):
+            raise RuntimeError(
+                "Fallback AI configuration is incomplete. Set AI_FALLBACK_API_KEY, "
+                "AI_FALLBACK_BASE_URL, and AI_FALLBACK_MODEL together."
+            )
+        if all(fallback_values):
+            self._fallback_client = OpenAI(api_key=fallback_key, base_url=fallback_base_url)
+            self._fallback_provider = fallback_provider
+            self._fallback_base_url = fallback_base_url
+            self._fallback_model = fallback_model
+
         self.tools = tools or ToolRegistry()
         if tools is None:
             from .dev_tools import register_dev_tools
@@ -210,6 +232,80 @@ class JarvisAgent:
     def _execute_tool(self, name: str, arguments: dict[str, Any], approved: bool = False) -> str:
         future = self._tool_executor.submit(self.tools.execute, name, arguments, approved)
         return future.result()
+
+    @staticmethod
+    def _is_provider_access_denied(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 403:
+            return True
+        text = str(exc).casefold()
+        return (
+            "permission_denied" in text
+            or "permission denied" in text
+            or "project has been denied access" in text
+        )
+
+    @staticmethod
+    def _provider_error_summary(exc: Exception) -> str:
+        text = " ".join(str(exc).split())
+        return text[:1200]
+
+    def _chat_completion(self, **kwargs: Any):
+        kwargs = dict(kwargs)
+        kwargs["model"] = self.model
+        try:
+            return self.client.chat.completions.create(**kwargs)
+        except Exception as exc:
+            if not self._is_provider_access_denied(exc):
+                raise
+
+            primary = (
+                f"provider={self.provider} base_url={self.base_url} model={self.model}"
+            )
+            if self._fallback_client is None:
+                raise RuntimeError(
+                    "AI_PROVIDER_ACCESS_DENIED: The configured AI provider rejected this project "
+                    f"with HTTP 403 ({primary}). JARVIS did not start desktop execution. "
+                    "Restore provider/project access or configure AI_FALLBACK_PROVIDER, "
+                    "AI_FALLBACK_BASE_URL, AI_FALLBACK_MODEL, and AI_FALLBACK_API_KEY. "
+                    f"Upstream response: {self._provider_error_summary(exc)}"
+                ) from exc
+
+            fallback_client = self._fallback_client
+            fallback_provider = self._fallback_provider
+            fallback_base_url = self._fallback_base_url
+            fallback_model = self._fallback_model
+            fallback_kwargs = dict(kwargs)
+            fallback_kwargs["model"] = fallback_model
+            try:
+                response = fallback_client.chat.completions.create(**fallback_kwargs)
+            except Exception as fallback_exc:
+                if self._is_provider_access_denied(fallback_exc):
+                    raise RuntimeError(
+                        "AI_PROVIDER_ACCESS_DENIED: Both primary and fallback AI providers "
+                        "rejected access. "
+                        f"Primary: {primary}. "
+                        f"Fallback: provider={fallback_provider} "
+                        f"base_url={fallback_base_url} model={fallback_model}. "
+                        f"Fallback response: {self._provider_error_summary(fallback_exc)}"
+                    ) from fallback_exc
+                raise
+
+            self.client = fallback_client
+            self.provider = fallback_provider
+            self.base_url = fallback_base_url
+            self.model = fallback_model
+            self._fallback_client = None
+            self._provider_failover_notice = (
+                "Primary AI provider returned HTTP 403; JARVIS switched to configured "
+                f"fallback provider={self.provider} model={self.model} and continued the same mission."
+            )
+            return response
+
+    def pop_provider_failover_notice(self) -> str:
+        notice = getattr(self, "_provider_failover_notice", "")
+        self._provider_failover_notice = ""
+        return notice
 
     def provider_info(self) -> str:
         key = os.getenv("TABITOKEN_API_KEY") or os.getenv("AI_API_KEY") or os.getenv("ANTHROPIC_API_KEY") or os.getenv("OPENAI_API_KEY") or ""
@@ -260,12 +356,14 @@ class JarvisAgent:
             for turn in range(self.max_turns):
                 self.orchestrator.start_turn(turn + 1)
                 emit and emit(AgentEvent("status", f"Thinking… (turn {turn + 1})"))
-                response = self.client.chat.completions.create(
-                    model=self.model,
+                response = self._chat_completion(
                     messages=[{"role": "system", "content": self._system_prompt(user_text)}, *self.messages],
                     tools=_tool_schemas(self.tools),
                     tool_choice="auto",
                 )
+                failover_notice = self.pop_provider_failover_notice()
+                if failover_notice:
+                    emit and emit(AgentEvent("status", failover_notice))
                 message = response.choices[0].message
                 self.messages.append(message.model_dump(exclude_none=True))
                 tool_calls = getattr(message, "tool_calls", None) or []
