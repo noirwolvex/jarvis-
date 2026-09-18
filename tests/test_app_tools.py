@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from types import SimpleNamespace
@@ -108,7 +109,7 @@ class AppToolsTests(unittest.TestCase):
         }
         process = {"pid": 42, "name": "WhatsApp.exe", "exe": r"C:\\WhatsApp.exe"}
         window = {"hwnd": 77, "title": "WhatsApp", "pid": 42}
-        with patch("core.app_tools.os", SimpleNamespace(name="nt")), \
+        with patch("core.app_tools.os", SimpleNamespace(name="nt", path=os.path)), \
              patch("core.app_tools._resolve", return_value=app), \
              patch("core.app_tools._launch_candidate", return_value=123), \
              patch("core.app_tools._visible_windows", side_effect=[[], [], [window]]), \
@@ -134,7 +135,7 @@ class AppToolsTests(unittest.TestCase):
             "score": 100.0,
         }
         process = {"pid": 43, "name": "Background.exe", "exe": r"C:\\Background.exe"}
-        with patch("core.app_tools.os", SimpleNamespace(name="nt")), \
+        with patch("core.app_tools.os", SimpleNamespace(name="nt", path=os.path)), \
              patch("core.app_tools._resolve", return_value=app), \
              patch("core.app_tools._launch_candidate", return_value=124), \
              patch("core.app_tools._visible_windows", side_effect=[[], []]), \
