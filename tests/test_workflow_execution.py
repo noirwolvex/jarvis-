@@ -178,6 +178,56 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertEqual(self.agent.orchestrator.current.metrics["model_calls"], 2)
         self.assertEqual(self.agent.orchestrator.current.status, "completed")
 
+    def test_focused_native_input_burst_uses_one_post_burst_observation(self):
+        native_type = Mock(return_value="RUST_EXECUTED: typed")
+        native_press = Mock(return_value="RUST_EXECUTED: pressed")
+        observe = Mock(return_value='VERIFIED: {"foreground_hwnd": 123, "scene_bound": false, "stable": true}')
+        self.register(
+            "desktop_type",
+            Risk.MEDIUM,
+            native_type,
+            {"type": "object", "properties": {"text": {"type": "string"}}, "required": ["text"]},
+        )
+        self.register(
+            "desktop_press",
+            Risk.MEDIUM,
+            native_press,
+            {"type": "object", "properties": {"key": {"type": "string"}}, "required": ["key"]},
+        )
+        self.register(
+            "screen_observe",
+            Risk.LOW,
+            observe,
+            {"type": "object", "properties": {}, "additionalProperties": False},
+        )
+        self.agent.client.chat.completions.create.side_effect = [
+            self.response([
+                ("desktop_type", {"text": "hello"}),
+                ("desktop_press", {"key": "enter"}),
+            ]),
+            self.response([
+                ("task_verify", {
+                    "claim": "focused keyboard burst applied",
+                    "verified": True,
+                    "evidence": "fresh post-burst screen observation",
+                }),
+            ]),
+            self.response(content="Done"),
+        ]
+        with patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            result = FullAccessJarvisAgent.run(self.agent, "type hello and press enter")
+
+        self.assertEqual(result, "Done")
+        native_type.assert_called_once_with(text="hello")
+        native_press.assert_called_once_with(key="enter")
+        observe.assert_called_once()
+        traces = [trace.name for trace in self.agent.orchestrator.current.traces]
+        self.assertEqual(traces.count("screen_observe"), 1)
+        self.assertEqual(self.agent.orchestrator.current.metrics["native_input_burst_actions"], 2)
+        self.assertEqual(self.agent.orchestrator.current.metrics["native_input_bursts"], 1)
+        self.assertEqual(self.agent.orchestrator.current.metrics["model_calls"], 3)
+        self.assertFalse(self.agent.orchestrator.needs_action_review())
+
     def test_failed_parallel_tool_response_defers_later_mutation(self):
         self.action.return_value = "ERROR: target moved"
         self.agent.max_turns = 1

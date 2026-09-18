@@ -29,10 +29,18 @@ class LiveDesktopMonitor:
     its images and never touches UIA/Playwright objects or the raw-input gate.
     """
 
-    def __init__(self, cancelled: Callable[[], bool], emit: Callable[[dict], None] | None = None,
-                 interval: float = 0.5, capture: Callable = _capture):
+    def __init__(
+        self,
+        cancelled: Callable[[], bool],
+        emit: Callable[[dict], None] | None = None,
+        interval: float | None = None,
+        capture: Callable = _capture,
+        busy: Callable[[], bool] | None = None,
+    ):
         self.cancelled, self.emit, self.capture = cancelled, emit, capture
-        self.interval = max(0.25, min(float(interval), 2.0))
+        configured = os.getenv("JARVIS_LIVE_PREVIEW_INTERVAL", "0.9") if interval is None else interval
+        self.interval = max(0.4, min(float(configured), 2.0))
+        self.busy = busy or (lambda: False)
         self._stop = threading.Event()
         self._lock = threading.Lock()
         self._latest: dict | None = None
@@ -59,11 +67,11 @@ class LiveDesktopMonitor:
 
     def poll(self) -> bool:
         from PIL import ImageChops
-        if self._stopped():
+        if self._stopped() or self.busy():
             return False
         started = time.monotonic()
         image, hwnd, origin = self.capture()
-        if self._stopped():
+        if self._stopped() or self.busy():
             return False
         self.captures += 1
         signature = image.resize((192, 108)).convert("RGB")
@@ -101,7 +109,7 @@ class LiveDesktopMonitor:
         self.changes += 1
         with self._lock:
             self._latest = {**observation, "seen_monotonic": time.monotonic()}
-        if self.emit and not self._stopped():
+        if self.emit and not self._stopped() and not self.busy():
             self.emit(observation)
         return True
 
@@ -128,6 +136,10 @@ class LiveDesktopMonitor:
     def _run(self):
         while not self._stopped():
             started = time.monotonic()
+            if self.busy():
+                if self._stop.wait(0.08):
+                    return
+                continue
             try:
                 self.poll()
             except Exception:

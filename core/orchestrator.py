@@ -66,6 +66,7 @@ class TaskRun:
     finished_at: float | None = None
     in_flight: dict[str, Any] | None = None
     last_mutation_index: int = -1
+    last_review_required_index: int = -1
     workflows: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, int] = field(default_factory=dict)
 
@@ -186,7 +187,16 @@ class TaskOrchestrator:
         if self.current:
             self.current.current_turn = turn
 
-    def record_tool(self, name: str, arguments: dict[str, Any], result: str, duration_ms: float, turn: int, mutation: bool = False) -> None:
+    def record_tool(
+        self,
+        name: str,
+        arguments: dict[str, Any],
+        result: str,
+        duration_ms: float,
+        turn: int,
+        mutation: bool = False,
+        review_required: bool | None = None,
+    ) -> None:
         if not self.current:
             return
         success = tool_succeeded(result)
@@ -201,8 +211,13 @@ class TaskOrchestrator:
             )
         )
         self.current.tools_used += 1
+        trace_index = len(self.current.traces) - 1
         if mutation:
-            self.current.last_mutation_index = len(self.current.traces) - 1
+            self.current.last_mutation_index = trace_index
+        if review_required is None:
+            review_required = mutation
+        if review_required:
+            self.current.last_review_required_index = trace_index
         if not success:
             self.current.failures += 1
         if not result.startswith("CANCELLED"):
@@ -249,11 +264,23 @@ class TaskOrchestrator:
         latest = {item.claim: item for item in self.current.verifications}
         return bool(latest) and all(item.verified for item in latest.values()) and not self.needs_action_review()
 
+    def require_action_review(self, trace_index: int | None = None) -> None:
+        """Require fresh evidence before the next mutation without inventing verification."""
+        if not self.current:
+            return
+        index = self.current.last_mutation_index if trace_index is None else int(trace_index)
+        if index >= 0:
+            self.current.last_review_required_index = max(
+                self.current.last_review_required_index,
+                index,
+            )
+            self._persist(self.current)
+
     def needs_action_review(self) -> bool:
-        if not self.current or self.current.last_mutation_index < 0:
+        if not self.current or self.current.last_review_required_index < 0:
             return False
         reviewed = max((item.evidence_trace_index for item in self.current.verifications), default=-1)
-        return reviewed < self.current.last_mutation_index
+        return reviewed < self.current.last_review_required_index
 
     def recovery_hint(self, result: str, tool_name: str) -> str:
         if not self.current or tool_succeeded(result):

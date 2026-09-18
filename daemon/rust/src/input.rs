@@ -298,19 +298,124 @@ fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
 }
 
 #[cfg(all(feature = "native", target_os = "windows"))]
-mod windows_pointer {
+mod windows_input {
     use super::*;
+    use std::mem::size_of;
+
+    const INPUT_MOUSE: u32 = 0;
+    const INPUT_KEYBOARD: u32 = 1;
+
+    const MOUSEEVENTF_LEFTDOWN: u32 = 0x0002;
+    const MOUSEEVENTF_LEFTUP: u32 = 0x0004;
+    const MOUSEEVENTF_RIGHTDOWN: u32 = 0x0008;
+    const MOUSEEVENTF_RIGHTUP: u32 = 0x0010;
+    const MOUSEEVENTF_MIDDLEDOWN: u32 = 0x0020;
+    const MOUSEEVENTF_MIDDLEUP: u32 = 0x0040;
+    const MOUSEEVENTF_WHEEL: u32 = 0x0800;
+    const WHEEL_DELTA: i32 = 120;
+
+    const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
+    const KEYEVENTF_KEYUP: u32 = 0x0002;
+    const KEYEVENTF_UNICODE: u32 = 0x0004;
 
     #[repr(C)]
+    #[derive(Clone, Copy)]
     struct Point {
         x: i32,
         y: i32,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct MouseInput {
+        dx: i32,
+        dy: i32,
+        mouse_data: u32,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct KeyboardInput {
+        vk: u16,
+        scan: u16,
+        flags: u32,
+        time: u32,
+        extra_info: usize,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    union InputData {
+        mouse: MouseInput,
+        keyboard: KeyboardInput,
+    }
+
+    #[repr(C)]
+    #[derive(Clone, Copy)]
+    struct Input {
+        kind: u32,
+        data: InputData,
     }
 
     #[link(name = "user32")]
     unsafe extern "system" {
         fn SetPhysicalCursorPos(x: i32, y: i32) -> i32;
         fn GetPhysicalCursorPos(point: *mut Point) -> i32;
+        fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+    }
+
+    fn mouse_input(flags: u32, mouse_data: u32) -> Input {
+        Input {
+            kind: INPUT_MOUSE,
+            data: InputData {
+                mouse: MouseInput {
+                    dx: 0,
+                    dy: 0,
+                    mouse_data,
+                    flags,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        }
+    }
+
+    fn keyboard_input(vk: u16, scan: u16, flags: u32) -> Input {
+        Input {
+            kind: INPUT_KEYBOARD,
+            data: InputData {
+                keyboard: KeyboardInput {
+                    vk,
+                    scan,
+                    flags,
+                    time: 0,
+                    extra_info: 0,
+                },
+            },
+        }
+    }
+
+    fn send(inputs: &[Input], operation: &'static str) -> Result<()> {
+        if inputs.is_empty() {
+            return Ok(());
+        }
+        let inserted = unsafe {
+            SendInput(
+                inputs.len() as u32,
+                inputs.as_ptr(),
+                size_of::<Input>() as i32,
+            )
+        };
+        if inserted != inputs.len() as u32 {
+            return Err(Error::Operation(format!(
+                "{operation} inserted {inserted}/{} events; Windows may be blocking synthetic input at an integrity/UIPI boundary",
+                inputs.len()
+            )));
+        }
+        Ok(())
     }
 
     pub fn move_to(x: i32, y: i32) -> Result<()> {
@@ -331,64 +436,173 @@ mod windows_pointer {
         }
         Ok(())
     }
-}
 
-#[cfg(all(feature = "native", target_os = "windows"))]
-fn native_button(button: MouseButton) -> enigo::Button {
-    match button {
-        MouseButton::Left => enigo::Button::Left,
-        MouseButton::Right => enigo::Button::Right,
-        MouseButton::Middle => enigo::Button::Middle,
-    }
-}
-
-#[cfg(all(feature = "native", target_os = "windows"))]
-fn native_key(value: &str) -> Result<enigo::Key> {
-    use enigo::Key;
-
-    validate_key_name(value)?;
-    let normalized = value.trim().to_ascii_lowercase();
-    if normalized.chars().count() == 1 {
-        return Ok(Key::Unicode(normalized.chars().next().unwrap()));
-    }
-    let key = match normalized.as_str() {
-        "ctrl" | "control" => Key::Control,
-        "alt" => Key::Alt,
-        "shift" => Key::Shift,
-        "win" | "windows" | "meta" | "super" => Key::Meta,
-        "enter" | "return" => Key::Return,
-        "esc" | "escape" => Key::Escape,
-        "tab" => Key::Tab,
-        "space" => Key::Space,
-        "backspace" => Key::Backspace,
-        "delete" | "del" => Key::Delete,
-        "home" => Key::Home,
-        "end" => Key::End,
-        "pageup" | "page_up" => Key::PageUp,
-        "pagedown" | "page_down" => Key::PageDown,
-        "left" | "leftarrow" => Key::LeftArrow,
-        "right" | "rightarrow" => Key::RightArrow,
-        "up" | "uparrow" => Key::UpArrow,
-        "down" | "downarrow" => Key::DownArrow,
-        "f1" => Key::F1,
-        "f2" => Key::F2,
-        "f3" => Key::F3,
-        "f4" => Key::F4,
-        "f5" => Key::F5,
-        "f6" => Key::F6,
-        "f7" => Key::F7,
-        "f8" => Key::F8,
-        "f9" => Key::F9,
-        "f10" => Key::F10,
-        "f11" => Key::F11,
-        "f12" => Key::F12,
-        _ => {
-            return Err(Error::Unsupported(
-                "keyboard key is not supported by native input",
-            ));
+    fn button_flags(button: MouseButton) -> (u32, u32) {
+        match button {
+            MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
+            MouseButton::Right => (MOUSEEVENTF_RIGHTDOWN, MOUSEEVENTF_RIGHTUP),
+            MouseButton::Middle => (MOUSEEVENTF_MIDDLEDOWN, MOUSEEVENTF_MIDDLEUP),
         }
-    };
-    Ok(key)
+    }
+
+    pub fn click(button: MouseButton) -> Result<()> {
+        let (down, up) = button_flags(button);
+        match send(&[mouse_input(down, 0), mouse_input(up, 0)], "mouse click") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A short SendInput write may have delivered only the button-down event.
+                // Always issue a best-effort release so a failed click cannot leave the
+                // user's physical pointer logically held down.
+                let _ = send(&[mouse_input(up, 0)], "mouse click cleanup");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn button_down(button: MouseButton) -> Result<()> {
+        let (down, _) = button_flags(button);
+        send(&[mouse_input(down, 0)], "mouse button press")
+    }
+
+    pub fn button_up(button: MouseButton) -> Result<()> {
+        let (_, up) = button_flags(button);
+        send(&[mouse_input(up, 0)], "mouse button release")
+    }
+
+    pub fn scroll(clicks: i32) -> Result<()> {
+        let data = clicks.saturating_mul(WHEEL_DELTA) as u32;
+        send(&[mouse_input(MOUSEEVENTF_WHEEL, data)], "mouse wheel")
+    }
+
+    fn virtual_key(value: &str) -> Result<(u16, u32)> {
+        validate_key_name(value)?;
+        let normalized = value.trim().to_ascii_lowercase();
+        if normalized.len() == 1 {
+            let byte = normalized.as_bytes()[0];
+            if byte.is_ascii_alphabetic() {
+                return Ok((byte.to_ascii_uppercase() as u16, 0));
+            }
+            if byte.is_ascii_digit() {
+                return Ok((byte as u16, 0));
+            }
+        }
+        let (key, flags) = match normalized.as_str() {
+            "ctrl" | "control" => (0x11, 0),
+            "alt" => (0x12, 0),
+            "shift" => (0x10, 0),
+            "win" | "windows" | "meta" | "super" => (0x5B, 0),
+            "enter" | "return" => (0x0D, 0),
+            "esc" | "escape" => (0x1B, 0),
+            "tab" => (0x09, 0),
+            "space" => (0x20, 0),
+            "backspace" => (0x08, 0),
+            "delete" | "del" => (0x2E, KEYEVENTF_EXTENDEDKEY),
+            "home" => (0x24, KEYEVENTF_EXTENDEDKEY),
+            "end" => (0x23, KEYEVENTF_EXTENDEDKEY),
+            "pageup" | "page_up" => (0x21, KEYEVENTF_EXTENDEDKEY),
+            "pagedown" | "page_down" => (0x22, KEYEVENTF_EXTENDEDKEY),
+            "left" | "leftarrow" => (0x25, KEYEVENTF_EXTENDEDKEY),
+            "up" | "uparrow" => (0x26, KEYEVENTF_EXTENDEDKEY),
+            "right" | "rightarrow" => (0x27, KEYEVENTF_EXTENDEDKEY),
+            "down" | "downarrow" => (0x28, KEYEVENTF_EXTENDEDKEY),
+            "f1" => (0x70, 0),
+            "f2" => (0x71, 0),
+            "f3" => (0x72, 0),
+            "f4" => (0x73, 0),
+            "f5" => (0x74, 0),
+            "f6" => (0x75, 0),
+            "f7" => (0x76, 0),
+            "f8" => (0x77, 0),
+            "f9" => (0x78, 0),
+            "f10" => (0x79, 0),
+            "f11" => (0x7A, 0),
+            "f12" => (0x7B, 0),
+            _ => {
+                return Err(Error::Unsupported(
+                    "keyboard key is not supported by Windows native input",
+                ));
+            }
+        };
+        Ok((key, flags))
+    }
+
+    pub fn press_key(value: &str) -> Result<()> {
+        let (key, flags) = virtual_key(value)?;
+        match send(
+            &[
+                keyboard_input(key, 0, flags),
+                keyboard_input(key, 0, flags | KEYEVENTF_KEYUP),
+            ],
+            "keyboard key press",
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = send(
+                    &[keyboard_input(key, 0, flags | KEYEVENTF_KEYUP)],
+                    "keyboard key cleanup",
+                );
+                Err(error)
+            }
+        }
+    }
+
+    pub fn hotkey(values: &[String]) -> Result<()> {
+        let keys = values
+            .iter()
+            .map(|value| virtual_key(value))
+            .collect::<Result<Vec<_>>>()?;
+        let mut events = Vec::with_capacity(keys.len() * 2);
+        for (key, flags) in &keys {
+            events.push(keyboard_input(*key, 0, *flags));
+        }
+        for (key, flags) in keys.iter().rev() {
+            events.push(keyboard_input(*key, 0, *flags | KEYEVENTF_KEYUP));
+        }
+        match send(&events, "keyboard hotkey") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let releases = keys
+                    .iter()
+                    .rev()
+                    .map(|(key, flags)| keyboard_input(*key, 0, *flags | KEYEVENTF_KEYUP))
+                    .collect::<Vec<_>>();
+                let _ = send(&releases, "keyboard hotkey cleanup");
+                Err(error)
+            }
+        }
+    }
+
+    pub fn type_text(
+        text: &str,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        let units = text.encode_utf16().collect::<Vec<_>>();
+        for chunk in units.chunks(64) {
+            emergency.check()?;
+            verify_foreground(foreground)?;
+            let mut events = Vec::with_capacity(chunk.len() * 2);
+            for unit in chunk {
+                events.push(keyboard_input(0, *unit, KEYEVENTF_UNICODE));
+                events.push(keyboard_input(
+                    0,
+                    *unit,
+                    KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
+                ));
+            }
+            if let Err(error) = send(&events, "unicode keyboard input") {
+                // Unicode key-down events are not modifiers, but release every unit
+                // defensively if Windows accepted only part of this chunk.
+                let releases = chunk
+                    .iter()
+                    .map(|unit| keyboard_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+                    .collect::<Vec<_>>();
+                let _ = send(&releases, "unicode keyboard cleanup");
+                return Err(error);
+            }
+        }
+        Ok(())
+    }
 }
 
 /// Native input is exposed only on Windows and only after the caller binds the action
@@ -420,8 +634,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Mouse, Settings};
-
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -432,17 +644,13 @@ impl InputController for NativeInput {
             return Err(Error::Limit("mouse click count"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        windows_pointer::move_to(x, y)?;
+        windows_input::move_to(x, y)?;
         for index in 0..clicks {
             emergency.check()?;
             verify_foreground(foreground)?;
-            input
-                .button(native_button(button), Direction::Click)
-                .map_err(|_| Error::Operation("click failed".into()))?;
+            windows_input::click(button)?;
             if index + 1 < clicks {
                 std::thread::sleep(Duration::from_millis(45));
             }
@@ -467,7 +675,7 @@ impl InputController for NativeInput {
         verify_foreground(foreground)?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        windows_pointer::move_to(x, y)
+        windows_input::move_to(x, y)
     }
 
     fn drag(
@@ -482,8 +690,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Mouse, Settings};
-
         validate_frame(frame, start_x, start_y, emergency)?;
         validate_frame(frame, end_x, end_y, emergency)?;
         if frame.simulation {
@@ -495,14 +701,10 @@ impl InputController for NativeInput {
             return Err(Error::Limit("drag duration"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
-        windows_pointer::move_to(start_x, start_y)?;
+        windows_input::move_to(start_x, start_y)?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .button(native_button(button), Direction::Press)
-            .map_err(|_| Error::Operation("mouse button press failed".into()))?;
+        windows_input::button_down(button)?;
 
         let steps = ((duration_ms.max(16) + 15) / 16).clamp(1, 125);
         let mut movement_result = Ok(());
@@ -517,7 +719,7 @@ impl InputController for NativeInput {
             let progress = step as f64 / steps as f64;
             let x = start_x as f64 + (end_x - start_x) as f64 * progress;
             let y = start_y as f64 + (end_y - start_y) as f64 * progress;
-            if let Err(error) = windows_pointer::move_to(x.round() as i32, y.round() as i32) {
+            if let Err(error) = windows_input::move_to(x.round() as i32, y.round() as i32) {
                 movement_result = Err(error);
                 break;
             }
@@ -526,9 +728,7 @@ impl InputController for NativeInput {
             }
         }
 
-        let release_result = input
-            .button(native_button(button), Direction::Release)
-            .map_err(|_| Error::Operation("mouse button release failed".into()));
+        let release_result = windows_input::button_up(button);
         movement_result?;
         release_result
     }
@@ -540,8 +740,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Axis, Enigo, Mouse, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -552,19 +750,14 @@ impl InputController for NativeInput {
             return Err(Error::Limit("scroll steps"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         let mut remaining = clicks;
         while remaining != 0 {
             emergency.check()?;
             verify_foreground(foreground)?;
             let magnitude = remaining.abs().min(8);
             let chunk = if remaining > 0 { magnitude } else { -magnitude };
-            // Public JARVIS semantics follow PyAutoGUI: positive means scroll up.
-            // Enigo's vertical axis uses positive for down, so invert the sign.
-            input
-                .scroll(-chunk, Axis::Vertical)
-                .map_err(|_| Error::Operation("scroll failed".into()))?;
+            // Public JARVIS semantics follow PyAutoGUI/Windows: positive means scroll up.
+            windows_input::scroll(chunk)?;
             remaining -= chunk;
         }
         Ok(())
@@ -577,23 +770,17 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Keyboard, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
                 "simulation evidence cannot authorize native input",
             ));
         }
-        let key = native_key(key)?;
+        validate_key_name(key)?;
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .key(key, Direction::Click)
-            .map_err(|_| Error::Operation("keyboard key press failed".into()))
+        windows_input::press_key(key)
     }
 
     fn hotkey(
@@ -603,8 +790,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Keyboard, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         validate_hotkey(keys)?;
         if frame.simulation {
@@ -612,38 +797,10 @@ impl InputController for NativeInput {
                 "simulation evidence cannot authorize native input",
             ));
         }
-        let mapped: Vec<_> = keys
-            .iter()
-            .map(|value| native_key(value))
-            .collect::<Result<Vec<_>>>()?;
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
-        let mut pressed = Vec::new();
-        for key in &mapped {
-            if let Err(error) = emergency
-                .check()
-                .and_then(|_| verify_foreground(foreground))
-            {
-                for prior in pressed.iter().rev() {
-                    let _ = input.key(*prior, Direction::Release);
-                }
-                return Err(error);
-            }
-            if input.key(*key, Direction::Press).is_err() {
-                for prior in pressed.iter().rev() {
-                    let _ = input.key(*prior, Direction::Release);
-                }
-                return Err(Error::Operation("hotkey press failed".into()));
-            }
-            pressed.push(*key);
-        }
-        for key in pressed.iter().rev() {
-            input
-                .key(*key, Direction::Release)
-                .map_err(|_| Error::Operation("hotkey release failed".into()))?;
-        }
-        Ok(())
+        emergency.check()?;
+        verify_foreground(foreground)?;
+        windows_input::hotkey(keys)
     }
 
     fn type_text(
@@ -653,8 +810,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Enigo, Keyboard, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -665,13 +820,9 @@ impl InputController for NativeInput {
             return Err(Error::Limit("keyboard text"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .text(text)
-            .map_err(|_| Error::Operation("keyboard input failed".into()))
+        windows_input::type_text(text, foreground, emergency)
     }
 }
 

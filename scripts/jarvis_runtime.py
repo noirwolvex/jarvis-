@@ -460,6 +460,30 @@ def live_qualify() -> int:
                     f"Independent keyboard verification failed on display {display_id}: expected {token!r}, got {entry.get()!r}"
                 )
 
+            # Qualify real Virtual-Key delivery, not only Unicode text injection.
+            # Ctrl+A must select the existing token; the replacement proves that the
+            # modifier + letter shortcut was delivered atomically by the Rust daemon.
+            replacement = f"HOTKEY-{display_id}-{uuid.uuid4().hex[:8]}"
+            _worker_probe(worker, {"kind": "hotkey", "keys": ["ctrl", "a"]})
+            _worker_probe(worker, {"kind": "type_text", "text": replacement})
+            root.update()
+            if entry.get() != replacement:
+                raise RuntimeError(
+                    f"Independent hotkey verification failed on display {display_id}: "
+                    f"Ctrl+A did not select the prior text; got {entry.get()!r}"
+                )
+
+            # A standalone navigation key must also arrive through the VK path.
+            prefix = "VK-"
+            _worker_probe(worker, {"kind": "press_key", "key": "home"})
+            _worker_probe(worker, {"kind": "type_text", "text": prefix})
+            root.update()
+            if entry.get() != prefix + replacement:
+                raise RuntimeError(
+                    f"Independent key verification failed on display {display_id}: "
+                    f"Home did not move the caret to the start; got {entry.get()!r}"
+                )
+
             bx = button.winfo_rootx() + button.winfo_width() // 2
             by = button.winfo_rooty() + button.winfo_height() // 2
             _worker_probe(worker, {"kind": "click", "x": bx, "y": by})
@@ -483,6 +507,8 @@ def live_qualify() -> int:
                     "rust_input_ready": native.get("rust_input_ready"),
                     "daemon_native_input": engine.get("daemon", {}).get("native_input"),
                     "keyboard_token_verified": True,
+                    "keyboard_hotkey_verified": True,
+                    "keyboard_virtual_key_verified": True,
                     "mouse_focus_verified": True,
                     "mouse_button_verified": True,
                     "qualified_displays": qualified,

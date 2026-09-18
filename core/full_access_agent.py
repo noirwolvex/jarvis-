@@ -37,6 +37,26 @@ _DESKTOP_BROWSER_INPUT_TOOLS = {
     "desktop_key_down",
     "desktop_key_up",
 }
+_DESKTOP_OBSERVATION_REQUIRED_TOOLS = {
+    "desktop_click",
+    "desktop_click_button",
+    "desktop_double_click",
+    "desktop_drag",
+    "desktop_move",
+}
+_FOCUSED_NATIVE_BURST_TOOLS = {
+    "desktop_type",
+    "desktop_press",
+    "desktop_hotkey",
+    "desktop_scroll",
+}
+_DESKTOP_SCENE_MUTATION_TOOLS = {
+    "desktop_click",
+    "desktop_click_button",
+    "desktop_double_click",
+    "desktop_drag",
+}
+
 _BROWSER_SIGNALS = (
     "browser", "chrome", "google", "website", "web page", "http://", "https://", "new tab", "another tab", "search for",
     "متصفح", "كروم", "جوجل", "موقع", "صفحة", "تبويب", "ابحث", "بحث",
@@ -59,7 +79,6 @@ _BROWSER_PROFILE_EXPLICIT = {
     "find_installed_app",
     "launch_installed_app",
     "open_application",
-    "open_application_and_type",
     "open_url",
 }
 _BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "discord_", "whatsapp_", "youtube_", "workflow_")
@@ -119,6 +138,7 @@ class FullAccessJarvisAgent(JarvisAgent):
         super().__init__(*args, **kwargs)
         self.max_turns = max(1, min(int(os.getenv("JARVIS_FULL_ACCESS_MAX_TURNS", str(max(160, self.max_turns)))), 512))
         self._stop = threading.Event()
+        self._device_action_active = threading.Event()
         self._desktop_observation = DesktopObservationGate()
         self.orchestrator.strict_order = True
 
@@ -132,6 +152,7 @@ class FullAccessJarvisAgent(JarvisAgent):
     def reset(self) -> None:
         super().reset()
         self._stop.clear()
+        self._device_action_active.clear()
         self._desktop_observation.invalidate()
 
     def _compact_context(self, goal: str) -> None:
@@ -142,7 +163,9 @@ class FullAccessJarvisAgent(JarvisAgent):
 
     def _is_mutation(self, name: str) -> bool:
         # Containers journal their child actions; they are not additional device actions.
-        if name.startswith("workflow_"):
+        # Moving the pointer alone changes no application state and must not create an
+        # expensive verification barrier before the click it is preparing.
+        if name.startswith("workflow_") or name in {"desktop_cursor", "desktop_move"}:
             return False
         spec = self.tools._tools.get(name)
         return bool(spec and (spec.risk >= Risk.MEDIUM or name.startswith("desktop_") and name != "desktop_cursor"
@@ -156,16 +179,33 @@ class FullAccessJarvisAgent(JarvisAgent):
             mutation = self._is_mutation(name)
             if mutation and name not in {"desktop_mouse_up", "desktop_key_up"} and self.orchestrator.needs_action_review():
                 return "ERROR: Observe the last action and call task_verify with evidence before another mutation. Use verified=false for a failed outcome, then diagnose and recover."
-            if raw_input and name not in {"desktop_mouse_up", "desktop_key_up"}:
+            # Coordinates must come from a stable observed scene. Focused keyboard and
+            # wheel input do not need a screenshot just to prove where the foreground
+            # window is: strict Rust binds every dispatch to a fresh HWND/PID itself.
+            if name in _DESKTOP_OBSERVATION_REQUIRED_TOOLS:
                 try:
                     self._desktop_observation.check(arguments)
                 except ValueError as exc:
                     return f"ERROR: {exc}"
-            self.orchestrator.start_action(name, arguments)
-            result = self.tools.execute(name, arguments, approved)
+            device_busy = mutation or raw_input or name == "screen_observe"
+            activity = getattr(self, "_device_action_active", None)
+            if device_busy and activity is not None:
+                activity.set()
+            try:
+                if mutation:
+                    # This is the single durable write-intent point. Callers must not
+                    # duplicate start_action around _execute_tool.
+                    self.orchestrator.start_action(name, arguments)
+                result = self.tools.execute(name, arguments, approved)
+            finally:
+                if device_busy and activity is not None:
+                    activity.clear()
             if name == "screen_observe" and result.startswith("VERIFIED: "):
                 self._desktop_observation.observe(json.loads(result[len("VERIFIED: "):]))
-            elif raw_input:
+            elif name in _DESKTOP_SCENE_MUTATION_TOOLS or name in _FOCUSED_NATIVE_BURST_TOOLS:
+                # Any click/drag/type/hotkey/scroll may change visible state. Invalidate
+                # coordinate authority, but do not force another screenshot between
+                # consecutive focused native inputs.
                 self._desktop_observation.invalidate()
             return result
 
@@ -198,7 +238,7 @@ Full Access execution profile:
 - Create a task_plan before multi-step work, honor its dependencies, and update each step using observed evidence. Use task_status for progress. After any uncertain mutation, observe before retrying: never blindly repeat writes, clicks, sends, or commands.
 - When the user asks to continue or resume, use task_recall to recover the previous checkpoint, then inspect the live state and plan only remaining work. The current screen and file contents take precedence over saved evidence.
 - After an action without a VERIFIED result, inspect the resulting state and call task_verify with a specific claim and observed evidence before another mutation. For a failed outcome, record verified=false, recover, then re-verify the SAME claim to resolve it. Verification cannot be invented from intended actions.
-- Raw desktop input requires a stable screen_observe with the same foreground window and coordinates inside its virtual desktop. The scene is captured and compared again immediately before dispatch; evidence older than 60 seconds is rejected. Each input consumes that observation. A new screen observation follows desktop input automatically; evaluate the visible outcome before continuing. Cursor arrival alone does not verify the application outcome.
+- Raw mouse coordinates require a stable screen_observe with the same foreground window and coordinates inside its virtual desktop. Focused Rust keyboard/hotkey/scroll input does not require a redundant screenshot before every key because the daemon binds every dispatch to a fresh HWND/PID. Consecutive focused native inputs may run as one bounded burst, followed by one fresh observation and review. Coordinate clicks/drags still force immediate post-action observation. Cursor arrival alone does not verify the application outcome.
 - Optimize for low latency and verified completion. Prefer one reliable semantic/direct tool over several exploratory mouse or keyboard steps when both achieve the same requested result.
 - For an explicit Google search, prefer google_search. It performs a guarded verified search in one call. Set new_tab=true only when the user explicitly asks for a new/additional tab.
 - For browser, tab, Google, or web-search requests, do not launch Chrome through launch_installed_app or open_application. Use the guarded managed Chrome/CDP tools so JARVIS controls the exact selected tab.
@@ -357,6 +397,7 @@ Full Access execution profile:
                     return result
 
                 vision_followups: list[dict[str, Any]] = []
+                native_burst_pending = False
                 for call in tool_calls:
                     if self._is_stopped():
                         self.orchestrator.finish("cancelled", "Emergency stop is active")
@@ -371,9 +412,6 @@ Full Access execution profile:
                         arguments = {}
                     else:
                         emit and emit(AgentEvent("tool", f"Requesting tool: {name}", name))
-                        mutation_intent = self._is_mutation(name)
-                        if mutation_intent:
-                            self.orchestrator.start_action(name, dict(arguments))
                         approved = self.approval(name, arguments)
                         result = self._execute_tool(name, arguments, approved=approved)
                         challenge_pause = str(result).startswith("BROWSER_ACTION_BLOCKED:")
@@ -382,7 +420,25 @@ Full Access execution profile:
                     mutation = self._is_mutation(name)
                     # Rejected dispatches do not constitute a new action to review.
                     mutation = mutation and not str(result).startswith(("PERMISSION_DENIED", "ERROR: Observe the last", "ERROR: Fresh screen", "ERROR: Foreground", "ERROR: Desktop coordinate"))
-                    self.orchestrator.record_tool(name, arguments, result, duration_ms, turn + 1, mutation=mutation)
+                    deferred_native_review = (
+                        mutation
+                        and name in _FOCUSED_NATIVE_BURST_TOOLS
+                        and str(result).startswith("RUST_EXECUTED:")
+                    )
+                    self.orchestrator.record_tool(
+                        name,
+                        arguments,
+                        result,
+                        duration_ms,
+                        turn + 1,
+                        mutation=mutation,
+                        review_required=mutation and not deferred_native_review,
+                    )
+                    if deferred_native_review:
+                        native_burst_pending = True
+                        self.orchestrator.current.metrics["native_input_burst_actions"] = (
+                            self.orchestrator.current.metrics.get("native_input_burst_actions", 0) + 1
+                        )
                     if mutation and result.startswith("VERIFIED:") and not name.startswith("desktop_"):
                         self.orchestrator.verify(f"{name} reported its postcondition", True, result)
                     emit and emit(AgentEvent("tool_result", result, name))
@@ -393,14 +449,34 @@ Full Access execution profile:
                         if followup is not None:
                             vision_followups.append(followup)
 
-                    if name.startswith("desktop_") and name != "desktop_cursor" and tool_succeeded(result) and not self._is_stopped():
+                    if (
+                        name.startswith("desktop_")
+                        and name != "desktop_cursor"
+                        and tool_succeeded(result)
+                        and not self._is_stopped()
+                    ):
+                        if name in _FOCUSED_NATIVE_BURST_TOOLS and deferred_native_review:
+                            # Do not stop after every key/type/hotkey/scroll. The daemon
+                            # re-binds each atomic input to the foreground window; one
+                            # observation is taken after the bounded burst.
+                            continue
+                        if name == "desktop_move":
+                            # Rust verifies physical cursor arrival. Preserve the current
+                            # observed scene so a following click can use it immediately.
+                            continue
+                        observed_started = time.perf_counter()
                         observed = self._execute_tool("screen_observe", {}, approved=True)
-                        self.orchestrator.record_tool("screen_observe", {}, observed, 0, turn + 1)
+                        self.orchestrator.record_tool(
+                            "screen_observe", {}, observed,
+                            (time.perf_counter() - observed_started) * 1000.0,
+                            turn + 1,
+                        )
                         emit and emit(AgentEvent("tool_result", observed, "screen_observe"))
                         followup = vision_followup_message(observed)
                         if followup is not None:
                             vision_followups.append(followup)
-                        # The next model turn must see post-action evidence before another input.
+                        # A coordinate/scene-changing desktop action still needs review
+                        # before another mutation because later coordinates may now be stale.
                         for remaining in tool_calls[tool_calls.index(call) + 1:]:
                             self.messages.append({"role": "tool", "tool_call_id": remaining.id,
                                                   "content": "ERROR: Re-plan this action after evaluating the fresh desktop observation"})
@@ -432,6 +508,26 @@ Full Access execution profile:
                                                   "content": "ERROR: Not executed because an earlier ordered action failed. Recover that step first."})
                         self.messages.append({"role": "user", "content": hint})
                         break
+
+                if native_burst_pending and not self._is_stopped():
+                    # One post-burst observation replaces the old screenshot-after-every-key
+                    # behavior. It supplies fresh evidence to the next model turn while
+                    # still requiring the model to verify the application-level outcome.
+                    observed_started = time.perf_counter()
+                    observed = self._execute_tool("screen_observe", {}, approved=True)
+                    self.orchestrator.record_tool(
+                        "screen_observe", {}, observed,
+                        (time.perf_counter() - observed_started) * 1000.0,
+                        turn + 1,
+                    )
+                    emit and emit(AgentEvent("tool_result", observed, "screen_observe"))
+                    followup = vision_followup_message(observed)
+                    if followup is not None:
+                        vision_followups.append(followup)
+                    self.orchestrator.require_action_review()
+                    self.orchestrator.current.metrics["native_input_bursts"] = (
+                        self.orchestrator.current.metrics.get("native_input_bursts", 0) + 1
+                    )
 
                 # Append multimodal context only after every tool_call has a matching tool result,
                 # preserving the Chat Completions tool-call protocol for parallel tool responses.
