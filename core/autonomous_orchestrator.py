@@ -135,12 +135,35 @@ class ExecutionRouter:
         }:
             return EngineRoute("VISION", "VISION", cls._fallbacks("VISION"))
 
+        rust_atomic_desktop = {
+            "desktop_click",
+            "desktop_type",
+            "desktop_click_button",
+            "desktop_move",
+            "desktop_scroll",
+            "desktop_double_click",
+            "desktop_drag",
+            "desktop_press",
+            "desktop_hotkey",
+        }
+        if name in rust_atomic_desktop:
+            coordinate_tools = {
+                "desktop_click",
+                "desktop_click_button",
+                "desktop_move",
+                "desktop_double_click",
+                "desktop_drag",
+            }
+            resolution = "SCREEN" if name in coordinate_tools else "FOREGROUND_WINDOW"
+            return EngineRoute("RUST_NATIVE", resolution, cls._fallbacks("RUST_NATIVE"))
+
         has_coordinates = all(key in args for key in ("x", "y"))
-        if name in {"desktop_click", "desktop_double_click"} or has_coordinates:
+        if has_coordinates:
             return EngineRoute("COORDINATE", "SCREEN", ())
 
         if name.startswith("desktop_"):
-            # Legacy desktop tools are visible as such. Never mislabel them as Rust.
+            # Stateful key/mouse hold primitives are Python-only compatibility tools and
+            # are intentionally disabled when the runtime is in strict Rust mode.
             return EngineRoute("DIRECT", "FOREGROUND_WINDOW", cls._fallbacks("DIRECT"))
 
         return EngineRoute("DIRECT", "", cls._fallbacks("DIRECT"))
@@ -268,8 +291,17 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         duration_ms: float,
         turn: int,
         mutation: bool = False,
+        review_required: bool | None = None,
     ) -> None:
-        super().record_tool(name, arguments, result, duration_ms, turn, mutation=mutation)
+        super().record_tool(
+            name,
+            arguments,
+            result,
+            duration_ms,
+            turn,
+            mutation=mutation,
+            review_required=review_required,
+        )
         if not self.current or not self.current.traces:
             return
 

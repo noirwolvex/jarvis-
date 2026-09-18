@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import tempfile
 import unittest
 from pathlib import Path
@@ -18,9 +19,12 @@ class ExecutionRouterTests(unittest.TestCase):
         self.assertEqual(ExecutionRouter.classify("ui_activate").execution_backend, "UIA")
         self.assertEqual(ExecutionRouter.classify("ui_type_native").execution_backend, "RUST_NATIVE")
         self.assertEqual(ExecutionRouter.classify("screen_observe").execution_backend, "VISION")
+        desktop = ExecutionRouter.classify("desktop_click", {"x": 10, "y": 20})
+        self.assertEqual(desktop.execution_backend, "RUST_NATIVE")
+        self.assertEqual(desktop.resolution_backend, "SCREEN")
         self.assertEqual(
-            ExecutionRouter.classify("desktop_click", {"x": 10, "y": 20}).execution_backend,
-            "COORDINATE",
+            ExecutionRouter.classify("desktop_type", {"text": "hello"}).execution_backend,
+            "RUST_NATIVE",
         )
 
     def test_native_semantic_action_reports_both_engines(self) -> None:
@@ -31,6 +35,39 @@ class ExecutionRouterTests(unittest.TestCase):
 
 
 class AutonomousTaskOrchestratorTests(unittest.TestCase):
+    def test_override_contract_accepts_every_base_record_tool_parameter(self) -> None:
+        from core.orchestrator import TaskOrchestrator
+
+        base = inspect.signature(TaskOrchestrator.record_tool)
+        rich = inspect.signature(AutonomousTaskOrchestrator.record_tool)
+        self.assertTrue(
+            set(base.parameters).issubset(set(rich.parameters)),
+            f"Autonomous override drifted from base contract: base={base}, autonomous={rich}",
+        )
+
+    def test_deferred_review_flag_survives_autonomous_trace_enrichment(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            orchestrator.begin("type then press enter")
+            orchestrator.record_tool(
+                "desktop_type",
+                {"text": "hello"},
+                "RUST_EXECUTED: typed",
+                4.0,
+                1,
+                mutation=True,
+                review_required=False,
+            )
+            self.assertFalse(orchestrator.needs_action_review())
+            summary = orchestrator.summary()
+            self.assertEqual(summary["engine_visibility"][-1]["execution_backend"], "RUST_NATIVE")
+            self.assertEqual(summary["engine_visibility"][-1]["resolution_backend"], "FOREGROUND_WINDOW")
+
+            orchestrator.require_action_review()
+            self.assertTrue(orchestrator.needs_action_review())
+            orchestrator.verify("typed text is visible", True, "fresh observation")
+            self.assertFalse(orchestrator.needs_action_review())
+
     def test_rich_task_graph_and_engine_visibility(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict("os.environ", {"JARVIS_WORKSPACE": tmp}, clear=False):
