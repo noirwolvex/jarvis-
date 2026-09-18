@@ -136,7 +136,7 @@ impl Policy {
             | Action::Hotkey { display_id, .. }
             | Action::TypeText { display_id, .. } => Scope::Input {
                 display_id: *display_id,
-            }
+            },
             Action::RunProcess { executable_id, .. } => Scope::Process {
                 executable_id: executable_id.clone(),
             },
