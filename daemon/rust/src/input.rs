@@ -319,7 +319,9 @@ mod windows_pointer {
         }
         let mut point = Point { x: 0, y: 0 };
         if unsafe { GetPhysicalCursorPos(&mut point) } == 0 {
-            return Err(Error::Operation("physical pointer verification failed".into()));
+            return Err(Error::Operation(
+                "physical pointer verification failed".into(),
+            ));
         }
         if point.x != x || point.y != y {
             return Err(Error::Operation(format!(
