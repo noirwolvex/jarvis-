@@ -4,7 +4,7 @@ import json
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 from core.app_tools import (
     _BLOCKED_EXECUTABLE_STEMS,
@@ -16,6 +16,7 @@ from core.app_tools import (
     _rank_candidates,
     _score,
     register_app_tools,
+    launch_installed_app,
 )
 from core.orchestrator import TaskOrchestrator
 from core.task_tools import register_task_tools
@@ -94,6 +95,58 @@ class AppToolsTests(unittest.TestCase):
             _parse_display_icon(r"C:\Program Files\App\App.exe,5"),
             r"C:\Program Files\App\App.exe",
         )
+
+    def test_launch_waits_for_visible_focused_window_after_process_appears(self) -> None:
+        app = {
+            "name": "WhatsApp",
+            "source": "fixture",
+            "launch_type": "executable",
+            "launch_value": r"C:\\WhatsApp.exe",
+            "process_hint": "WhatsApp",
+            "score": 100.0,
+        }
+        process = {"pid": 42, "name": "WhatsApp.exe", "exe": r"C:\\WhatsApp.exe"}
+        window = {"hwnd": 77, "title": "WhatsApp", "pid": 42}
+        with patch("core.app_tools.os.name", "nt"), \
+             patch("core.app_tools._resolve", return_value=app), \
+             patch("core.app_tools._launch_candidate", return_value=123), \
+             patch("core.app_tools._visible_windows", side_effect=[[], [], [window]]), \
+             patch("core.app_tools._processes", side_effect=[[], [process]]), \
+             patch("core.app_tools._focus", return_value=True) as focus, \
+             patch("core.ui_state.cancellable_delay"):
+            result = launch_installed_app("WhatsApp", timeout_seconds=2)
+
+        self.assertTrue(result.startswith("VERIFIED: "))
+        payload = json.loads(result[len("VERIFIED: "):])
+        self.assertTrue(payload["interaction_ready"])
+        self.assertTrue(payload["visible_window_verified"])
+        self.assertTrue(payload["focused"])
+        focus.assert_called_once_with(77)
+
+    def test_process_only_launch_is_not_reported_interaction_ready(self) -> None:
+        app = {
+            "name": "Background App",
+            "source": "fixture",
+            "launch_type": "executable",
+            "launch_value": r"C:\\Background.exe",
+            "process_hint": "Background",
+            "score": 100.0,
+        }
+        process = {"pid": 43, "name": "Background.exe", "exe": r"C:\\Background.exe"}
+        with patch("core.app_tools.os.name", "nt"), \
+             patch("core.app_tools._resolve", return_value=app), \
+             patch("core.app_tools._launch_candidate", return_value=124), \
+             patch("core.app_tools._visible_windows", side_effect=[[], []]), \
+             patch("core.app_tools._processes", side_effect=[[], [process]]), \
+             patch("core.app_tools.time.monotonic", side_effect=[0.0, 0.1, 2.1]), \
+             patch("core.ui_state.cancellable_delay"):
+            result = launch_installed_app("Background App", timeout_seconds=2)
+
+        self.assertTrue(result.startswith("DELIVERED: "))
+        payload = json.loads(result[len("DELIVERED: "):])
+        self.assertFalse(payload["interaction_ready"])
+        self.assertTrue(payload["process_verified"])
+        self.assertFalse(payload["visible_window_verified"])
 
     def test_app_tools_are_registered_without_arbitrary_shell_tooling(self) -> None:
         registry = ToolRegistry()
