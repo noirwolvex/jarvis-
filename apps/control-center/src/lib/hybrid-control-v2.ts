@@ -29,6 +29,56 @@ const getState = () => globalState.jarvisHybridV3 ??= {
   tasks: [], events: [], seq: 0, status: "IDLE", running: false, version: 0, accessMode: "standard",
 };
 
+const MAX_RUNTIME_ACTION_NODES = 48;
+
+function runtimeActionNodes(task: TaskView) {
+  return task.nodes.filter(node => node.action === "AGENT_TOOL");
+}
+
+function classifyToolResult(message: string): string {
+  const normalized = message.trim().toUpperCase();
+  if (normalized.startsWith("PERMISSION_DENIED") || normalized.startsWith("ERROR") || normalized.startsWith("CANCELLED")) return "FAILED";
+  if (normalized.startsWith("BROWSER_ACTION_BLOCKED")) return "WAITING_USER";
+  if (normalized.startsWith("VERIFIED:")) return "VERIFIED";
+  if (normalized.startsWith("DELIVERED:") || normalized.startsWith("RUST_EXECUTED:")) return "DELIVERED";
+  return "COMPLETED";
+}
+
+function appendRuntimeAction(task: TaskView, message: string) {
+  const execute = task.nodes.find(node => node.action === "AGENT_EXECUTE");
+  const verify = task.nodes.find(node => node.action === "VERIFY_OUTCOME");
+  if (!execute || !verify) return;
+
+  if (execute.status === "EXECUTING") execute.status = "VERIFIED";
+  const previous = runtimeActionNodes(task).at(-1);
+  if (previous?.status === "EXECUTING") previous.status = "COMPLETED";
+  if (runtimeActionNodes(task).length >= MAX_RUNTIME_ACTION_NODES) return;
+
+  const sequence = runtimeActionNodes(task).length + 1;
+  const rawTitle = message
+    .replace(/^Fast step:\s*/i, "")
+    .replace(/^Requesting tool:\s*/i, "")
+    .trim();
+  const title = (rawTitle || "Agent action").slice(0, 180);
+  const id = `${task.id}:agent-action-${sequence}`;
+  const node = {
+    id,
+    title,
+    action: "AGENT_TOOL",
+    dependencies: [previous?.id ?? execute.id],
+    status: "EXECUTING",
+  };
+  const verifyIndex = task.nodes.indexOf(verify);
+  task.nodes.splice(verifyIndex, 0, node);
+  verify.dependencies = [id];
+}
+
+function completeRuntimeAction(task: TaskView, message: string) {
+  const node = [...runtimeActionNodes(task)].reverse().find(item => item.status === "EXECUTING");
+  if (!node) return;
+  node.status = classifyToolResult(message);
+}
+
 function addEvent(type: string, taskId: string, summary: string) {
   const value = getState();
   value.events.push({ sequence: ++value.seq, id: `hybrid-${value.seq}`, type, timestamp: new Date().toISOString(), taskId, summary });
@@ -161,6 +211,13 @@ async function runFullMission(task: TaskView) {
   try {
     const result = await runFullAccessMission(task.title, abort.signal, (kind, message) => {
       if (kind === "emergency_stop") { emergencyStopHybrid(); return; }
+      if (kind === "tool") {
+        appendRuntimeAction(task, message);
+        value.version += 1;
+      } else if (kind === "tool_result") {
+        completeRuntimeAction(task, message);
+        value.version += 1;
+      }
       if (kind === "observation") {
         if (value.emergencyStopped || abort.signal.aborted || value.accessMode !== "full") return;
         const observation = JSON.parse(message);
@@ -181,7 +238,7 @@ async function runFullMission(task: TaskView) {
       }
     }, Boolean(value.allowShell));
     if (abort.signal.aborted) throw new Error("Full Access mission stopped");
-    execute.status = "VERIFIED";
+    if (execute.status === "EXECUTING") execute.status = "VERIFIED";
 
     if (result.requires_user_action || result.status === "waiting_user") {
       verify.status = "WAITING_USER";
@@ -211,7 +268,9 @@ async function runFullMission(task: TaskView) {
     addEvent("ACTION_VERIFIED", task.id, "Agent verification records passed");
     addEvent("TASK_COMPLETED", task.id, task.summary);
   } catch (error) {
-    execute.status = "FAILED";
+    const activeAction = [...runtimeActionNodes(task)].reverse().find(node => node.status === "EXECUTING");
+    if (activeAction) activeAction.status = "FAILED";
+    if (execute.status === "EXECUTING") execute.status = "FAILED";
     verify.status = "FAILED";
     task.status = value.emergencyStopped ? "CANCELLED" : "FAILED";
     task.summary = error instanceof Error ? error.message : "Full Access mission failed";
