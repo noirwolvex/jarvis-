@@ -38,6 +38,7 @@ pub fn now_ms() -> u64 {
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct ForegroundBinding {
+    pub hwnd: u64,
     pub process_id: u32,
     pub title: String,
 }
