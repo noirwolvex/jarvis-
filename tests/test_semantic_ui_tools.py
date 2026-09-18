@@ -144,6 +144,22 @@ class SemanticUiToolsTests(unittest.TestCase):
         button.iface_invoke.Invoke.assert_called_once()
         button.click_input.assert_not_called()
 
+    def test_uia_control_without_invoke_uses_rust_center_click_in_strict_mode(self):
+        button = _Control("Open", "Button")
+        win = _Window([button])
+        client = Mock()
+        client.click.return_value = {"executed": True, "simulation": False}
+        with patch.object(ui, "_window", return_value=win), \
+             patch.object(ui, "_focus_window", return_value=123), \
+             patch.object(ui, "_guard_foreground"), \
+             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True})), \
+             patch("core.rust_engine.native_engine_mode", return_value="rust"):
+            result = ui.ui_activate("Open")
+        self.assertTrue(result.startswith("DELIVERED:"))
+        data = json.loads(result.split(": ", 1)[1])
+        self.assertEqual(data["method"], "rust_uia_center_click")
+        client.click.assert_called_once_with(250, 50, {"native_input": True})
+
     def test_uncertain_invoke_never_retries_select_or_physical_click(self):
         button = _Control("Open", "Button")
         button.iface_invoke = Mock()
