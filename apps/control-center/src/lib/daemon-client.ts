@@ -5,7 +5,7 @@ import tls, { type TLSSocket } from "node:tls";
 const MAX_FRAME_BYTES = 256 * 1024;
 const ALPN = "jarvis-execution/1";
 
-type ForegroundBinding = { process_id: number; title: string };
+type ForegroundBinding = { hwnd: number; process_id: number; title: string };
 export type DaemonDisplay = { id: number; x: number; y: number; width: number; height: number; scale: number };
 export type DaemonFrame = { id: string; display: DaemonDisplay; captured_at_ms: number; sha256: string; simulation: boolean };
 export type DaemonPreview = { mime: string; width: number; height: number; base64: string };
