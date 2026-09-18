@@ -265,6 +265,41 @@ class SemanticUiToolsTests(unittest.TestCase):
     def test_value_reader_does_not_mistake_editor_name_for_value(self):
         self.assertIsNone(ui._control_value(_Control("hello", "Edit")))
 
+    def test_strict_rust_semantic_hotkey_does_not_bypass_native_engine(self):
+        client = Mock()
+        client.hotkey.return_value = {"executed": True, "simulation": False}
+        with patch.object(ui, "_window", return_value=_Window([])), \
+             patch.object(ui, "_focus_window", return_value=123), \
+             patch.object(ui, "_guard_foreground"), \
+             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True})), \
+             patch("core.rust_engine.native_engine_mode", return_value="rust"), \
+             patch("core.tools._desktop_hotkey") as python_hotkey:
+            result = ui.ui_hotkey(["ctrl", "l"])
+        self.assertTrue(result.startswith("DELIVERED:"))
+        client.hotkey.assert_called_once_with(["ctrl", "l"], {"native_input": True})
+        python_hotkey.assert_not_called()
+        self.assertEqual(json.loads(result.split(": ", 1)[1])["method"], "rust_native_hotkey")
+
+    def test_strict_rust_semantic_type_uses_native_keyboard_when_value_pattern_missing(self):
+        editor = _Editor()
+        del editor.iface_value
+        client = Mock()
+        def deliver(text, status):
+            editor.value += text
+            return {"executed": True, "simulation": False}
+        client.type_text.side_effect = deliver
+        with patch.object(ui, "_window", return_value=_Window([editor])), \
+             patch.object(ui, "_focus_window", return_value=123), \
+             patch.object(ui, "_guard_foreground"), \
+             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True})), \
+             patch("core.rust_engine.native_engine_mode", return_value="rust"), \
+             patch.object(ui, "paste_text") as python_type:
+            result = ui.ui_type("hello", target="Message")
+        self.assertTrue(result.startswith("VERIFIED:"))
+        client.type_text.assert_called_once_with("hello", {"native_input": True})
+        python_type.assert_not_called()
+        self.assertEqual(json.loads(result.split(": ", 1)[1])["method"], "rust_native_input")
+
     def test_type_verifies_full_replacement_not_substring(self):
         editor = _Editor()
         editor.iface_value.SetValue.side_effect = lambda value: setattr(editor, "value", value + "wrong")
