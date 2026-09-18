@@ -497,6 +497,60 @@ def _control_value(control: Any) -> str | None:
     return None
 
 
+def _rust_type_or_python(text: str) -> str:
+    """Deliver focused text through Rust in strict mode; auto mode may retain Python compatibility."""
+    from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
+
+    client, status = _preflight()
+    if client is None:
+        if native_engine_mode() == "auto":
+            paste_text(text)
+            return "windows_unicode_input"
+        raise RustEngineUnavailable(
+            "Strict Rust mode requires the native daemon before semantic keyboard input"
+        )
+    try:
+        result = client.type_text(text, status)
+    except RustEngineUnavailable:
+        if native_engine_mode() != "auto":
+            raise
+        paste_text(text)
+        return "windows_unicode_input"
+    if result.get("executed") is not True or result.get("simulation") is not False:
+        raise InputDeliveryError(
+            "Rust daemon did not confirm semantic keyboard execution; inspect before retrying"
+        )
+    return "rust_native_input"
+
+
+def _rust_hotkey_or_python(keys: list[str]) -> str:
+    """Dispatch an atomic focused shortcut through Rust whenever strict native mode is active."""
+    from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
+
+    client, status = _preflight()
+    if client is None:
+        if native_engine_mode() == "auto":
+            from .tools import _desktop_hotkey
+            _desktop_hotkey(keys)
+            return "python_hotkey"
+        raise RustEngineUnavailable(
+            "Strict Rust mode requires the native daemon before semantic hotkeys"
+        )
+    try:
+        result = client.hotkey(keys, status)
+    except RustEngineUnavailable:
+        if native_engine_mode() != "auto":
+            raise
+        from .tools import _desktop_hotkey
+        _desktop_hotkey(keys)
+        return "python_hotkey"
+    if result.get("executed") is not True or result.get("simulation") is not False:
+        raise InputDeliveryError(
+            "Rust daemon did not confirm semantic hotkey execution; inspect before retrying"
+        )
+    return "rust_native_hotkey"
+
+
 def ui_type(
     text: str,
     target: str = "",
@@ -536,7 +590,7 @@ def ui_type(
         if not isinstance(exc, AttributeError) and type(exc).__name__ != "NoPatternInterfaceError":
             raise
         pattern = None
-    wrote_with = "uia_value_pattern" if pattern is not None else "unicode_input"
+    wrote_with = "uia_value_pattern" if pattern is not None else "native_keyboard_input"
     if pattern is None and (before_value or replace):
         raise InputDeliveryError("Editor has no writable Value pattern; use guarded input to control selection explicitly")
     if pattern is None and any(char in str(text) for char in "\r\n"):
@@ -546,7 +600,7 @@ def ui_type(
         if pattern is not None:
             pattern.SetValue(expected)
         else:
-            paste_text(str(text))
+            wrote_with = _rust_type_or_python(str(text))
     except Exception as exc:
         raise InputDeliveryError("Text delivery is uncertain; inspect the editor before retrying") from exc
 
@@ -567,8 +621,7 @@ def ui_type(
     if not _has_focus(control):
         raise InputDeliveryError("Editor lost keyboard focus before submit; text was not submitted")
     try:
-        from .tools import _desktop_press
-        _desktop_press("enter")
+        submit_method = _rust_hotkey_or_python(["enter"])
     except Exception as exc:
         raise InputDeliveryError("Text was entered but Enter delivery failed; do not retry blindly") from exc
     state = {"cleared": False, "echoed": False}
@@ -588,6 +641,7 @@ def ui_type(
             "control": _meta(control),
             "characters": len(str(text)),
             "method": wrote_with,
+            "submit_method": submit_method,
             "submitted": True,
             "composer_cleared": state["cleared"],
             "new_message_visible": state["echoed"],
@@ -622,9 +676,11 @@ def ui_hotkey(keys: list[str], title: str = "") -> str:
     aliases = {"control": "ctrl", "windows": "win", "escape": "esc"}
     _guard_foreground(hwnd)
     _SNAPSHOTS.invalidate(hwnd)
-    from .tools import _desktop_hotkey
-    _desktop_hotkey([aliases.get(value, value) for value in normalized])
-    return "DELIVERED: " + json.dumps({"action": "ui_hotkey", "window_hwnd": hwnd, "keys": normalized}, ensure_ascii=False)
+    method = _rust_hotkey_or_python([aliases.get(value, value) for value in normalized])
+    return "DELIVERED: " + json.dumps(
+        {"action": "ui_hotkey", "window_hwnd": hwnd, "keys": normalized, "method": method},
+        ensure_ascii=False,
+    )
 
 
 def ui_wait_state(target: str, title: str = "", control_type: str = "", state: str = "visible",
