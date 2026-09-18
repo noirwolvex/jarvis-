@@ -206,6 +206,180 @@ def _parse_app_chain(rest: str, start_index: int) -> list[FastStep] | None:
     return steps if len(steps) <= 32 else None
 
 
+
+_ORDINAL_VALUES = {
+    "first": 1,
+    "second": 2,
+    "third": 3,
+    "fourth": 4,
+    "fifth": 5,
+    "sixth": 6,
+    "seventh": 7,
+    "eighth": 8,
+    "ninth": 9,
+    "tenth": 10,
+}
+
+
+def _ordinal_value(value: str) -> int | None:
+    text = str(value or "").strip().casefold()
+    if text in _ORDINAL_VALUES:
+        return _ORDINAL_VALUES[text]
+    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", text)
+    if not match:
+        return None
+    number = int(match.group(1))
+    return number if 1 <= number <= 20 else None
+
+
+def _ordered_clauses(text: str) -> list[str]:
+    # Split only on explicit sequencing boundaries. A comma inside normal prose/query text
+    # is preserved unless the following text begins another executable clause.
+    pieces = re.split(
+        r"\s+(?:and\s+then|then)\s+|"
+        r"\s*,\s*(?=(?:then\s+)?(?:open|launch|start|search|google|navigate|go)\b)",
+        text,
+        flags=re.IGNORECASE,
+    )
+    cleaned = []
+    for piece in pieces:
+        value = re.sub(r"^then\s+", "", piece.strip(), flags=re.IGNORECASE).strip(" ,")
+        if value:
+            cleaned.append(value)
+    return cleaned
+
+
+def _safe_fast_text(raw: str) -> str | None:
+    value = str(raw or "").strip()
+    if len(value) >= 2 and value[0] == value[-1] and value[0] in {'"', "'"}:
+        value = value[1:-1]
+    if not value or len(value) > 4096 or "\0" in value:
+        return None
+    return value
+
+
+def _compile_ordered_clause(clause: str) -> list[FastStep] | None:
+    value = re.sub(r"\s+", " ", clause).strip(" ,.;")
+    if not value:
+        return None
+
+    # WhatsApp: launch + ordinal chat selection + optional typing. This is deliberately
+    # strict so an unknown WhatsApp action is never silently swallowed by the fast path.
+    match = re.fullmatch(
+        r"(?:open|launch|start)\s+(?:the\s+)?whatsapp(?:\s+(?:app|application))?"
+        r"\s+(?:and\s+)?(?:press|click|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
+        r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
+        r"\s+(?:chat|conversation)"
+        r"(?:\s+(?:and\s+)?(?:write|type)(?:\s+text)?\s+(?P<text>.+))?",
+        value,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        position = _ordinal_value(match.group("ordinal"))
+        if position is None:
+            return None
+        steps = [
+            FastStep("tmp-1", "Open and verify WhatsApp", "launch_installed_app",
+                     {"query": "WhatsApp", "timeout_seconds": 12}),
+            FastStep("tmp-2", f"Select WhatsApp chat {position}",
+                     "whatsapp_select_chat_native", {"position": position}),
+        ]
+        if match.group("text") is not None:
+            text_value = _safe_fast_text(match.group("text"))
+            if text_value is None or _EXTRA_ACTION.search(text_value):
+                return None
+            steps.append(FastStep("tmp-3", "Type requested WhatsApp text through Rust",
+                                  "ui_type_native", {"text": text_value}))
+        return steps
+
+    # Google search in the middle or at the end of a larger mission.
+    match = re.fullmatch(
+        r"(?:(?:open|launch|start)\s+(?:the\s+)?(?:google|google\s+chrome|chrome)"
+        r"(?:\s+(?:browser|app|application))?\s+(?:and\s+)?)?"
+        r"(?:google\s+)?search(?:\s+for)?\s+(?P<query>.+)",
+        value,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        query = match.group("query").strip(" ,.;")
+        if not query or len(query) > 500 or _EXTRA_ACTION.search(query) or "\0" in query:
+            return None
+        return [FastStep("tmp-1", f"Search Google for {query}", "google_search",
+                         {"query": query, "new_tab": False})]
+
+    # A direct URL belongs to the managed browser path, not app launching.
+    match = re.fullmatch(r"(?:open|navigate(?:\s+to)?|go\s+to)\s+(https?://\S+)", value, re.IGNORECASE)
+    if match:
+        return [FastStep("tmp-1", f"Open {match.group(1)}", "browser_navigate",
+                         {"url": match.group(1)})]
+
+    # Open one application and optionally type into its unique semantic editor.
+    match = re.fullmatch(
+        r"(?:open|launch|start)\s+(?:the\s+)?(?P<app>.+?)"
+        r"(?:\s+(?:app|application))?\s+(?:and\s+)(?:write|type)(?:\s+text)?\s+(?P<text>.+)",
+        value,
+        re.IGNORECASE | re.DOTALL,
+    )
+    if match:
+        try:
+            app = _clean_app_name(match.group("app"))
+        except ValueError:
+            return None
+        text_value = _safe_fast_text(match.group("text"))
+        if text_value is None or _EXTRA_ACTION.search(text_value):
+            return None
+        if app.casefold() in {"google", "chrome", "google chrome"}:
+            return None
+        return [
+            FastStep("tmp-1", f"Open and verify {app}", "launch_installed_app",
+                     {"query": app, "timeout_seconds": 12}),
+            FastStep("tmp-2", f"Type requested text in {app}", "ui_type_native",
+                     {"text": text_value}),
+        ]
+
+    match = re.fullmatch(
+        r"(?:open|launch|start)\s+(?:the\s+)?(?P<app>.+?)(?:\s+(?:app|application))?",
+        value,
+        re.IGNORECASE,
+    )
+    if match:
+        try:
+            app = _clean_app_name(match.group("app"))
+        except ValueError:
+            return None
+        if app.casefold() in {"google", "chrome", "google chrome"}:
+            return None
+        if _EXTRA_ACTION.search(app):
+            return None
+        return [FastStep("tmp-1", f"Open and verify {app}", "launch_installed_app",
+                         {"query": app, "timeout_seconds": 12})]
+
+    return None
+
+
+def _compile_ordered_mixed_mission(text: str) -> list[FastStep] | None:
+    clauses = _ordered_clauses(text)
+    if len(clauses) < 2:
+        return None
+    compiled: list[FastStep] = []
+    for clause in clauses:
+        clause_steps = _compile_ordered_clause(clause)
+        if not clause_steps:
+            return None
+        for step in clause_steps:
+            if len(compiled) >= 32:
+                return None
+            index = len(compiled) + 1
+            compiled.append(FastStep(
+                id=f"fast-{index}",
+                description=step.description,
+                tool=step.tool,
+                arguments=dict(step.arguments),
+            ))
+    return compiled
+
+
+
 def compile_fast_mission(goal: str) -> list[FastStep] | None:
     """Compile only fully understood low-ambiguity missions; return None for intelligent fallback."""
     if not _enabled():
@@ -220,6 +394,10 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
         base_text, trailing_type = _split_trailing_type(text)
     except ValueError:
         return None
+
+    mixed = _compile_ordered_mixed_mission(text)
+    if mixed is not None:
+        return mixed
 
     simple = _simple_semantic_steps(base_text)
     if simple:
@@ -330,10 +508,12 @@ def execute_fast_mission(
         agent.orchestrator.update_step(step.id, "running")
         emit and emit(AgentEvent("tool", f"Fast step: {step.description}", step.tool))
         started = time.perf_counter()
+        mutation = agent._is_mutation(step.tool)
+        if mutation:
+            agent.orchestrator.start_action(step.tool, dict(step.arguments))
         approved = agent.approval(step.tool, step.arguments)
         result = agent._execute_tool(step.tool, dict(step.arguments), approved=approved)
         duration_ms = (time.perf_counter() - started) * 1000.0
-        mutation = agent._is_mutation(step.tool)
         mutation = mutation and not str(result).startswith(
             ("PERMISSION_DENIED", "ERROR: Observe the last")
         )
