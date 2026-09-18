@@ -28,6 +28,18 @@ class LiveDesktopTests(unittest.TestCase):
         monitor.stop()
         self.assertIsNone(monitor.latest())
 
+    def test_busy_device_action_skips_capture_without_error(self):
+        busy = threading.Event()
+        capture = Mock(return_value=(Image.new("RGB", (100, 100)), 1, (0, 0)))
+        monitor = LiveDesktopMonitor(lambda: False, capture=capture, busy=busy.is_set)
+        busy.set()
+        self.assertFalse(monitor.poll())
+        capture.assert_not_called()
+        self.assertEqual((monitor.captures, monitor.errors), (0, 0))
+        busy.clear()
+        self.assertTrue(monitor.poll())
+        capture.assert_called_once()
+
     def test_scene_and_foreground_changes_replace_frame(self):
         blue, red = Image.new("RGB", (100, 100), "blue"), Image.new("RGB", (100, 100), "red")
         capture = Mock(side_effect=[(blue, 1, (0, 0)), (red, 1, (0, 0)), (red, 2, (0, 0))])
