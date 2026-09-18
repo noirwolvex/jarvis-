@@ -64,6 +64,42 @@ class FastMissionCompilerTests(unittest.TestCase):
         self.assertEqual(steps[1].arguments["query"].casefold(), "discord")
         self.assertEqual(steps[2].arguments["query"].casefold(), "whatsapp")
 
+    def test_reported_mixed_whatsapp_apps_google_chain_compiles_without_model(self) -> None:
+        steps = compile_fast_mission(
+            "open WhatsApp and press the first chat, then open Discord, then open Instagram, then open Google and search for cats"
+        )
+        self.assertIsNotNone(steps)
+        assert steps is not None
+        self.assertEqual(
+            [step.tool for step in steps],
+            [
+                "launch_installed_app",
+                "whatsapp_select_chat_native",
+                "launch_installed_app",
+                "launch_installed_app",
+                "google_search",
+            ],
+        )
+        self.assertEqual(steps[0].arguments["query"], "WhatsApp")
+        self.assertEqual(steps[1].arguments, {"position": 1})
+        self.assertEqual(steps[2].arguments["query"], "Discord")
+        self.assertEqual(steps[3].arguments["query"], "Instagram")
+        self.assertEqual(steps[4].arguments, {"query": "cats", "new_tab": False})
+
+    def test_mixed_chat_clause_requires_whatsapp_context(self) -> None:
+        self.assertIsNone(
+            compile_fast_mission(
+                "open Discord, then press the first chat, then open Instagram"
+            )
+        )
+
+    def test_unknown_mixed_side_effect_falls_back_to_model(self) -> None:
+        self.assertIsNone(
+            compile_fast_mission(
+                "open Discord, then send hello, then open Instagram"
+            )
+        )
+
     def test_app_only_chain_compiles_without_model_round_trip(self) -> None:
         steps = compile_fast_mission("open discord app and then open whatsapp app")
         self.assertIsNotNone(steps)
