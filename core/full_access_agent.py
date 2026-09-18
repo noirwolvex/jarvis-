@@ -62,7 +62,7 @@ _BROWSER_PROFILE_EXPLICIT = {
     "open_application_and_type",
     "open_url",
 }
-_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "discord_", "youtube_", "workflow_")
+_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "discord_", "whatsapp_", "youtube_", "workflow_")
 
 
 def _chrome_tab_rows() -> list[dict]:
