@@ -189,8 +189,9 @@ class FullAccessJarvisAgent(JarvisAgent):
                 except ValueError as exc:
                     return f"ERROR: {exc}"
             device_busy = mutation or raw_input or name == "screen_observe"
-            if device_busy:
-                self._device_action_active.set()
+            activity = getattr(self, "_device_action_active", None)
+            if device_busy and activity is not None:
+                activity.set()
             try:
                 if mutation:
                     # This is the single durable write-intent point. Callers must not
@@ -198,8 +199,8 @@ class FullAccessJarvisAgent(JarvisAgent):
                     self.orchestrator.start_action(name, arguments)
                 result = self.tools.execute(name, arguments, approved)
             finally:
-                if device_busy:
-                    self._device_action_active.clear()
+                if device_busy and activity is not None:
+                    activity.clear()
             if name == "screen_observe" and result.startswith("VERIFIED: "):
                 self._desktop_observation.observe(json.loads(result[len("VERIFIED: "):]))
             elif name in _DESKTOP_SCENE_MUTATION_TOOLS or name in _FOCUSED_NATIVE_BURST_TOOLS:
