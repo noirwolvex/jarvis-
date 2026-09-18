@@ -75,7 +75,7 @@ type WorkerState = {
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-const WORKER_REVISION = 5;
+export const FULL_ACCESS_WORKER_REVISION = 5;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
@@ -223,7 +223,7 @@ function startWorker(): WorkerState {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", JARVIS_ACCESS_MODE: "standard", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "true" },
   });
-  const state: WorkerState = { revision: WORKER_REVISION, child, buffer: "", stderr: "", pending: new Map() };
+  const state: WorkerState = { revision: FULL_ACCESS_WORKER_REVISION, child, buffer: "", stderr: "", pending: new Map() };
   globalState.jarvisFullAccessWorkerV1 = state;
 
   child.stdout.setEncoding("utf8");
@@ -262,7 +262,7 @@ function startWorker(): WorkerState {
 async function runPersistent(title: string, signal?: AbortSignal, onProgress?: (kind: string, message: string) => void, allowShell = false): Promise<FullAccessMissionResult> {
   if (signal?.aborted) return Promise.reject(new Error("Full Access mission aborted"));
   const previous = globalState.jarvisFullAccessWorkerV1;
-  if (previous && previous.revision !== WORKER_REVISION && previous.child.exitCode === null) {
+  if (previous && previous.revision !== FULL_ACCESS_WORKER_REVISION && previous.child.exitCode === null) {
     if (previous.pending.size) throw new Error("An older worker still has an active mission; stop it before upgrading");
     previous.onEmergency = undefined;
     await new Promise<void>((resolveExit, rejectExit) => {
