@@ -65,8 +65,23 @@ def _native_input_probe(message: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(text, str):
             raise ValueError("Native keyboard probe requires text")
         result = client.type_text(text, status)
+    elif kind == "press_key":
+        key = probe.get("key")
+        if not isinstance(key, str) or not key.strip():
+            raise ValueError("Native key probe requires a key")
+        result = client.press_key(key, status)
+    elif kind == "hotkey":
+        keys = probe.get("keys")
+        if (
+            not isinstance(keys, list)
+            or not keys
+            or len(keys) > 8
+            or any(not isinstance(key, str) or not key.strip() for key in keys)
+        ):
+            raise ValueError("Native hotkey probe requires 1-8 keys")
+        result = client.hotkey(keys, status)
     else:
-        raise ValueError("Native input probe kind must be click or type_text")
+        raise ValueError("Native input probe kind must be click, type_text, press_key, or hotkey")
 
     if result.get("executed") is not True or result.get("simulation") is not False:
         raise RuntimeError("Rust daemon did not confirm native execution")
