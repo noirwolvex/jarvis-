@@ -29,7 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     let pki = common::Pki::new();
     pki.write(&directory);
     let grant_ms = if native {
-        30 * 60 * 1000
+        24 * 60 * 60 * 1000
     } else {
         5 * 60 * 1000
     };
@@ -57,7 +57,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .write_all(&serde_json::to_vec_pretty(&config)?)?;
     if native {
         println!(
-            "Development PKI + native engine config written; grants expire in thirty minutes. Verify the actual Rust display id before use on multi-monitor systems. Windows: restrict this directory's ACL to your user."
+            "Development PKI + native engine config written; grants expire in twenty-four hours. Verify the actual Rust display id before use on multi-monitor systems. Windows: restrict this directory's ACL to your user."
         );
     } else {
         println!(
