@@ -364,47 +364,116 @@ def live_qualify() -> int:
         if not isinstance(native, dict) or native.get("backend") != "rust" or native.get("rust_input_ready") is not True:
             raise RuntimeError(f"Running Python worker is not connected to Rust: {ready}")
 
+        import ctypes
         import tkinter as tk
+
+        # Tk and JARVIS coordinate evidence must describe the same physical-pixel virtual
+        # desktop. This call must happen before creating the qualification window.
+        try:
+            ctypes.windll.user32.SetProcessDpiAwarenessContext(ctypes.c_void_p(-4))
+        except (AttributeError, OSError):
+            pass
+
+        displays = engine.get("daemon", {}).get("displays")
+        if not isinstance(displays, list) or not displays:
+            raise RuntimeError(f"Rust daemon exposed no displays for live qualification: {engine}")
 
         root = tk.Tk()
         root.title(f"JARVIS Rust Live Qualification {uuid.uuid4().hex[:6]}")
-        root.geometry("680x320+140+140")
+        root.geometry("640x300")
         root.attributes("-topmost", True)
-        tk.Label(root, text="JARVIS X — supervised Rust native input qualification", font=("Segoe UI", 13)).pack(pady=(28, 18))
-        entry = tk.Entry(root, width=52, font=("Consolas", 12))
-        entry.pack(pady=12)
+        tk.Label(root, text="JARVIS X — supervised Rust native input qualification", font=("Segoe UI", 13)).pack(pady=(24, 14))
+        entry = tk.Entry(root, width=48, font=("Consolas", 12))
+        entry.pack(pady=10)
         clicked = {"value": False}
 
         def mark_clicked() -> None:
             clicked["value"] = True
 
         button = tk.Button(root, text="Rust mouse target", command=mark_clicked, width=24)
-        button.pack(pady=22)
-        root.lift()
-        root.focus_force()
-        root.update()
-        time.sleep(0.2)
+        button.pack(pady=18)
         root.update()
 
-        ex = entry.winfo_rootx() + entry.winfo_width() // 2
-        ey = entry.winfo_rooty() + entry.winfo_height() // 2
-        _worker_probe(worker, {"kind": "click", "x": ex, "y": ey})
-        root.update()
-        if root.focus_get() is not entry:
-            raise RuntimeError("Independent mouse verification failed: Rust click did not focus the target entry")
+        user32 = ctypes.windll.user32
+        GA_ROOT = 2
+        SWP_NOZORDER = 0x0004
+        SWP_SHOWWINDOW = 0x0040
+        raw_hwnd = int(root.winfo_id())
+        root_hwnd = int(user32.GetAncestor(raw_hwnd, GA_ROOT) or raw_hwnd)
+        qualified: list[dict[str, Any]] = []
 
-        token = f"RUST-LIVE-{uuid.uuid4().hex[:10]}"
-        _worker_probe(worker, {"kind": "type_text", "text": token})
-        root.update()
-        if entry.get() != token:
-            raise RuntimeError(f"Independent keyboard verification failed: expected {token!r}, got {entry.get()!r}")
+        for row in displays:
+            if not isinstance(row, dict):
+                continue
+            try:
+                display_id = int(row["id"])
+                left, top = int(row["x"]), int(row["y"])
+                width, height = int(row["width"]), int(row["height"])
+            except (KeyError, TypeError, ValueError):
+                continue
+            if width < 200 or height < 160:
+                continue
 
-        bx = button.winfo_rootx() + button.winfo_width() // 2
-        by = button.winfo_rooty() + button.winfo_height() // 2
-        _worker_probe(worker, {"kind": "click", "x": bx, "y": by})
-        root.update()
-        if not clicked["value"]:
-            raise RuntimeError("Independent mouse verification failed: Rust click did not invoke the target button")
+            window_width = min(640, max(180, width - 40))
+            window_height = min(300, max(140, height - 40))
+            target_x = left + max(10, (width - window_width) // 2)
+            target_y = top + max(10, (height - window_height) // 2)
+            moved = user32.SetWindowPos(
+                root_hwnd,
+                0,
+                target_x,
+                target_y,
+                window_width,
+                window_height,
+                SWP_NOZORDER | SWP_SHOWWINDOW,
+            )
+            if not moved:
+                raise RuntimeError(f"Could not move live qualification window to display {display_id}")
+            root.lift()
+            root.focus_force()
+            root.update()
+            time.sleep(0.12)
+            root.update()
+
+            entry.delete(0, tk.END)
+            clicked["value"] = False
+            ex = entry.winfo_rootx() + entry.winfo_width() // 2
+            ey = entry.winfo_rooty() + entry.winfo_height() // 2
+            if not (left <= ex < left + width and top <= ey < top + height):
+                raise RuntimeError(
+                    f"Qualification target ({ex},{ey}) is not inside display {display_id} "
+                    f"({left},{top},{width},{height})"
+                )
+
+            _worker_probe(worker, {"kind": "click", "x": ex, "y": ey})
+            root.update()
+            if root.focus_get() is not entry:
+                raise RuntimeError(
+                    f"Independent mouse verification failed on display {display_id}: Rust click did not focus the target entry"
+                )
+
+            token = f"RUST-LIVE-{display_id}-{uuid.uuid4().hex[:8]}"
+            _worker_probe(worker, {"kind": "type_text", "text": token})
+            root.update()
+            if entry.get() != token:
+                raise RuntimeError(
+                    f"Independent keyboard verification failed on display {display_id}: expected {token!r}, got {entry.get()!r}"
+                )
+
+            bx = button.winfo_rootx() + button.winfo_width() // 2
+            by = button.winfo_rooty() + button.winfo_height() // 2
+            _worker_probe(worker, {"kind": "click", "x": bx, "y": by})
+            root.update()
+            if not clicked["value"]:
+                raise RuntimeError(
+                    f"Independent mouse verification failed on display {display_id}: Rust click did not invoke the target button"
+                )
+            qualified.append({"id": display_id, "x": left, "y": top, "width": width, "height": height})
+
+        if len(qualified) != len([row for row in displays if isinstance(row, dict)]):
+            raise RuntimeError(
+                f"Not every reported display was qualified: qualified={qualified}, reported={displays}"
+            )
 
         print(
             "LIVE_RUST_QUALIFICATION_OK "
@@ -416,6 +485,7 @@ def live_qualify() -> int:
                     "keyboard_token_verified": True,
                     "mouse_focus_verified": True,
                     "mouse_button_verified": True,
+                    "qualified_displays": qualified,
                 }
             ),
             flush=True,
