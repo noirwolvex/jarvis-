@@ -147,8 +147,10 @@ def desktop_double_click(x: int, y: int) -> str:
 
 
 def wait_seconds(seconds: float) -> str:
+    from .ui_state import cancellable_delay
+
     seconds = max(0.0, min(float(seconds), 30.0))
-    time.sleep(seconds)
+    cancellable_delay(seconds)
     return f"Waited {seconds:.2f} seconds"
 
 
