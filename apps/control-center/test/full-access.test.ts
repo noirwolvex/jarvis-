@@ -133,6 +133,9 @@ test("completion rejects missing evidence and retains actionable failure checkpo
   assert.throws(() => validateMissionResult({ ...result, tools_used: undefined }), /executed mission/);
   assert.throws(() => validateMissionResult({ ...result, incomplete_steps: ["unfinished"] }), /evidence/);
   assert.equal(validateMissionResult({ ...result, execution_metrics: { model_calls: 2, workflow_batches: 1 } }).execution_metrics?.model_calls, 2);
+  const graph = [{ id: "step-1", action: "launch", description: "Open WhatsApp", dependencies: [], status: "COMPLETED", execution_backend: "DIRECT" }];
+  assert.equal(validateMissionResult({ ...result, task_graph: graph }).task_graph?.[0]?.execution_backend, "DIRECT");
+  assert.throws(() => validateMissionResult({ ...result, task_graph: [{ id: 1 }] }), /task graph/);
   assert.throws(() => validateMissionResult({ ...result, execution_metrics: { model_calls: -1 } }), /metrics/);
   assert.throws(() => validateMissionResult({ ok: false, result: "Provider timeout", task_id: "task-1-01234567" }), /Provider timeout.*checkpoint/);
 });
