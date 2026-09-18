@@ -200,6 +200,9 @@ def run_agent_mission(
         "mission_completed": mission_completed,
         "high_risk_requires_separate_approval": True,
         "execution_metrics": dict(current.metrics) if current else {},
+        "task_graph": list(summary.get("task_graph", [])),
+        "engine_visibility": list(summary.get("engine_visibility", [])),
+        "recovery_history": list(summary.get("recovery_history", [])),
     }
 
 
