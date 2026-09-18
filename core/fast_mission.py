@@ -328,7 +328,7 @@ def _compile_ordered_clause(clause: str) -> list[FastStep] | None:
         text_value = _safe_fast_text(match.group("text"))
         if text_value is None or _EXTRA_ACTION.search(text_value):
             return None
-        if app.casefold() in {"google", "chrome", "google chrome"}:
+        if app.casefold() in {"google", "chrome", "google chrome", "whatsapp"}:
             return None
         return [
             FastStep("tmp-1", f"Open and verify {app}", "launch_installed_app",
@@ -390,14 +390,14 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     if "\0" in text:
         return None
 
+    mixed = _compile_ordered_mixed_mission(text)
+    if mixed is not None:
+        return mixed
+
     try:
         base_text, trailing_type = _split_trailing_type(text)
     except ValueError:
         return None
-
-    mixed = _compile_ordered_mixed_mission(text)
-    if mixed is not None:
-        return mixed
 
     simple = _simple_semantic_steps(base_text)
     if simple:
