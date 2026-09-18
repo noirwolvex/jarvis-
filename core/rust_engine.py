@@ -167,12 +167,14 @@ class RustDaemonClient:
         self._socket: ssl.SSLSocket | None = None
         self._session = ""
         self._sequence = 0
+        self._keyboard_frame_cache: tuple[int, int, int, dict[str, Any], float] | None = None
 
     def close(self) -> None:
         with self._lock:
             sock, self._socket = self._socket, None
             self._session = ""
             self._sequence = 0
+            self._keyboard_frame_cache = None
             if sock is not None:
                 try:
                     sock.close()
@@ -402,12 +404,37 @@ class RustDaemonClient:
         display_id = int(selected.get("id", -1))
         if display_id < 0:
             raise RustEngineUnavailable("Rust daemon returned an invalid display id")
+        # Keyboard/wheel actions do not use frame pixels or coordinates. Reuse one
+        # very recent authorized frame across a tight input burst instead of forcing
+        # xcap.capture_image() before every key. The daemon still checks the frame's
+        # own <2s monotonic TTL and independently verifies HWND+PID before each action.
+        now = time.monotonic()
+        cached = self._keyboard_frame_cache
+        if cached is not None:
+            cached_display, cached_hwnd, cached_pid, cached_frame, cached_at = cached
+            if (
+                cached_display == display_id
+                and cached_hwnd == foreground["hwnd"]
+                and cached_pid == foreground["process_id"]
+                and now - cached_at < 0.75
+                and isinstance(cached_frame.get("id"), str)
+            ):
+                return display_id, foreground, cached_frame
+
         captured_foreground, frame = self._input_context_for_display(state, display_id)
         if (
             captured_foreground["hwnd"] != foreground["hwnd"]
             or captured_foreground["process_id"] != foreground["process_id"]
         ):
+            self._keyboard_frame_cache = None
             raise RustEngineUnavailable("Foreground changed while preparing keyboard input")
+        self._keyboard_frame_cache = (
+            display_id,
+            int(foreground["hwnd"]),
+            int(foreground["process_id"]),
+            frame,
+            now,
+        )
         return display_id, captured_foreground, frame
 
     def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -427,6 +454,7 @@ class RustDaemonClient:
         count = int(clicks)
         if not 1 <= count <= 3:
             raise ValueError("Rust click count must be between 1 and 3")
+        self._keyboard_frame_cache = None
         state = status or self.status()
         display = self._display_for_point(state, int(x), int(y))
         display_id = int(display["id"])
@@ -452,6 +480,7 @@ class RustDaemonClient:
         y: int,
         status: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
+        self._keyboard_frame_cache = None
         state = status or self.status()
         display = self._display_for_point(state, int(x), int(y))
         display_id = int(display["id"])
@@ -485,6 +514,7 @@ class RustDaemonClient:
         seconds = float(duration)
         if not 0.05 <= seconds <= 2.0:
             raise ValueError("Rust drag duration must be between 0.05 and 2 seconds")
+        self._keyboard_frame_cache = None
         state = status or self.status()
         start_display = self._display_for_point(state, int(start_x), int(start_y))
         end_display = self._display_for_point(state, int(end_x), int(end_y))
