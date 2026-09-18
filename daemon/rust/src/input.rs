@@ -602,8 +602,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Mouse, Settings};
-
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -614,17 +612,13 @@ impl InputController for NativeInput {
             return Err(Error::Limit("mouse click count"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        windows_pointer::move_to(x, y)?;
+        windows_input::move_to(x, y)?;
         for index in 0..clicks {
             emergency.check()?;
             verify_foreground(foreground)?;
-            input
-                .button(native_button(button), Direction::Click)
-                .map_err(|_| Error::Operation("click failed".into()))?;
+            windows_input::click(button)?;
             if index + 1 < clicks {
                 std::thread::sleep(Duration::from_millis(45));
             }
@@ -649,7 +643,7 @@ impl InputController for NativeInput {
         verify_foreground(foreground)?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        windows_pointer::move_to(x, y)
+        windows_input::move_to(x, y)
     }
 
     fn drag(
@@ -664,8 +658,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Mouse, Settings};
-
         validate_frame(frame, start_x, start_y, emergency)?;
         validate_frame(frame, end_x, end_y, emergency)?;
         if frame.simulation {
@@ -677,14 +669,10 @@ impl InputController for NativeInput {
             return Err(Error::Limit("drag duration"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
-        windows_pointer::move_to(start_x, start_y)?;
+        windows_input::move_to(start_x, start_y)?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .button(native_button(button), Direction::Press)
-            .map_err(|_| Error::Operation("mouse button press failed".into()))?;
+        windows_input::button_down(button)?;
 
         let steps = ((duration_ms.max(16) + 15) / 16).clamp(1, 125);
         let mut movement_result = Ok(());
@@ -699,7 +687,7 @@ impl InputController for NativeInput {
             let progress = step as f64 / steps as f64;
             let x = start_x as f64 + (end_x - start_x) as f64 * progress;
             let y = start_y as f64 + (end_y - start_y) as f64 * progress;
-            if let Err(error) = windows_pointer::move_to(x.round() as i32, y.round() as i32) {
+            if let Err(error) = windows_input::move_to(x.round() as i32, y.round() as i32) {
                 movement_result = Err(error);
                 break;
             }
@@ -708,9 +696,7 @@ impl InputController for NativeInput {
             }
         }
 
-        let release_result = input
-            .button(native_button(button), Direction::Release)
-            .map_err(|_| Error::Operation("mouse button release failed".into()));
+        let release_result = windows_input::button_up(button);
         movement_result?;
         release_result
     }
@@ -722,8 +708,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Axis, Enigo, Mouse, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -734,19 +718,14 @@ impl InputController for NativeInput {
             return Err(Error::Limit("scroll steps"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         let mut remaining = clicks;
         while remaining != 0 {
             emergency.check()?;
             verify_foreground(foreground)?;
             let magnitude = remaining.abs().min(8);
             let chunk = if remaining > 0 { magnitude } else { -magnitude };
-            // Public JARVIS semantics follow PyAutoGUI: positive means scroll up.
-            // Enigo's vertical axis uses positive for down, so invert the sign.
-            input
-                .scroll(-chunk, Axis::Vertical)
-                .map_err(|_| Error::Operation("scroll failed".into()))?;
+            // Public JARVIS semantics follow PyAutoGUI/Windows: positive means scroll up.
+            windows_input::scroll(chunk)?;
             remaining -= chunk;
         }
         Ok(())
@@ -759,23 +738,17 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Keyboard, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
                 "simulation evidence cannot authorize native input",
             ));
         }
-        let key = native_key(key)?;
+        validate_key_name(key)?;
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .key(key, Direction::Click)
-            .map_err(|_| Error::Operation("keyboard key press failed".into()))
+        windows_input::press_key(key)
     }
 
     fn hotkey(
@@ -785,8 +758,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Direction, Enigo, Keyboard, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         validate_hotkey(keys)?;
         if frame.simulation {
@@ -794,38 +765,10 @@ impl InputController for NativeInput {
                 "simulation evidence cannot authorize native input",
             ));
         }
-        let mapped: Vec<_> = keys
-            .iter()
-            .map(|value| native_key(value))
-            .collect::<Result<Vec<_>>>()?;
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
-        let mut pressed = Vec::new();
-        for key in &mapped {
-            if let Err(error) = emergency
-                .check()
-                .and_then(|_| verify_foreground(foreground))
-            {
-                for prior in pressed.iter().rev() {
-                    let _ = input.key(*prior, Direction::Release);
-                }
-                return Err(error);
-            }
-            if input.key(*key, Direction::Press).is_err() {
-                for prior in pressed.iter().rev() {
-                    let _ = input.key(*prior, Direction::Release);
-                }
-                return Err(Error::Operation("hotkey press failed".into()));
-            }
-            pressed.push(*key);
-        }
-        for key in pressed.iter().rev() {
-            input
-                .key(*key, Direction::Release)
-                .map_err(|_| Error::Operation("hotkey release failed".into()))?;
-        }
-        Ok(())
+        emergency.check()?;
+        verify_foreground(foreground)?;
+        windows_input::hotkey(keys)
     }
 
     fn type_text(
@@ -835,8 +778,6 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Enigo, Keyboard, Settings};
-
         validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -847,13 +788,9 @@ impl InputController for NativeInput {
             return Err(Error::Limit("keyboard text"));
         }
         verify_foreground(foreground)?;
-        let mut input = Enigo::new(&Settings::default())
-            .map_err(|_| Error::Operation("input connection failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        input
-            .text(text)
-            .map_err(|_| Error::Operation("keyboard input failed".into()))
+        windows_input::type_text(text, foreground, emergency)
     }
 }
 
