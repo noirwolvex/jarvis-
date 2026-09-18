@@ -127,10 +127,15 @@ impl Policy {
             Action::Capture { display_id } => Scope::Observe {
                 display_id: *display_id,
             },
-            Action::Click { display_id, .. } | Action::TypeText { display_id, .. } => {
-                Scope::Input {
-                    display_id: *display_id,
-                }
+            Action::Click { display_id, .. }
+            | Action::ClickButton { display_id, .. }
+            | Action::PointerMove { display_id, .. }
+            | Action::Drag { display_id, .. }
+            | Action::Scroll { display_id, .. }
+            | Action::PressKey { display_id, .. }
+            | Action::Hotkey { display_id, .. }
+            | Action::TypeText { display_id, .. } => Scope::Input {
+                display_id: *display_id,
             }
             Action::RunProcess { executable_id, .. } => Scope::Process {
                 executable_id: executable_id.clone(),
