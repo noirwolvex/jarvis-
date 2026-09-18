@@ -287,6 +287,7 @@ pub fn current_foreground_binding() -> Result<Option<ForegroundBinding>> {
     }
 }
 
+#[cfg(all(feature = "native", target_os = "windows"))]
 fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
     validate_binding(expected)?;
     let actual =
