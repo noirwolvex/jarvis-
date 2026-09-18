@@ -104,6 +104,34 @@ class RustEngineTests(unittest.TestCase):
         with self.assertRaises(RustEngineUnavailable):
             client._foreground({"foreground": {"hwnd": 0, "process_id": 42, "title": "Fixture"}})
 
+    def test_keyboard_context_prefers_foreground_window_display(self) -> None:
+        config = RustEngineConfig(
+            host="127.0.0.1",
+            port=7443,
+            server_name="localhost",
+            ca_path=Path("ca.pem"),
+            client_cert_path=Path("client.pem"),
+            client_key_path=Path("client-key.pem"),
+            observe_capabilities={0: "observe-0", 1: "observe-1"},
+            input_capabilities={0: "input-0", 1: "input-1"},
+        )
+        client = RustDaemonClient(config)
+        status = {
+            "displays": [
+                {"id": 0, "x": 0, "y": 0, "width": 1920, "height": 1080},
+                {"id": 1, "x": 1920, "y": 0, "width": 1920, "height": 1080},
+            ],
+            "foreground": {"hwnd": 1001, "process_id": 42, "title": "Fixture"},
+        }
+        frame = {"id": "frame-1"}
+        with patch.object(client, "_foreground_center", return_value=(2200, 400)), \
+             patch.object(client, "_input_context_for_display", return_value=(status["foreground"], frame)) as context:
+            display_id, foreground, selected_frame = client._keyboard_input_context(status)
+        self.assertEqual(display_id, 1)
+        self.assertEqual(foreground["hwnd"], 1001)
+        self.assertEqual(selected_frame, frame)
+        context.assert_called_once_with(status, 1)
+
     def test_expanded_client_actions_bind_fresh_frame_and_input_capability(self) -> None:
         config = RustEngineConfig(
             host="127.0.0.1",
