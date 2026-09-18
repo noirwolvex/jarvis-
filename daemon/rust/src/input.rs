@@ -447,7 +447,16 @@ mod windows_input {
 
     pub fn click(button: MouseButton) -> Result<()> {
         let (down, up) = button_flags(button);
-        send(&[mouse_input(down, 0), mouse_input(up, 0)], "mouse click")
+        match send(&[mouse_input(down, 0), mouse_input(up, 0)], "mouse click") {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                // A short SendInput write may have delivered only the button-down event.
+                // Always issue a best-effort release so a failed click cannot leave the
+                // user's physical pointer logically held down.
+                let _ = send(&[mouse_input(up, 0)], "mouse click cleanup");
+                Err(error)
+            }
+        }
     }
 
     pub fn button_down(button: MouseButton) -> Result<()> {
@@ -519,13 +528,22 @@ mod windows_input {
 
     pub fn press_key(value: &str) -> Result<()> {
         let (key, flags) = virtual_key(value)?;
-        send(
+        match send(
             &[
                 keyboard_input(key, 0, flags),
                 keyboard_input(key, 0, flags | KEYEVENTF_KEYUP),
             ],
             "keyboard key press",
-        )
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => {
+                let _ = send(
+                    &[keyboard_input(key, 0, flags | KEYEVENTF_KEYUP)],
+                    "keyboard key cleanup",
+                );
+                Err(error)
+            }
+        }
     }
 
     pub fn hotkey(values: &[String]) -> Result<()> {
@@ -572,7 +590,16 @@ mod windows_input {
                     KEYEVENTF_UNICODE | KEYEVENTF_KEYUP,
                 ));
             }
-            send(&events, "unicode keyboard input")?;
+            if let Err(error) = send(&events, "unicode keyboard input") {
+                // Unicode key-down events are not modifiers, but release every unit
+                // defensively if Windows accepted only part of this chunk.
+                let releases = chunk
+                    .iter()
+                    .map(|unit| keyboard_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+                    .collect::<Vec<_>>();
+                let _ = send(&releases, "unicode keyboard cleanup");
+                return Err(error);
+            }
         }
         Ok(())
     }
