@@ -17,6 +17,8 @@ jobs:
       - uses: actions/setup-python@v6
         with:
           python-version: '3.11'
+      - name: Repository secret scan
+        run: python scripts/scan_repository_secrets.py
       - name: Compile Python sources
         run: python -m compileall -q core app tests
       - name: Install test dependencies
