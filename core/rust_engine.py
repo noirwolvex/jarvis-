@@ -330,18 +330,81 @@ class RustDaemonClient:
             raise RustEngineUnavailable("Rust daemon returned an invalid foreground binding")
         return {"process_id": process_id, "title": title}
 
-    def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
-        state = status or self.status()
-        display = self._display_for_point(state, int(x), int(y))
-        display_id = int(display["id"])
+    def _input_context_for_display(
+        self,
+        state: dict[str, Any],
+        display_id: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         foreground = self._foreground(state)
         capture = self.capture(display_id)
         frame = capture.get("frame")
         if not isinstance(frame, dict) or not isinstance(frame.get("id"), str):
             raise RustEngineExecutionError("Rust daemon capture did not return a usable frame")
+        return foreground, frame
+
+    def _keyboard_input_context(
+        self,
+        status: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        state = status or self.status()
+        displays = self._displays(state)
+        if not displays:
+            raise RustEngineUnavailable("Rust daemon did not report any capturable display")
+        display_id = int(displays[0].get("id", -1))
+        if display_id < 0:
+            raise RustEngineUnavailable("Rust daemon returned an invalid display id")
+        foreground, frame = self._input_context_for_display(state, display_id)
+        return display_id, foreground, frame
+
+    def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.click_button(x, y, "left", 1, status)
+
+    def click_button(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        clicks: int = 1,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(button).strip().casefold()
+        if normalized not in {"left", "right", "middle"}:
+            raise ValueError("Rust mouse button must be left, right, or middle")
+        count = int(clicks)
+        if not 1 <= count <= 3:
+            raise ValueError("Rust click count must be between 1 and 3")
+        state = status or self.status()
+        display = self._display_for_point(state, int(x), int(y))
+        display_id = int(display["id"])
+        foreground, frame = self._input_context_for_display(state, display_id)
         return self._request(
             {
-                "kind": "click",
+                "kind": "click_button",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "x": int(x),
+                "y": int(y),
+                "button": normalized,
+                "clicks": count,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def pointer_move(
+        self,
+        x: int,
+        y: int,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        state = status or self.status()
+        display = self._display_for_point(state, int(x), int(y))
+        display_id = int(display["id"])
+        foreground, frame = self._input_context_for_display(state, display_id)
+        return self._request(
+            {
+                "kind": "pointer_move",
                 "display_id": display_id,
                 "frame_id": frame["id"],
                 "x": int(x),
@@ -352,21 +415,113 @@ class RustDaemonClient:
             mutating=True,
         )
 
+    def drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration: float = 0.25,
+        button: str = "left",
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(button).strip().casefold()
+        if normalized not in {"left", "right", "middle"}:
+            raise ValueError("Rust drag button must be left, right, or middle")
+        seconds = float(duration)
+        if not 0.05 <= seconds <= 2.0:
+            raise ValueError("Rust drag duration must be between 0.05 and 2 seconds")
+        state = status or self.status()
+        start_display = self._display_for_point(state, int(start_x), int(start_y))
+        end_display = self._display_for_point(state, int(end_x), int(end_y))
+        if int(start_display["id"]) != int(end_display["id"]):
+            raise RustEngineUnavailable("Rust drag currently requires start and end on the same display")
+        display_id = int(start_display["id"])
+        foreground, frame = self._input_context_for_display(state, display_id)
+        return self._request(
+            {
+                "kind": "drag",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "start_x": int(start_x),
+                "start_y": int(start_y),
+                "end_x": int(end_x),
+                "end_y": int(end_y),
+                "duration_ms": int(round(seconds * 1000)),
+                "button": normalized,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def scroll(
+        self,
+        clicks: int,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        amount = int(clicks)
+        if not -1000 <= amount <= 1000:
+            raise ValueError("Rust scroll requires -1000..1000 wheel steps")
+        display_id, foreground, frame = self._keyboard_input_context(status)
+        return self._request(
+            {
+                "kind": "scroll",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "clicks": amount,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def press_key(
+        self,
+        key: str,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        value = str(key).strip()
+        if not value or len(value) > 32 or "\0" in value:
+            raise ValueError("Rust key name must contain 1-32 safe characters")
+        display_id, foreground, frame = self._keyboard_input_context(status)
+        return self._request(
+            {
+                "kind": "press_key",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "key": value,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def hotkey(
+        self,
+        keys: list[str],
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        values = [str(key).strip() for key in keys]
+        if not 1 <= len(values) <= 8 or any(not key or len(key) > 32 or "\0" in key for key in values):
+            raise ValueError("Rust hotkey requires 1-8 safe key names")
+        display_id, foreground, frame = self._keyboard_input_context(status)
+        return self._request(
+            {
+                "kind": "hotkey",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "keys": values,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
     def type_text(self, text: str, status: dict[str, Any] | None = None) -> dict[str, Any]:
         if not text or len(text) > 4096 or "\0" in text:
             raise ValueError("Rust text input requires 1-4096 safe characters")
-        state = status or self.status()
-        displays = self._displays(state)
-        if not displays:
-            raise RustEngineUnavailable("Rust daemon did not report any capturable display")
-        display_id = int(displays[0].get("id", -1))
-        if display_id < 0:
-            raise RustEngineUnavailable("Rust daemon returned an invalid display id")
-        foreground = self._foreground(state)
-        capture = self.capture(display_id)
-        frame = capture.get("frame")
-        if not isinstance(frame, dict) or not isinstance(frame.get("id"), str):
-            raise RustEngineExecutionError("Rust daemon capture did not return a usable frame")
+        display_id, foreground, frame = self._keyboard_input_context(status)
         return self._request(
             {
                 "kind": "type_text",
@@ -476,76 +631,192 @@ def rust_engine_emergency_stop_best_effort() -> None:
 
 
 def register_rust_engine_tools(registry: ToolRegistry) -> None:
-    """Overlay supported native mutations with Rust while preserving safe Python fallback in auto mode."""
-    originals = {name: registry._tools.get(name) for name in ("desktop_click", "desktop_type", "desktop_click_button")}
+    """Route atomic desktop mutations through Rust in strict mode.
+
+    Auto mode may use the Python implementation only before any Rust mutation was
+    dispatched. Stateful cross-request key/mouse holds remain Python-only and are
+    deliberately unavailable in strict Rust mode; use atomic hotkey/drag instead.
+    """
+    names = (
+        "desktop_click",
+        "desktop_type",
+        "desktop_click_button",
+        "desktop_move",
+        "desktop_scroll",
+        "desktop_double_click",
+        "desktop_drag",
+        "desktop_press",
+        "desktop_hotkey",
+        "desktop_mouse_down",
+        "desktop_mouse_up",
+        "desktop_key_down",
+        "desktop_key_up",
+    )
+    originals = {name: registry._tools.get(name) for name in names}
+
+    def fallback(name: str, **kwargs: Any) -> str:
+        original = originals.get(name)
+        if original is None:
+            raise RuntimeError(f"Python fallback is unavailable for {name}")
+        return original.handler(**kwargs)
+
+    def run_atomic(name: str, invoke, **fallback_args: Any) -> str:
+        client, status = _preflight()
+        if client is None:
+            return fallback(name, **fallback_args)
+        try:
+            result = invoke(client, status)
+        except RustEngineUnavailable:
+            if native_engine_mode() == "auto":
+                return fallback(name, **fallback_args)
+            raise
+        return (
+            "RUST_EXECUTED: native input dispatched with fresh frame + foreground binding; "
+            "independent application verification required. "
+            + json.dumps(result, ensure_ascii=False)
+        )
 
     def desktop_click(x: int, y: int) -> str:
-        client, status = _preflight()
-        original = originals["desktop_click"]
-        if client is None:
-            if original is None:
-                raise RuntimeError("Python desktop click fallback is unavailable")
-            return original.handler(x=x, y=y)
-        try:
-            result = client.click(int(x), int(y), status)
-        except RustEngineUnavailable:
-            if native_engine_mode() == "auto" and original is not None:
-                return original.handler(x=x, y=y)
-            raise
-        return "RUST_EXECUTED: native click dispatched with fresh frame + foreground binding; independent verification required. " + json.dumps(result, ensure_ascii=False)
+        return run_atomic(
+            "desktop_click",
+            lambda client, status: client.click(int(x), int(y), status),
+            x=x,
+            y=y,
+        )
 
     def desktop_type(text: str) -> str:
-        client, status = _preflight()
-        original = originals["desktop_type"]
-        if client is None:
-            if original is None:
-                raise RuntimeError("Python desktop type fallback is unavailable")
-            return original.handler(text=text)
-        try:
-            result = client.type_text(text, status)
-        except RustEngineUnavailable:
-            if native_engine_mode() == "auto" and original is not None:
-                return original.handler(text=text)
-            raise
-        return "RUST_EXECUTED: native text input dispatched with fresh frame + foreground binding; independent verification required. " + json.dumps(result, ensure_ascii=False)
+        return run_atomic(
+            "desktop_type",
+            lambda client, status: client.type_text(text, status),
+            text=text,
+        )
 
     def desktop_click_button(x: int, y: int, button: str = "left", clicks: int = 1) -> str:
-        normalized = str(button).strip().lower()
+        normalized = str(button).strip().casefold()
         count = max(1, min(int(clicks), 3))
-        original = originals["desktop_click_button"]
-        if normalized != "left":
-            if native_engine_mode() == "rust":
-                raise RustEngineUnavailable("Rust engine currently accepts left-button desktop clicks only")
-            if original is None:
-                raise RuntimeError("Python desktop button fallback is unavailable")
-            return original.handler(x=x, y=y, button=button, clicks=count)
+        return run_atomic(
+            "desktop_click_button",
+            lambda client, status: client.click_button(
+                int(x), int(y), normalized, count, status
+            ),
+            x=x,
+            y=y,
+            button=button,
+            clicks=count,
+        )
 
-        client, status = _preflight()
-        if client is None:
-            if original is None:
-                raise RuntimeError("Python desktop button fallback is unavailable")
-            return original.handler(x=x, y=y, button=button, clicks=count)
-        results: list[dict[str, Any]] = []
-        for index in range(count):
-            try:
-                current = status if index == 0 else client.status()
-                results.append(client.click(int(x), int(y), current))
-            except RustEngineUnavailable as exc:
-                if index == 0 and native_engine_mode() == "auto" and original is not None:
-                    return original.handler(x=x, y=y, button=button, clicks=count)
-                raise RustEngineExecutionError(
-                    "Rust engine became unavailable after a prior click; refusing fallback replay. Re-observe before continuing."
-                ) from exc
-        return "RUST_EXECUTED: native left click(s) dispatched with per-action frame binding; independent verification required. " + json.dumps(results, ensure_ascii=False)
+    def desktop_double_click(x: int, y: int) -> str:
+        return run_atomic(
+            "desktop_double_click",
+            lambda client, status: client.click_button(
+                int(x), int(y), "left", 2, status
+            ),
+            x=x,
+            y=y,
+        )
 
-    for name, handler in (("desktop_click", desktop_click), ("desktop_type", desktop_type), ("desktop_click_button", desktop_click_button)):
-        original = originals[name]
+    def desktop_move(x: int, y: int, duration: float = 0.1) -> str:
+        return run_atomic(
+            "desktop_move",
+            lambda client, status: client.pointer_move(int(x), int(y), status),
+            x=x,
+            y=y,
+            duration=duration,
+        )
+
+    def desktop_drag(
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration: float = 0.25,
+        button: str = "left",
+    ) -> str:
+        return run_atomic(
+            "desktop_drag",
+            lambda client, status: client.drag(
+                int(start_x),
+                int(start_y),
+                int(end_x),
+                int(end_y),
+                float(duration),
+                str(button),
+                status,
+            ),
+            start_x=start_x,
+            start_y=start_y,
+            end_x=end_x,
+            end_y=end_y,
+            duration=duration,
+            button=button,
+        )
+
+    def desktop_scroll(clicks: int) -> str:
+        return run_atomic(
+            "desktop_scroll",
+            lambda client, status: client.scroll(int(clicks), status),
+            clicks=clicks,
+        )
+
+    def desktop_press(key: str) -> str:
+        return run_atomic(
+            "desktop_press",
+            lambda client, status: client.press_key(str(key), status),
+            key=key,
+        )
+
+    def desktop_hotkey(keys: list[str]) -> str:
+        return run_atomic(
+            "desktop_hotkey",
+            lambda client, status: client.hotkey(list(keys), status),
+            keys=keys,
+        )
+
+    def stateful_python_only(name: str, **kwargs: Any) -> str:
+        if native_engine_mode() == "rust":
+            raise RustEngineUnavailable(
+                f"{name} is a stateful cross-request input primitive and is disabled in strict Rust mode; "
+                "use desktop_hotkey or desktop_drag so the daemon can guarantee release on failure."
+            )
+        return fallback(name, **kwargs)
+
+    def desktop_mouse_down(button: str = "left") -> str:
+        return stateful_python_only("desktop_mouse_down", button=button)
+
+    def desktop_mouse_up(button: str = "left") -> str:
+        return stateful_python_only("desktop_mouse_up", button=button)
+
+    def desktop_key_down(key: str) -> str:
+        return stateful_python_only("desktop_key_down", key=key)
+
+    def desktop_key_up(key: str) -> str:
+        return stateful_python_only("desktop_key_up", key=key)
+
+    handlers = {
+        "desktop_click": desktop_click,
+        "desktop_type": desktop_type,
+        "desktop_click_button": desktop_click_button,
+        "desktop_move": desktop_move,
+        "desktop_scroll": desktop_scroll,
+        "desktop_double_click": desktop_double_click,
+        "desktop_drag": desktop_drag,
+        "desktop_press": desktop_press,
+        "desktop_hotkey": desktop_hotkey,
+        "desktop_mouse_down": desktop_mouse_down,
+        "desktop_mouse_up": desktop_mouse_up,
+        "desktop_key_down": desktop_key_down,
+        "desktop_key_up": desktop_key_up,
+    }
+    for name, handler in handlers.items():
+        original = originals.get(name)
         if original is None:
             continue
         registry.register(
             ToolSpec(
                 name=original.name,
-                description=original.description + " When JARVIS_NATIVE_ENGINE=rust (or auto with a healthy daemon), the mutation is dispatched through the Rust execution daemon over loopback mTLS.",
+                description=original.description
+                + " In strict Rust mode, supported atomic input is dispatched through the "
+                  "Rust execution daemon over loopback mTLS with fresh-frame and foreground binding.",
                 risk=original.risk,
                 input_schema=original.input_schema,
                 handler=handler,
@@ -561,3 +832,4 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
             native_engine_status,
         )
     )
+

@@ -1,4 +1,9 @@
-use crate::{Error, Result, capture::Frame, governance::EmergencyLatch, types::ForegroundBinding};
+use crate::{
+    Error, Result,
+    capture::Frame,
+    governance::EmergencyLatch,
+    types::{ForegroundBinding, MouseButton},
+};
 use std::time::{Duration, Instant};
 
 pub trait InputController: Send + Sync {
@@ -7,6 +12,57 @@ pub trait InputController: Send + Sync {
         frame: &Frame,
         x: i32,
         y: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()>;
+    fn click_button(
+        &self,
+        frame: &Frame,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        clicks: u8,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()>;
+    fn pointer_move(
+        &self,
+        frame: &Frame,
+        x: i32,
+        y: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()>;
+    fn drag(
+        &self,
+        frame: &Frame,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        button: MouseButton,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()>;
+    fn scroll(
+        &self,
+        frame: &Frame,
+        clicks: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()>;
+    fn press_key(
+        &self,
+        frame: &Frame,
+        key: &str,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()>;
+    fn hotkey(
+        &self,
+        frame: &Frame,
+        keys: &[String],
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()>;
@@ -30,6 +86,10 @@ fn validate_frame(frame: &Frame, x: i32, y: i32, emergency: &EmergencyLatch) -> 
     Ok(())
 }
 
+fn validate_keyboard_frame(frame: &Frame, emergency: &EmergencyLatch) -> Result<()> {
+    validate_frame(frame, frame.display.x, frame.display.y, emergency)
+}
+
 fn validate_binding(binding: &ForegroundBinding) -> Result<()> {
     if binding.process_id == 0
         || binding.title.trim().is_empty()
@@ -37,6 +97,24 @@ fn validate_binding(binding: &ForegroundBinding) -> Result<()> {
         || binding.title.contains('\0')
     {
         return Err(Error::Denied("invalid foreground binding"));
+    }
+    Ok(())
+}
+
+fn validate_key_name(key: &str) -> Result<()> {
+    let value = key.trim();
+    if value.is_empty() || value.len() > 32 || value.contains('\0') {
+        return Err(Error::Limit("keyboard key"));
+    }
+    Ok(())
+}
+
+fn validate_hotkey(keys: &[String]) -> Result<()> {
+    if keys.is_empty() || keys.len() > 8 {
+        return Err(Error::Limit("hotkey keys"));
+    }
+    for key in keys {
+        validate_key_name(key)?;
     }
     Ok(())
 }
@@ -51,8 +129,97 @@ impl InputController for SimulationInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
+        self.click_button(frame, x, y, MouseButton::Left, 1, foreground, emergency)
+    }
+
+    fn click_button(
+        &self,
+        frame: &Frame,
+        x: i32,
+        y: i32,
+        _button: MouseButton,
+        clicks: u8,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        validate_binding(foreground)?;
+        validate_frame(frame, x, y, emergency)?;
+        if !(1..=3).contains(&clicks) {
+            return Err(Error::Limit("mouse click count"));
+        }
+        Ok(())
+    }
+
+    fn pointer_move(
+        &self,
+        frame: &Frame,
+        x: i32,
+        y: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
         validate_binding(foreground)?;
         validate_frame(frame, x, y, emergency)
+    }
+
+    fn drag(
+        &self,
+        frame: &Frame,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        _button: MouseButton,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        validate_binding(foreground)?;
+        validate_frame(frame, start_x, start_y, emergency)?;
+        validate_frame(frame, end_x, end_y, emergency)?;
+        if duration_ms > 2_000 {
+            return Err(Error::Limit("drag duration"));
+        }
+        Ok(())
+    }
+
+    fn scroll(
+        &self,
+        frame: &Frame,
+        clicks: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        validate_binding(foreground)?;
+        validate_keyboard_frame(frame, emergency)?;
+        if !(-1000..=1000).contains(&clicks) {
+            return Err(Error::Limit("scroll steps"));
+        }
+        Ok(())
+    }
+
+    fn press_key(
+        &self,
+        frame: &Frame,
+        key: &str,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        validate_binding(foreground)?;
+        validate_keyboard_frame(frame, emergency)?;
+        validate_key_name(key)
+    }
+
+    fn hotkey(
+        &self,
+        frame: &Frame,
+        keys: &[String],
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        validate_binding(foreground)?;
+        validate_keyboard_frame(frame, emergency)?;
+        validate_hotkey(keys)
     }
 
     fn type_text(
@@ -63,7 +230,7 @@ impl InputController for SimulationInput {
         emergency: &EmergencyLatch,
     ) -> Result<()> {
         validate_binding(foreground)?;
-        validate_frame(frame, frame.display.x, frame.display.y, emergency)?;
+        validate_keyboard_frame(frame, emergency)?;
         if text.len() > 4096 || text.contains('\0') {
             return Err(Error::Limit("keyboard text"));
         }
@@ -125,6 +292,64 @@ fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
     Ok(())
 }
 
+#[cfg(all(feature = "native", target_os = "windows"))]
+fn native_button(button: MouseButton) -> enigo::Button {
+    match button {
+        MouseButton::Left => enigo::Button::Left,
+        MouseButton::Right => enigo::Button::Right,
+        MouseButton::Middle => enigo::Button::Middle,
+    }
+}
+
+#[cfg(all(feature = "native", target_os = "windows"))]
+fn native_key(value: &str) -> Result<enigo::Key> {
+    use enigo::Key;
+
+    validate_key_name(value)?;
+    let normalized = value.trim().to_ascii_lowercase();
+    if normalized.chars().count() == 1 {
+        return Ok(Key::Unicode(normalized.chars().next().unwrap()));
+    }
+    let key = match normalized.as_str() {
+        "ctrl" | "control" => Key::Control,
+        "alt" => Key::Alt,
+        "shift" => Key::Shift,
+        "win" | "windows" | "meta" | "super" => Key::Meta,
+        "enter" | "return" => Key::Return,
+        "esc" | "escape" => Key::Escape,
+        "tab" => Key::Tab,
+        "space" => Key::Space,
+        "backspace" => Key::Backspace,
+        "delete" | "del" => Key::Delete,
+        "home" => Key::Home,
+        "end" => Key::End,
+        "pageup" | "page_up" => Key::PageUp,
+        "pagedown" | "page_down" => Key::PageDown,
+        "left" | "leftarrow" => Key::LeftArrow,
+        "right" | "rightarrow" => Key::RightArrow,
+        "up" | "uparrow" => Key::UpArrow,
+        "down" | "downarrow" => Key::DownArrow,
+        "f1" => Key::F1,
+        "f2" => Key::F2,
+        "f3" => Key::F3,
+        "f4" => Key::F4,
+        "f5" => Key::F5,
+        "f6" => Key::F6,
+        "f7" => Key::F7,
+        "f8" => Key::F8,
+        "f9" => Key::F9,
+        "f10" => Key::F10,
+        "f11" => Key::F11,
+        "f12" => Key::F12,
+        _ => {
+            return Err(Error::Unsupported(
+                "keyboard key is not supported by native input",
+            ));
+        }
+    };
+    Ok(key)
+}
+
 /// Native input is exposed only on Windows and only after the caller binds the action
 /// to the exact foreground process/title observed immediately before execution.
 #[cfg(feature = "native")]
@@ -140,7 +365,61 @@ impl InputController for NativeInput {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        use enigo::{Button, Coordinate, Direction, Enigo, Mouse, Settings};
+        self.click_button(frame, x, y, MouseButton::Left, 1, foreground, emergency)
+    }
+
+    fn click_button(
+        &self,
+        frame: &Frame,
+        x: i32,
+        y: i32,
+        button: MouseButton,
+        clicks: u8,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        use enigo::{Coordinate, Direction, Enigo, Mouse, Settings};
+
+        validate_frame(frame, x, y, emergency)?;
+        if frame.simulation {
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
+        }
+        if !(1..=3).contains(&clicks) {
+            return Err(Error::Limit("mouse click count"));
+        }
+        verify_foreground(foreground)?;
+        let mut input = Enigo::new(&Settings::default())
+            .map_err(|_| Error::Operation("input connection failed".into()))?;
+        emergency.check()?;
+        verify_foreground(foreground)?;
+        input
+            .move_mouse(x, y, Coordinate::Abs)
+            .map_err(|_| Error::Operation("pointer movement failed".into()))?;
+        for index in 0..clicks {
+            emergency.check()?;
+            verify_foreground(foreground)?;
+            input
+                .button(native_button(button), Direction::Click)
+                .map_err(|_| Error::Operation("click failed".into()))?;
+            if index + 1 < clicks {
+                std::thread::sleep(Duration::from_millis(45));
+            }
+        }
+        Ok(())
+    }
+
+    fn pointer_move(
+        &self,
+        frame: &Frame,
+        x: i32,
+        y: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        use enigo::{Coordinate, Enigo, Mouse, Settings};
+
         validate_frame(frame, x, y, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
@@ -154,12 +433,188 @@ impl InputController for NativeInput {
         verify_foreground(foreground)?;
         input
             .move_mouse(x, y, Coordinate::Abs)
-            .map_err(|_| Error::Operation("pointer movement failed".into()))?;
+            .map_err(|_| Error::Operation("pointer movement failed".into()))
+    }
+
+    fn drag(
+        &self,
+        frame: &Frame,
+        start_x: i32,
+        start_y: i32,
+        end_x: i32,
+        end_y: i32,
+        duration_ms: u64,
+        button: MouseButton,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        use enigo::{Coordinate, Direction, Enigo, Mouse, Settings};
+
+        validate_frame(frame, start_x, start_y, emergency)?;
+        validate_frame(frame, end_x, end_y, emergency)?;
+        if frame.simulation {
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
+        }
+        if duration_ms > 2_000 {
+            return Err(Error::Limit("drag duration"));
+        }
+        verify_foreground(foreground)?;
+        let mut input = Enigo::new(&Settings::default())
+            .map_err(|_| Error::Operation("input connection failed".into()))?;
+        input
+            .move_mouse(start_x, start_y, Coordinate::Abs)
+            .map_err(|_| Error::Operation("drag start movement failed".into()))?;
         emergency.check()?;
         verify_foreground(foreground)?;
         input
-            .button(Button::Left, Direction::Click)
-            .map_err(|_| Error::Operation("click failed".into()))
+            .button(native_button(button), Direction::Press)
+            .map_err(|_| Error::Operation("mouse button press failed".into()))?;
+
+        let steps = ((duration_ms.max(16) + 15) / 16).clamp(1, 125);
+        let mut movement_result = Ok(());
+        for step in 1..=steps {
+            if let Err(error) = emergency
+                .check()
+                .and_then(|_| verify_foreground(foreground))
+            {
+                movement_result = Err(error);
+                break;
+            }
+            let progress = step as f64 / steps as f64;
+            let x = start_x as f64 + (end_x - start_x) as f64 * progress;
+            let y = start_y as f64 + (end_y - start_y) as f64 * progress;
+            if input
+                .move_mouse(x.round() as i32, y.round() as i32, Coordinate::Abs)
+                .is_err()
+            {
+                movement_result = Err(Error::Operation("drag movement failed".into()));
+                break;
+            }
+            if step < steps && duration_ms > 0 {
+                std::thread::sleep(Duration::from_millis((duration_ms / steps).max(1)));
+            }
+        }
+
+        let release_result = input
+            .button(native_button(button), Direction::Release)
+            .map_err(|_| Error::Operation("mouse button release failed".into()));
+        movement_result?;
+        release_result
+    }
+
+    fn scroll(
+        &self,
+        frame: &Frame,
+        clicks: i32,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        use enigo::{Axis, Enigo, Mouse, Settings};
+
+        validate_keyboard_frame(frame, emergency)?;
+        if frame.simulation {
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
+        }
+        if !(-1000..=1000).contains(&clicks) {
+            return Err(Error::Limit("scroll steps"));
+        }
+        verify_foreground(foreground)?;
+        let mut input = Enigo::new(&Settings::default())
+            .map_err(|_| Error::Operation("input connection failed".into()))?;
+        let mut remaining = clicks;
+        while remaining != 0 {
+            emergency.check()?;
+            verify_foreground(foreground)?;
+            let magnitude = remaining.abs().min(8);
+            let chunk = if remaining > 0 { magnitude } else { -magnitude };
+            // Public JARVIS semantics follow PyAutoGUI: positive means scroll up.
+            // Enigo's vertical axis uses positive for down, so invert the sign.
+            input
+                .scroll(-chunk, Axis::Vertical)
+                .map_err(|_| Error::Operation("scroll failed".into()))?;
+            remaining -= chunk;
+        }
+        Ok(())
+    }
+
+    fn press_key(
+        &self,
+        frame: &Frame,
+        key: &str,
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        use enigo::{Direction, Enigo, Keyboard, Settings};
+
+        validate_keyboard_frame(frame, emergency)?;
+        if frame.simulation {
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
+        }
+        let key = native_key(key)?;
+        verify_foreground(foreground)?;
+        let mut input = Enigo::new(&Settings::default())
+            .map_err(|_| Error::Operation("input connection failed".into()))?;
+        emergency.check()?;
+        verify_foreground(foreground)?;
+        input
+            .key(key, Direction::Click)
+            .map_err(|_| Error::Operation("keyboard key press failed".into()))
+    }
+
+    fn hotkey(
+        &self,
+        frame: &Frame,
+        keys: &[String],
+        foreground: &ForegroundBinding,
+        emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        use enigo::{Direction, Enigo, Keyboard, Settings};
+
+        validate_keyboard_frame(frame, emergency)?;
+        validate_hotkey(keys)?;
+        if frame.simulation {
+            return Err(Error::Denied(
+                "simulation evidence cannot authorize native input",
+            ));
+        }
+        let mapped: Vec<_> = keys
+            .iter()
+            .map(|value| native_key(value))
+            .collect::<Result<Vec<_>>>()?;
+        verify_foreground(foreground)?;
+        let mut input = Enigo::new(&Settings::default())
+            .map_err(|_| Error::Operation("input connection failed".into()))?;
+        let mut pressed = Vec::new();
+        for key in &mapped {
+            if let Err(error) = emergency
+                .check()
+                .and_then(|_| verify_foreground(foreground))
+            {
+                for prior in pressed.iter().rev() {
+                    let _ = input.key(*prior, Direction::Release);
+                }
+                return Err(error);
+            }
+            if input.key(*key, Direction::Press).is_err() {
+                for prior in pressed.iter().rev() {
+                    let _ = input.key(*prior, Direction::Release);
+                }
+                return Err(Error::Operation("hotkey press failed".into()));
+            }
+            pressed.push(*key);
+        }
+        for key in pressed.iter().rev() {
+            input
+                .key(*key, Direction::Release)
+                .map_err(|_| Error::Operation("hotkey release failed".into()))?;
+        }
+        Ok(())
     }
 
     fn type_text(
@@ -170,7 +625,8 @@ impl InputController for NativeInput {
         emergency: &EmergencyLatch,
     ) -> Result<()> {
         use enigo::{Enigo, Keyboard, Settings};
-        validate_frame(frame, frame.display.x, frame.display.y, emergency)?;
+
+        validate_keyboard_frame(frame, emergency)?;
         if frame.simulation {
             return Err(Error::Denied(
                 "simulation evidence cannot authorize native input",
@@ -202,7 +658,69 @@ impl InputController for NativeInput {
     ) -> Result<()> {
         Err(Error::Unsupported("native input is Windows-only"))
     }
-
+    fn click_button(
+        &self,
+        _frame: &Frame,
+        _x: i32,
+        _y: i32,
+        _button: MouseButton,
+        _clicks: u8,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        Err(Error::Unsupported("native input is Windows-only"))
+    }
+    fn pointer_move(
+        &self,
+        _frame: &Frame,
+        _x: i32,
+        _y: i32,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        Err(Error::Unsupported("native input is Windows-only"))
+    }
+    fn drag(
+        &self,
+        _frame: &Frame,
+        _start_x: i32,
+        _start_y: i32,
+        _end_x: i32,
+        _end_y: i32,
+        _duration_ms: u64,
+        _button: MouseButton,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        Err(Error::Unsupported("native input is Windows-only"))
+    }
+    fn scroll(
+        &self,
+        _frame: &Frame,
+        _clicks: i32,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        Err(Error::Unsupported("native input is Windows-only"))
+    }
+    fn press_key(
+        &self,
+        _frame: &Frame,
+        _key: &str,
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        Err(Error::Unsupported("native input is Windows-only"))
+    }
+    fn hotkey(
+        &self,
+        _frame: &Frame,
+        _keys: &[String],
+        _foreground: &ForegroundBinding,
+        _emergency: &EmergencyLatch,
+    ) -> Result<()> {
+        Err(Error::Unsupported("native input is Windows-only"))
+    }
     fn type_text(
         &self,
         _frame: &Frame,

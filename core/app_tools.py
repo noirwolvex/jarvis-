@@ -732,11 +732,24 @@ def _process_score(
 
 
 def _focus(hwnd: int) -> bool:
+    """Bring a verified visible window forward without paying a fixed sleep when Windows responds quickly."""
+    from .process_control import check_cancelled
+    from .ui_state import wait_until
+
     user32 = ctypes.windll.user32
+    check_cancelled()
     user32.ShowWindow(hwnd, 9)
     user32.SetForegroundWindow(hwnd)
-    time.sleep(0.25)
-    return int(user32.GetForegroundWindow()) == int(hwnd)
+    try:
+        wait_until(
+            lambda: int(user32.GetForegroundWindow()) == int(hwnd),
+            timeout=0.8,
+            interval=0.025,
+            description="launched application foreground",
+        )
+        return True
+    except TimeoutError:
+        return False
 
 
 def _launch_candidate(app: dict[str, Any]) -> int | None:
@@ -781,21 +794,32 @@ def launch_installed_app(
     query: str,
     timeout_seconds: float = 15.0,
 ) -> str:
+    """Launch an installed GUI app and distinguish process-started from interaction-ready.
+
+    A background process alone is not enough evidence for a chained desktop action. We keep
+    polling for a matching visible window and foreground binding; only that state is VERIFIED.
+    """
     if os.name != "nt":
         raise RuntimeError("Installed-app launch is supported on Windows only")
+
+    from .process_control import check_cancelled
+    from .ui_state import cancellable_delay
 
     app = _resolve(query)
     before_windows = {row["hwnd"] for row in _visible_windows()}
     before_pids = {row["pid"] for row in _processes()}
     launcher_pid = _launch_candidate(app)
 
-    deadline = time.time() + max(
+    deadline = time.monotonic() + max(
         2.0,
         min(float(timeout_seconds), 25.0),
     )
     best_window: dict[str, Any] | None = None
     best_process: dict[str, Any] | None = None
-    while time.time() < deadline:
+    focused = False
+
+    while time.monotonic() < deadline:
+        check_cancelled()
         windows = _visible_windows()
         ranked_windows = sorted(
             windows,
@@ -819,6 +843,9 @@ def launch_installed_app(
             >= 20.0
         ):
             best_window = ranked_windows[0]
+            focused = _focus(int(best_window["hwnd"]))
+            if focused:
+                break
 
         processes = _processes()
         ranked_processes = sorted(
@@ -835,18 +862,14 @@ def launch_installed_app(
         ):
             best_process = ranked_processes[0]
 
-        if best_window is not None or best_process is not None:
-            break
-        time.sleep(0.35)
+        # A process can appear hundreds of milliseconds before its UI tree/window. Do not
+        # race the next mission step merely because the process exists.
+        cancellable_delay(0.08)
 
     if best_window is None and best_process is None:
         raise RuntimeError(
             f"Launched '{app['name']}' from {app['source']} but could not verify a matching window or process within the timeout"
         )
-
-    focused = False
-    if best_window is not None:
-        focused = _focus(int(best_window["hwnd"]))
 
     process_id = (
         int(best_process["pid"])
@@ -866,6 +889,7 @@ def launch_installed_app(
         except Exception:
             process_name = "unknown"
 
+    interaction_ready = bool(best_window is not None and focused)
     payload = {
         "query": _clean_query(query),
         "resolved_name": app["name"],
@@ -880,8 +904,10 @@ def launch_installed_app(
         "focused": focused,
         "visible_window_verified": best_window is not None,
         "process_verified": best_process is not None or process_id > 0,
+        "interaction_ready": interaction_ready,
     }
-    return "VERIFIED: " + json.dumps(payload, ensure_ascii=False)
+    prefix = "VERIFIED: " if interaction_ready else "DELIVERED: "
+    return prefix + json.dumps(payload, ensure_ascii=False)
 
 
 def register_app_tools(registry: ToolRegistry) -> None:
