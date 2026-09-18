@@ -44,6 +44,97 @@ def _daemon_executable() -> Path:
     return ROOT / "daemon" / "rust" / "target" / "debug" / f"jarvis-daemon{suffix}"
 
 
+def _stop_stale_project_daemons(executable: Path) -> list[int]:
+    """Stop only stale jarvis-daemon processes launched from this repository binary."""
+    if os.name != "nt":
+        return []
+
+    try:
+        import psutil
+    except Exception as exc:
+        raise RuntimeError(
+            "psutil is required to safely stop a stale JARVIS Rust daemon before rebuild"
+        ) from exc
+
+    target = os.path.normcase(os.path.abspath(str(executable)))
+    current_pid = os.getpid()
+    matches = []
+    for process in psutil.process_iter(["pid", "name", "exe"]):
+        try:
+            pid = int(process.info.get("pid") or 0)
+            if pid <= 0 or pid == current_pid:
+                continue
+            exe = process.info.get("exe")
+            if not isinstance(exe, str) or not exe:
+                continue
+            if os.path.normcase(os.path.abspath(exe)) == target:
+                matches.append(process)
+        except (psutil.NoSuchProcess, psutil.ZombieProcess):
+            continue
+        except psutil.AccessDenied:
+            continue
+
+    if not matches:
+        return []
+
+    stopped: list[int] = []
+    for process in matches:
+        try:
+            stopped.append(int(process.pid))
+            process.terminate()
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.AccessDenied as exc:
+            raise RuntimeError(
+                f"Cannot stop stale Rust daemon pid={process.pid} at {target}. "
+                "Close the existing JARVIS session or run the terminal with sufficient permissions."
+            ) from exc
+
+    _, alive = psutil.wait_procs(matches, timeout=2.5)
+    for process in alive:
+        try:
+            process.kill()
+        except psutil.NoSuchProcess:
+            continue
+        except psutil.AccessDenied as exc:
+            raise RuntimeError(
+                f"Cannot kill stale Rust daemon pid={process.pid} at {target}. "
+                "Close the existing JARVIS session or run the terminal with sufficient permissions."
+            ) from exc
+
+    if alive:
+        _, still_alive = psutil.wait_procs(alive, timeout=2.5)
+        if still_alive:
+            pids = ", ".join(str(process.pid) for process in still_alive)
+            raise RuntimeError(
+                f"Rust daemon executable is still locked by pid(s): {pids}. "
+                "Close the existing JARVIS session before rebuilding."
+            )
+
+    # Windows can keep the image section mapped for a very short interval after exit.
+    deadline = time.monotonic() + 2.0
+    while time.monotonic() < deadline:
+        locked = False
+        for process in psutil.process_iter(["exe"]):
+            try:
+                exe = process.info.get("exe")
+                if isinstance(exe, str) and exe and os.path.normcase(os.path.abspath(exe)) == target:
+                    locked = True
+                    break
+            except (psutil.NoSuchProcess, psutil.ZombieProcess, psutil.AccessDenied):
+                continue
+        if not locked:
+            break
+        time.sleep(0.05)
+
+    print(
+        "STOPPED_STALE_RUST_DAEMON "
+        + json.dumps({"pids": stopped, "executable": str(executable)}, ensure_ascii=False),
+        flush=True,
+    )
+    return stopped
+
+
 def _start_daemon(executable: Path, config_path: Path, log_path: Path) -> tuple[subprocess.Popen[Any], Any]:
     log_path.parent.mkdir(parents=True, exist_ok=True)
     log = log_path.open("ab", buffering=0)
@@ -198,6 +289,13 @@ def bootstrap() -> tuple[subprocess.Popen[Any], Any, Path, dict[str, str], dict[
             "--native",
         ]
     )
+
+    # A previous dev/verify session may have left this exact executable running.
+    # Windows locks loaded .exe images, so cargo cannot replace jarvis-daemon.exe
+    # until that process exits. Stop only the daemon whose executable path matches
+    # this repository; never use a broad taskkill by image name.
+    _stop_stale_project_daemons(_daemon_executable())
+
     _run_checked(
         [
             cargo,
