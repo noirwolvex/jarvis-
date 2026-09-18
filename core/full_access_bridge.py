@@ -38,6 +38,13 @@ def build_full_access_agent():
     enable_app_discovery_cache()
 
     agent = FastExecutionFullAccessAgent()
+    # The base registry still contains the legacy all-in-one helper that launches an
+    # application, clicks with PyAutoGUI and types through the Python fallback. Full
+    # Access has stronger dedicated primitives (launch_installed_app + UIA +
+    # ui_type_native), so never expose this bypass to the model.
+    for legacy_name in ("open_application_and_type",):
+        agent.tools._tools.pop(legacy_name, None)
+        agent.tools._validators.pop(legacy_name, None)
     agent.tools.permissions.full_access_require_approval = True
     agent.tools.permissions.set_access_mode("full")
     register_app_tools(agent.tools)
