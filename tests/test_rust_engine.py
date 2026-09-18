@@ -127,10 +127,46 @@ class RustEngineTests(unittest.TestCase):
         with patch.object(client, "_foreground_center", return_value=(2200, 400)), \
              patch.object(client, "_input_context_for_display", return_value=(status["foreground"], frame)) as context:
             display_id, foreground, selected_frame = client._keyboard_input_context(status)
+            second_display, second_foreground, second_frame = client._keyboard_input_context(status)
         self.assertEqual(display_id, 1)
+        self.assertEqual(second_display, 1)
         self.assertEqual(foreground["hwnd"], 1001)
+        self.assertEqual(second_foreground["hwnd"], 1001)
         self.assertEqual(selected_frame, frame)
+        self.assertEqual(second_frame, frame)
+        # A tight keyboard burst reuses one daemon capture; every action still carries
+        # its own fresh foreground binding and short IPC request TTL.
         context.assert_called_once_with(status, 1)
+
+    def test_keyboard_frame_cache_is_rejected_after_foreground_change(self) -> None:
+        config = RustEngineConfig(
+            host="127.0.0.1",
+            port=7443,
+            server_name="localhost",
+            ca_path=Path("ca.pem"),
+            client_cert_path=Path("client.pem"),
+            client_key_path=Path("client-key.pem"),
+            observe_capabilities={0: "observe-0"},
+            input_capabilities={0: "input-0"},
+        )
+        client = RustDaemonClient(config)
+        first = {
+            "displays": [{"id": 0, "x": 0, "y": 0, "width": 1920, "height": 1080}],
+            "foreground": {"hwnd": 1001, "process_id": 42, "title": "First"},
+        }
+        second = {
+            "displays": first["displays"],
+            "foreground": {"hwnd": 2002, "process_id": 84, "title": "Second"},
+        }
+        frames = [
+            (first["foreground"], {"id": "frame-1"}),
+            (second["foreground"], {"id": "frame-2"}),
+        ]
+        with patch.object(client, "_foreground_center", return_value=(500, 400)), \
+             patch.object(client, "_input_context_for_display", side_effect=frames) as context:
+            self.assertEqual(client._keyboard_input_context(first)[2]["id"], "frame-1")
+            self.assertEqual(client._keyboard_input_context(second)[2]["id"], "frame-2")
+        self.assertEqual(context.call_count, 2)
 
     def test_expanded_client_actions_bind_fresh_frame_and_input_capability(self) -> None:
         config = RustEngineConfig(
