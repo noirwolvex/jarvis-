@@ -79,7 +79,6 @@ _BROWSER_PROFILE_EXPLICIT = {
     "find_installed_app",
     "launch_installed_app",
     "open_application",
-    "open_application_and_type",
     "open_url",
 }
 _BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "discord_", "whatsapp_", "youtube_", "workflow_")
