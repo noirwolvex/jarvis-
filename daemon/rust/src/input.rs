@@ -595,7 +595,9 @@ mod windows_input {
                 // defensively if Windows accepted only part of this chunk.
                 let releases = chunk
                     .iter()
-                    .map(|unit| keyboard_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP))
+                    .map(|unit| {
+                        keyboard_input(0, *unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP)
+                    })
                     .collect::<Vec<_>>();
                 let _ = send(&releases, "unicode keyboard cleanup");
                 return Err(error);
