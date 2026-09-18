@@ -212,7 +212,165 @@ impl Worker {
                     "simulation": self.policy.simulation,
                     "executed": !self.policy.simulation && self.native_input,
                     "verified": false,
-                    "click": {"x": x, "y": y},
+                    "click": {"x": x, "y": y, "button": "left", "clicks": 1},
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::ClickButton {
+                display_id,
+                frame_id,
+                x,
+                y,
+                button,
+                clicks,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
+                }
+                self.authorize(job)?;
+                self.input.click_button(
+                    frame,
+                    *x,
+                    *y,
+                    *button,
+                    *clicks,
+                    foreground,
+                    &self.emergency,
+                )?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "click": {"x": x, "y": y, "button": button, "clicks": clicks},
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::PointerMove {
+                display_id,
+                frame_id,
+                x,
+                y,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
+                }
+                self.authorize(job)?;
+                self.input
+                    .pointer_move(frame, *x, *y, foreground, &self.emergency)?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "pointer": {"x": x, "y": y},
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::Drag {
+                display_id,
+                frame_id,
+                start_x,
+                start_y,
+                end_x,
+                end_y,
+                duration_ms,
+                button,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
+                }
+                self.authorize(job)?;
+                self.input.drag(
+                    frame,
+                    *start_x,
+                    *start_y,
+                    *end_x,
+                    *end_y,
+                    *duration_ms,
+                    *button,
+                    foreground,
+                    &self.emergency,
+                )?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "drag": {
+                        "start_x": start_x,
+                        "start_y": start_y,
+                        "end_x": end_x,
+                        "end_y": end_y,
+                        "duration_ms": duration_ms,
+                        "button": button
+                    },
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::Scroll {
+                display_id,
+                frame_id,
+                clicks,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
+                }
+                self.authorize(job)?;
+                self.input
+                    .scroll(frame, *clicks, foreground, &self.emergency)?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "scroll_clicks": clicks,
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::PressKey {
+                display_id,
+                frame_id,
+                key,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
+                }
+                self.authorize(job)?;
+                self.input
+                    .press_key(frame, key, foreground, &self.emergency)?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "key": key,
+                    "verification": "requires_independent_postcondition_evidence"
+                }))
+            }
+            Action::Hotkey {
+                display_id,
+                frame_id,
+                keys,
+                foreground,
+            } => {
+                let frame = self.ring.get(*frame_id)?;
+                if frame.display.id != *display_id {
+                    return Err(Error::Denied("frame display mismatch"));
+                }
+                self.authorize(job)?;
+                self.input
+                    .hotkey(frame, keys, foreground, &self.emergency)?;
+                Ok(json!({
+                    "simulation": self.policy.simulation,
+                    "executed": !self.policy.simulation && self.native_input,
+                    "verified": false,
+                    "keys": keys,
                     "verification": "requires_independent_postcondition_evidence"
                 }))
             }
