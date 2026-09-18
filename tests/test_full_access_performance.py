@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -70,6 +71,32 @@ class DesktopControlRegistrationTests(unittest.TestCase):
             self.assertIn(name, registry._tools)
             self.assertEqual(registry._tools[name].risk, Risk.MEDIUM)
         self.assertEqual(registry._tools["desktop_cursor"].risk, Risk.LOW)
+
+
+class DesktopOutcomeSemanticsTests(unittest.TestCase):
+    def test_raw_drag_reports_delivery_not_application_verification(self) -> None:
+        from core.desktop_control_tools import desktop_drag
+
+        fake_pyautogui = SimpleNamespace(position=lambda: SimpleNamespace(x=20, y=30))
+        with patch("core.desktop_control_tools._windows_only"), \
+             patch("core.desktop_control_tools.move_pointer"), \
+             patch("core.desktop_control_tools.desktop_mouse_down"), \
+             patch("core.desktop_control_tools.desktop_mouse_up"), \
+             patch("core.desktop_observation.foreground_identity", return_value=99), \
+             patch.dict("sys.modules", {"pyautogui": fake_pyautogui}):
+            result = desktop_drag(1, 2, 20, 30)
+
+        self.assertTrue(result.startswith("DELIVERED: "))
+        self.assertNotIn("VERIFIED:", result)
+
+    def test_wait_uses_cancellable_delay(self) -> None:
+        from core.advanced_tools import wait_seconds
+
+        with patch("core.ui_state.cancellable_delay") as delay:
+            result = wait_seconds(1.25)
+
+        delay.assert_called_once_with(1.25)
+        self.assertEqual(result, "Waited 1.25 seconds")
 
 
 class GoogleFastPathTests(unittest.TestCase):
