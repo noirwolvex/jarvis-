@@ -406,7 +406,7 @@ def ui_activate(target: str, title: str = "", control_type: str = "") -> str:
     control = _find_control(win, target, control_type)
     before = _meta(control)
     _guard_foreground(hwnd)
-    method = _invoke(control, hwnd)
+    method = _activate_control(control, hwnd)
     if _foreground_hwnd() != hwnd:
         # Some controls intentionally open another foreground window; report this instead of
         # pretending the original app remained active.
@@ -418,6 +418,60 @@ def ui_activate(target: str, title: str = "", control_type: str = "") -> str:
         {"action": "ui_activate", "method": method, "window_hwnd": hwnd, "foreground_hwnd": foreground, "control": before},
         ensure_ascii=False,
     )
+
+
+def _activate_control(control: Any, hwnd: int) -> str:
+    """Activate an exact UIA-resolved control, using Rust for geometry-only controls."""
+    try:
+        return _invoke(control, hwnd)
+    except RuntimeError as exc:
+        if "no supported semantic activation pattern" not in str(exc).casefold():
+            raise
+
+    rect = _rect(control)
+    if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
+        raise RuntimeError(
+            "Exact UI control has no activation pattern and no usable screen rectangle"
+        )
+    x = (int(rect[0]) + int(rect[2])) // 2
+    y = (int(rect[1]) + int(rect[3])) // 2
+
+    from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
+
+    _guard_foreground(hwnd)
+    _SNAPSHOTS.invalidate(hwnd)
+    client, status = _preflight()
+    if client is None:
+        if native_engine_mode() != "auto":
+            raise RustEngineUnavailable(
+                "Strict Rust mode requires the native daemon before UIA-resolved mouse activation"
+            )
+        try:
+            control.click_input()
+        except Exception as click_exc:
+            raise InputDeliveryError(
+                "UIA-resolved click outcome is uncertain; inspect before retrying"
+            ) from click_exc
+        return "uia_resolved_click_input"
+
+    try:
+        result = client.click(x, y, status)
+    except RustEngineUnavailable:
+        if native_engine_mode() != "auto":
+            raise
+        try:
+            control.click_input()
+        except Exception as click_exc:
+            raise InputDeliveryError(
+                "UIA-resolved click outcome is uncertain; inspect before retrying"
+            ) from click_exc
+        return "uia_resolved_click_input"
+
+    if result.get("executed") is not True or result.get("simulation") is not False:
+        raise InputDeliveryError(
+            "Rust daemon did not confirm UIA-resolved native click execution; inspect before retrying"
+        )
+    return "rust_uia_center_click"
 
 
 def _control_value(control: Any) -> str | None:
