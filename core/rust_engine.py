@@ -330,18 +330,81 @@ class RustDaemonClient:
             raise RustEngineUnavailable("Rust daemon returned an invalid foreground binding")
         return {"process_id": process_id, "title": title}
 
-    def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
-        state = status or self.status()
-        display = self._display_for_point(state, int(x), int(y))
-        display_id = int(display["id"])
+    def _input_context_for_display(
+        self,
+        state: dict[str, Any],
+        display_id: int,
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
         foreground = self._foreground(state)
         capture = self.capture(display_id)
         frame = capture.get("frame")
         if not isinstance(frame, dict) or not isinstance(frame.get("id"), str):
             raise RustEngineExecutionError("Rust daemon capture did not return a usable frame")
+        return foreground, frame
+
+    def _keyboard_input_context(
+        self,
+        status: dict[str, Any] | None = None,
+    ) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        state = status or self.status()
+        displays = self._displays(state)
+        if not displays:
+            raise RustEngineUnavailable("Rust daemon did not report any capturable display")
+        display_id = int(displays[0].get("id", -1))
+        if display_id < 0:
+            raise RustEngineUnavailable("Rust daemon returned an invalid display id")
+        foreground, frame = self._input_context_for_display(state, display_id)
+        return display_id, foreground, frame
+
+    def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
+        return self.click_button(x, y, "left", 1, status)
+
+    def click_button(
+        self,
+        x: int,
+        y: int,
+        button: str = "left",
+        clicks: int = 1,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(button).strip().casefold()
+        if normalized not in {"left", "right", "middle"}:
+            raise ValueError("Rust mouse button must be left, right, or middle")
+        count = int(clicks)
+        if not 1 <= count <= 3:
+            raise ValueError("Rust click count must be between 1 and 3")
+        state = status or self.status()
+        display = self._display_for_point(state, int(x), int(y))
+        display_id = int(display["id"])
+        foreground, frame = self._input_context_for_display(state, display_id)
         return self._request(
             {
-                "kind": "click",
+                "kind": "click_button",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "x": int(x),
+                "y": int(y),
+                "button": normalized,
+                "clicks": count,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def pointer_move(
+        self,
+        x: int,
+        y: int,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        state = status or self.status()
+        display = self._display_for_point(state, int(x), int(y))
+        display_id = int(display["id"])
+        foreground, frame = self._input_context_for_display(state, display_id)
+        return self._request(
+            {
+                "kind": "pointer_move",
                 "display_id": display_id,
                 "frame_id": frame["id"],
                 "x": int(x),
@@ -352,21 +415,113 @@ class RustDaemonClient:
             mutating=True,
         )
 
+    def drag(
+        self,
+        start_x: int,
+        start_y: int,
+        end_x: int,
+        end_y: int,
+        duration: float = 0.25,
+        button: str = "left",
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        normalized = str(button).strip().casefold()
+        if normalized not in {"left", "right", "middle"}:
+            raise ValueError("Rust drag button must be left, right, or middle")
+        seconds = float(duration)
+        if not 0.05 <= seconds <= 2.0:
+            raise ValueError("Rust drag duration must be between 0.05 and 2 seconds")
+        state = status or self.status()
+        start_display = self._display_for_point(state, int(start_x), int(start_y))
+        end_display = self._display_for_point(state, int(end_x), int(end_y))
+        if int(start_display["id"]) != int(end_display["id"]):
+            raise RustEngineUnavailable("Rust drag currently requires start and end on the same display")
+        display_id = int(start_display["id"])
+        foreground, frame = self._input_context_for_display(state, display_id)
+        return self._request(
+            {
+                "kind": "drag",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "start_x": int(start_x),
+                "start_y": int(start_y),
+                "end_x": int(end_x),
+                "end_y": int(end_y),
+                "duration_ms": int(round(seconds * 1000)),
+                "button": normalized,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def scroll(
+        self,
+        clicks: int,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        amount = int(clicks)
+        if not -1000 <= amount <= 1000:
+            raise ValueError("Rust scroll requires -1000..1000 wheel steps")
+        display_id, foreground, frame = self._keyboard_input_context(status)
+        return self._request(
+            {
+                "kind": "scroll",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "clicks": amount,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def press_key(
+        self,
+        key: str,
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        value = str(key).strip()
+        if not value or len(value) > 32 or "\0" in value:
+            raise ValueError("Rust key name must contain 1-32 safe characters")
+        display_id, foreground, frame = self._keyboard_input_context(status)
+        return self._request(
+            {
+                "kind": "press_key",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "key": value,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
+    def hotkey(
+        self,
+        keys: list[str],
+        status: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        values = [str(key).strip() for key in keys]
+        if not 1 <= len(values) <= 8 or any(not key or len(key) > 32 or "\0" in key for key in values):
+            raise ValueError("Rust hotkey requires 1-8 safe key names")
+        display_id, foreground, frame = self._keyboard_input_context(status)
+        return self._request(
+            {
+                "kind": "hotkey",
+                "display_id": display_id,
+                "frame_id": frame["id"],
+                "keys": values,
+                "foreground": foreground,
+            },
+            self.config.capability("input", display_id),
+            mutating=True,
+        )
+
     def type_text(self, text: str, status: dict[str, Any] | None = None) -> dict[str, Any]:
         if not text or len(text) > 4096 or "\0" in text:
             raise ValueError("Rust text input requires 1-4096 safe characters")
-        state = status or self.status()
-        displays = self._displays(state)
-        if not displays:
-            raise RustEngineUnavailable("Rust daemon did not report any capturable display")
-        display_id = int(displays[0].get("id", -1))
-        if display_id < 0:
-            raise RustEngineUnavailable("Rust daemon returned an invalid display id")
-        foreground = self._foreground(state)
-        capture = self.capture(display_id)
-        frame = capture.get("frame")
-        if not isinstance(frame, dict) or not isinstance(frame.get("id"), str):
-            raise RustEngineExecutionError("Rust daemon capture did not return a usable frame")
+        display_id, foreground, frame = self._keyboard_input_context(status)
         return self._request(
             {
                 "kind": "type_text",
