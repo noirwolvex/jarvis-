@@ -314,6 +314,7 @@ mod windows_input {
     const MOUSEEVENTF_WHEEL: u32 = 0x0800;
     const WHEEL_DELTA: i32 = 120;
 
+    const KEYEVENTF_EXTENDEDKEY: u32 = 0x0001;
     const KEYEVENTF_KEYUP: u32 = 0x0002;
     const KEYEVENTF_UNICODE: u32 = 0x0004;
 
@@ -464,64 +465,64 @@ mod windows_input {
         send(&[mouse_input(MOUSEEVENTF_WHEEL, data)], "mouse wheel")
     }
 
-    fn virtual_key(value: &str) -> Result<u16> {
+    fn virtual_key(value: &str) -> Result<(u16, u32)> {
         validate_key_name(value)?;
         let normalized = value.trim().to_ascii_lowercase();
         if normalized.len() == 1 {
             let byte = normalized.as_bytes()[0];
             if byte.is_ascii_alphabetic() {
-                return Ok(byte.to_ascii_uppercase() as u16);
+                return Ok((byte.to_ascii_uppercase() as u16, 0));
             }
             if byte.is_ascii_digit() {
-                return Ok(byte as u16);
+                return Ok((byte as u16, 0));
             }
         }
-        let key = match normalized.as_str() {
-            "ctrl" | "control" => 0x11,
-            "alt" => 0x12,
-            "shift" => 0x10,
-            "win" | "windows" | "meta" | "super" => 0x5B,
-            "enter" | "return" => 0x0D,
-            "esc" | "escape" => 0x1B,
-            "tab" => 0x09,
-            "space" => 0x20,
-            "backspace" => 0x08,
-            "delete" | "del" => 0x2E,
-            "home" => 0x24,
-            "end" => 0x23,
-            "pageup" | "page_up" => 0x21,
-            "pagedown" | "page_down" => 0x22,
-            "left" | "leftarrow" => 0x25,
-            "up" | "uparrow" => 0x26,
-            "right" | "rightarrow" => 0x27,
-            "down" | "downarrow" => 0x28,
-            "f1" => 0x70,
-            "f2" => 0x71,
-            "f3" => 0x72,
-            "f4" => 0x73,
-            "f5" => 0x74,
-            "f6" => 0x75,
-            "f7" => 0x76,
-            "f8" => 0x77,
-            "f9" => 0x78,
-            "f10" => 0x79,
-            "f11" => 0x7A,
-            "f12" => 0x7B,
+        let (key, flags) = match normalized.as_str() {
+            "ctrl" | "control" => (0x11, 0),
+            "alt" => (0x12, 0),
+            "shift" => (0x10, 0),
+            "win" | "windows" | "meta" | "super" => (0x5B, 0),
+            "enter" | "return" => (0x0D, 0),
+            "esc" | "escape" => (0x1B, 0),
+            "tab" => (0x09, 0),
+            "space" => (0x20, 0),
+            "backspace" => (0x08, 0),
+            "delete" | "del" => (0x2E, KEYEVENTF_EXTENDEDKEY),
+            "home" => (0x24, KEYEVENTF_EXTENDEDKEY),
+            "end" => (0x23, KEYEVENTF_EXTENDEDKEY),
+            "pageup" | "page_up" => (0x21, KEYEVENTF_EXTENDEDKEY),
+            "pagedown" | "page_down" => (0x22, KEYEVENTF_EXTENDEDKEY),
+            "left" | "leftarrow" => (0x25, KEYEVENTF_EXTENDEDKEY),
+            "up" | "uparrow" => (0x26, KEYEVENTF_EXTENDEDKEY),
+            "right" | "rightarrow" => (0x27, KEYEVENTF_EXTENDEDKEY),
+            "down" | "downarrow" => (0x28, KEYEVENTF_EXTENDEDKEY),
+            "f1" => (0x70, 0),
+            "f2" => (0x71, 0),
+            "f3" => (0x72, 0),
+            "f4" => (0x73, 0),
+            "f5" => (0x74, 0),
+            "f6" => (0x75, 0),
+            "f7" => (0x76, 0),
+            "f8" => (0x77, 0),
+            "f9" => (0x78, 0),
+            "f10" => (0x79, 0),
+            "f11" => (0x7A, 0),
+            "f12" => (0x7B, 0),
             _ => {
                 return Err(Error::Unsupported(
                     "keyboard key is not supported by Windows native input",
                 ));
             }
         };
-        Ok(key)
+        Ok((key, flags))
     }
 
     pub fn press_key(value: &str) -> Result<()> {
-        let key = virtual_key(value)?;
+        let (key, flags) = virtual_key(value)?;
         send(
             &[
-                keyboard_input(key, 0, 0),
-                keyboard_input(key, 0, KEYEVENTF_KEYUP),
+                keyboard_input(key, 0, flags),
+                keyboard_input(key, 0, flags | KEYEVENTF_KEYUP),
             ],
             "keyboard key press",
         )
@@ -533,11 +534,11 @@ mod windows_input {
             .map(|value| virtual_key(value))
             .collect::<Result<Vec<_>>>()?;
         let mut events = Vec::with_capacity(keys.len() * 2);
-        for key in &keys {
-            events.push(keyboard_input(*key, 0, 0));
+        for (key, flags) in &keys {
+            events.push(keyboard_input(*key, 0, *flags));
         }
-        for key in keys.iter().rev() {
-            events.push(keyboard_input(*key, 0, KEYEVENTF_KEYUP));
+        for (key, flags) in keys.iter().rev() {
+            events.push(keyboard_input(*key, 0, *flags | KEYEVENTF_KEYUP));
         }
         match send(&events, "keyboard hotkey") {
             Ok(()) => Ok(()),
@@ -545,7 +546,7 @@ mod windows_input {
                 let releases = keys
                     .iter()
                     .rev()
-                    .map(|key| keyboard_input(*key, 0, KEYEVENTF_KEYUP))
+                    .map(|(key, flags)| keyboard_input(*key, 0, *flags | KEYEVENTF_KEYUP))
                     .collect::<Vec<_>>();
                 let _ = send(&releases, "keyboard hotkey cleanup");
                 Err(error)
