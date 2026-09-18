@@ -335,6 +335,33 @@ class RustDaemonClient:
             raise RustEngineUnavailable("Rust daemon returned an invalid foreground binding")
         return {"hwnd": hwnd, "process_id": process_id, "title": title}
 
+    @staticmethod
+    def _foreground_center(hwnd: int) -> tuple[int, int] | None:
+        if os.name != "nt":
+            return None
+        try:
+            import ctypes
+
+            class RECT(ctypes.Structure):
+                _fields_ = [
+                    ("left", ctypes.c_long),
+                    ("top", ctypes.c_long),
+                    ("right", ctypes.c_long),
+                    ("bottom", ctypes.c_long),
+                ]
+
+            rect = RECT()
+            if not ctypes.windll.user32.GetWindowRect(int(hwnd), ctypes.byref(rect)):
+                return None
+            if rect.right <= rect.left or rect.bottom <= rect.top:
+                return None
+            return (
+                int((rect.left + rect.right) // 2),
+                int((rect.top + rect.bottom) // 2),
+            )
+        except Exception:
+            return None
+
     def _input_context_for_display(
         self,
         state: dict[str, Any],
@@ -355,11 +382,33 @@ class RustDaemonClient:
         displays = self._displays(state)
         if not displays:
             raise RustEngineUnavailable("Rust daemon did not report any capturable display")
-        display_id = int(displays[0].get("id", -1))
+        foreground = self._foreground(state)
+        center = self._foreground_center(int(foreground["hwnd"]))
+        selected: dict[str, Any] | None = None
+        if center is not None:
+            try:
+                selected = self._display_for_point(state, center[0], center[1])
+            except RustEngineUnavailable:
+                selected = None
+        if selected is None:
+            selected = next(
+                (
+                    row for row in displays
+                    if int(row.get("id", -1)) in self.config.input_capabilities
+                    and int(row.get("id", -1)) in self.config.observe_capabilities
+                ),
+                displays[0],
+            )
+        display_id = int(selected.get("id", -1))
         if display_id < 0:
             raise RustEngineUnavailable("Rust daemon returned an invalid display id")
-        foreground, frame = self._input_context_for_display(state, display_id)
-        return display_id, foreground, frame
+        captured_foreground, frame = self._input_context_for_display(state, display_id)
+        if (
+            captured_foreground["hwnd"] != foreground["hwnd"]
+            or captured_foreground["process_id"] != foreground["process_id"]
+        ):
+            raise RustEngineUnavailable("Foreground changed while preparing keyboard input")
+        return display_id, captured_foreground, frame
 
     def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
         return self.click_button(x, y, "left", 1, status)
