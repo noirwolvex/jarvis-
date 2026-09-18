@@ -3,8 +3,10 @@ from __future__ import annotations
 from typing import Callable, Any
 
 from .agent import AgentEvent
+from .autonomous_orchestrator import AutonomousTaskOrchestrator
 from .fast_mission import execute_fast_mission
 from .full_access_agent import FullAccessJarvisAgent
+from .task_tools import register_task_tools
 
 _DEV_SIGNALS = (
     " git", "git ", "github", "repo", "repository", "code", "coding", "vscode", "visual studio code",
@@ -44,6 +46,13 @@ _DESKTOP_FAST_PREFIXES = (
 
 class FastExecutionFullAccessAgent(FullAccessJarvisAgent):
     """Full Access agent with a deterministic fast lane and lower-latency model behavior."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        previous = self.orchestrator
+        self.orchestrator = AutonomousTaskOrchestrator(str(previous.trace_dir))
+        self.orchestrator.strict_order = True
+        register_task_tools(self.tools, self.orchestrator)
 
     def _system_prompt(self, user_text: str = "") -> str:
         return super()._system_prompt(user_text) + """
