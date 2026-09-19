@@ -6,6 +6,13 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
+const UNICODE_CHUNK_UNITS: usize = 256;
+const SCROLL_CHUNK_STEPS: i32 = 32;
+
+fn scroll_chunk(remaining: i32) -> i32 {
+    remaining.clamp(-SCROLL_CHUNK_STEPS, SCROLL_CHUNK_STEPS)
+}
+
 pub trait InputController: Send + Sync {
     fn click(
         &self,
@@ -137,7 +144,7 @@ fn validate_text(text: &str) -> Result<()> {
 
 #[cfg(any(all(feature = "native", target_os = "windows"), test))]
 fn unicode_chunks(text: &str, mut deliver: impl FnMut(&[u16]) -> Result<()>) -> Result<()> {
-    let mut chunk = [0u16; 64];
+    let mut chunk = [0u16; UNICODE_CHUNK_UNITS];
     let mut used = 0;
     for character in text.chars() {
         if used + character.len_utf16() > chunk.len() {
@@ -173,7 +180,7 @@ mod unicode_tests {
         let text = format!("{}🦀{}ع", "x".repeat(63), "🎹".repeat(70));
         let mut recovered = String::new();
         unicode_chunks(&text, |chunk| {
-            assert!(chunk.len() <= 64);
+            assert!(chunk.len() <= UNICODE_CHUNK_UNITS);
             recovered.push_str(
                 &String::from_utf16(chunk).expect("each chunk contains complete scalars"),
             );
@@ -181,6 +188,28 @@ mod unicode_tests {
         })
         .unwrap();
         assert_eq!(recovered, text);
+    }
+
+    #[test]
+    fn long_unicode_input_uses_high_throughput_bounded_chunks() {
+        let mut calls = 0;
+        unicode_chunks(&"ع".repeat(4096), |chunk| {
+            calls += 1;
+            assert!(chunk.len() <= UNICODE_CHUNK_UNITS);
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(calls, 4096 / UNICODE_CHUNK_UNITS);
+    }
+
+    #[test]
+    fn scroll_chunks_preserve_direction_and_reduce_dispatch_count() {
+        assert_eq!(scroll_chunk(1000), SCROLL_CHUNK_STEPS);
+        assert_eq!(scroll_chunk(-1000), -SCROLL_CHUNK_STEPS);
+        assert_eq!(scroll_chunk(7), 7);
+        assert_eq!(scroll_chunk(-7), -7);
+        assert_eq!(scroll_chunk(0), 0);
+        assert!(1000_i32.div_ceil(SCROLL_CHUNK_STEPS) <= 32);
     }
 
     #[test]
@@ -858,9 +887,9 @@ impl InputController for NativeInput {
         while remaining != 0 {
             emergency.check()?;
             verify_foreground(foreground)?;
-            let magnitude = remaining.abs().min(8);
-            let chunk = if remaining > 0 { magnitude } else { -magnitude };
-            // Public JARVIS semantics follow PyAutoGUI/Windows: positive means scroll up.
+            let chunk = scroll_chunk(remaining);
+            // Keep emergency/foreground checks between bounded batches while reducing
+            // Win32 SendInput overhead for long scrolls. Positive means scroll up.
             windows_input::scroll(chunk)?;
             remaining -= chunk;
         }
