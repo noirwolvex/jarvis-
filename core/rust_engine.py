@@ -823,7 +823,7 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
                         source = client._display_for_point(status, pointer["x"], pointer["y"])
                         target = client._display_for_point(status, int(x), int(y))
                         if source["id"] == target["id"]:
-                            seconds = 0.08
+                            seconds = 0.05
                     except RustEngineUnavailable:
                         pass  # No known in-display path; the client still validates the destination.
             return client.pointer_move(int(x), int(y), status, duration=seconds)
@@ -832,7 +832,7 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
             invoke,
             x=x,
             y=y,
-            duration=0.08 if duration is None else duration,
+            duration=0.05 if duration is None else duration,
         )
 
     def desktop_drag(
