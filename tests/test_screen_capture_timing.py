@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from types import SimpleNamespace
 from pathlib import Path
 from unittest.mock import Mock, patch
 
@@ -12,7 +13,8 @@ class ScreenCaptureTimingTests(unittest.TestCase):
     def setUp(self):
         self.directory = tempfile.TemporaryDirectory()
         self.addCleanup(self.directory.cleanup)
-        for mocked in (patch.object(vision, "_workspace", return_value=Path(self.directory.name)),
+        for mocked in (patch.object(vision, "os", SimpleNamespace(name="nt")),
+                       patch.object(vision, "_workspace", return_value=Path(self.directory.name)),
                        patch("core.desktop_observation.foreground_identity", return_value=7),
                        patch.object(vision, "_virtual_origin", return_value=(0, 0)),
                        patch("core.process_control._cancelled", return_value=False)):
