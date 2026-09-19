@@ -63,7 +63,7 @@ class PointerTimingTests(unittest.TestCase):
         client._display_for_point.side_effect = RustDaemonClient._display_for_point
         client.pointer_move.return_value = {"executed": True, "simulation": False}
         register_rust_engine_tools(registry)
-        for pointer, expected_duration in [({"x": -200, "y": 200}, .08), ({"x": 200, "y": 200}, 0), (None, 0)]:
+        for pointer, expected_duration in [({"x": -200, "y": 200}, .05), ({"x": 200, "y": 200}, 0), (None, 0)]:
             self.state["pointer"] = pointer
             with patch("core.rust_engine._preflight", return_value=(client, self.state)):
                 result = registry.execute("desktop_move", {"x": -100, "y": 200})
