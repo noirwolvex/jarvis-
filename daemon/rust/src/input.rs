@@ -6,9 +6,12 @@ use crate::{
 };
 use std::time::{Duration, Instant};
 
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
 const UNICODE_CHUNK_UNITS: usize = 256;
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
 const SCROLL_CHUNK_STEPS: i32 = 32;
 
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
 fn scroll_chunk(remaining: i32) -> i32 {
     remaining.clamp(-SCROLL_CHUNK_STEPS, SCROLL_CHUNK_STEPS)
 }
@@ -209,7 +212,7 @@ mod unicode_tests {
         assert_eq!(scroll_chunk(7), 7);
         assert_eq!(scroll_chunk(-7), -7);
         assert_eq!(scroll_chunk(0), 0);
-        assert!(1000_i32.div_ceil(SCROLL_CHUNK_STEPS) <= 32);
+        assert!((1000 + SCROLL_CHUNK_STEPS - 1) / SCROLL_CHUNK_STEPS <= 32);
     }
 
     #[test]
