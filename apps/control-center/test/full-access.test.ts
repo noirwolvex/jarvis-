@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import { emergencyStopHybrid, resetHybridStop, hybridSnapshot, setHybridAccessMode, submitHybridMission } from "../src/lib/hybrid-control.ts";
 import { parseControlBody, readControlObject } from "../src/lib/control-service.ts";
-import { FULL_ACCESS_WORKER_REVISION, validateMissionResult, runFullAccessMission } from "../src/lib/full-access-bridge.ts";
+import { FULL_ACCESS_WORKER_REVISION, validateMissionResult, validateTaskGraph, runFullAccessMission } from "../src/lib/full-access-bridge.ts";
 import { POST as accessPost } from "../src/app/api/full-access/route.ts";
 
 test("emergency stop revokes access, cancels active worker and stays latched", { skip: process.platform !== "win32" }, async () => {
@@ -138,6 +138,53 @@ test("completion rejects missing evidence and retains actionable failure checkpo
   assert.throws(() => validateMissionResult({ ...result, task_graph: [{ id: 1 }] }), /task graph/);
   assert.throws(() => validateMissionResult({ ...result, execution_metrics: { model_calls: -1 } }), /metrics/);
   assert.throws(() => validateMissionResult({ ok: false, result: "Provider timeout", task_id: "task-1-01234567" }), /Provider timeout.*checkpoint/);
+});
+
+test("live task graph validation rejects ambiguous identities, missing dependencies and invalid phases", () => {
+  const node = { id: "one", action: "type", description: "Type fixture", dependencies: [], status: "RUNNING" };
+  assert.equal(validateTaskGraph([node])[0]?.id, "one");
+  assert.throws(() => validateTaskGraph([node, node]), /identity/);
+  assert.throws(() => validateTaskGraph([{ ...node, dependencies: ["missing"] }]), /dependency/);
+  assert.throws(() => validateTaskGraph([{ ...node, status: "SUCCESS_GUESSED" }]), /phase/);
+  assert.throws(() => validateTaskGraph([{ ...node, execution_backend: {} }]), /backend/);
+  assert.throws(() => validateTaskGraph([{ ...node, action: "x".repeat(1001) }]), /graph/);
+});
+
+test("live execution graph updates before completion and rejects stale updates after revocation", { skip: process.platform !== "win32" }, async () => {
+  const globals = globalThis as any;
+  delete globals.jarvisHybridV3;
+  const child = new EventEmitter() as any;
+  child.exitCode = null;
+  child.killed = false;
+  child.stdin = { write: (_data: string, callback: () => void) => callback?.() };
+  child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
+  const worker = { revision: FULL_ACCESS_WORKER_REVISION, child, pending: new Map(), buffer: "", stderr: "" };
+  globals.jarvisFullAccessWorkerV1 = worker;
+  try {
+    setHybridAccessMode("full");
+    submitHybridMission("Synthetic graph fixture; never interact with desktop");
+    const progress = worker.pending.values().next().value.onProgress;
+    const nodes = [{ id: "one", action: "type", description: "Type fixture", dependencies: [], status: "DELIVERED", execution_backend: "python_native" },
+      { id: "two", action: "verify", description: "Read editor", dependencies: ["one"], status: "QUEUED" }];
+    progress("task_graph", JSON.stringify(nodes));
+    const task = hybridSnapshot().tasks[0]!;
+    assert.equal(task.status, "RUNNING");
+    assert.equal(task.nodes[0]?.status, "DELIVERED");
+    assert.match(task.nodes[0]!.action, /python_native/);
+    assert.deepEqual(task.nodes[1]?.dependencies, [task.nodes[0]?.id]);
+    progress("task_graph", "invalid JSON");
+    assert.equal(hybridSnapshot().tasks[0]?.nodes[0]?.status, "DELIVERED");
+    setHybridAccessMode("standard");
+    progress("task_graph", JSON.stringify([{ ...nodes[0], status: "COMPLETED" }]));
+    assert.equal(hybridSnapshot().tasks[0]?.nodes[0]?.status, "DELIVERED");
+    await new Promise(resolve => setImmediate(resolve));
+  } finally {
+    setHybridAccessMode("standard");
+    await new Promise(resolve => setImmediate(resolve));
+    child.kill();
+    delete globals.jarvisFullAccessWorkerV1;
+    delete globals.jarvisHybridV3;
+  }
 });
 
 test("access endpoint requires separate explicit confirmation for terminal authority", async () => {

@@ -55,6 +55,8 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76, settl
     except (AttributeError, OSError):
         pass
     foreground = foreground_identity()
+    from .execution_telemetry import record_backend
+    record_backend("vision_capture", phase="observe", detail="Capture live desktop")
     capture_started = time.monotonic()
     image = ImageGrab.grab(all_screens=True)
     stable = False

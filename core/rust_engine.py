@@ -270,6 +270,9 @@ class RustDaemonClient:
                 # uncertain before the first write attempt so auto mode never replays it
                 # through the Python fallback after a transport error.
                 dispatch_may_have_started = mutating
+                from .execution_telemetry import record_backend
+                record_backend("rust_native", phase="execute" if mutating else "observe",
+                               detail=str(action.get("kind", "request")))
                 self._socket.sendall(struct.pack(">I", len(encoded)) + encoded)
                 for _ in range(64):
                     reply = self._read_frame(self._socket)
@@ -742,6 +745,8 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
         original = originals.get(name)
         if original is None:
             raise RuntimeError(f"Python fallback is unavailable for {name}")
+        from .execution_telemetry import record_backend
+        record_backend("python_native", detail="Compatibility input adapter")
         return original.handler(**kwargs)
 
     def run_atomic(name: str, invoke, **fallback_args: Any) -> str:

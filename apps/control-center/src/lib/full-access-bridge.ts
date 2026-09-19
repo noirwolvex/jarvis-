@@ -29,6 +29,7 @@ export type FullAccessMissionResult = {
     status: string;
     execution_backend?: string;
     resolution_backend?: string;
+    verification_result?: string;
     result?: string;
   }>;
   engine_visibility?: Array<{
@@ -75,7 +76,7 @@ type WorkerState = {
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-export const FULL_ACCESS_WORKER_REVISION = 5;
+export const FULL_ACCESS_WORKER_REVISION = 6;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
@@ -86,6 +87,30 @@ function repoRoot(env: NodeJS.ProcessEnv = process.env): string {
     if (existsSync(resolve(candidate, "core", "full_access_bridge.py"))) return resolve(candidate);
   }
   throw new Error("Could not locate the JARVIS repository root for Full Access");
+}
+
+export function validateTaskGraph(input: unknown): NonNullable<FullAccessMissionResult["task_graph"]> {
+  const phases = new Set(["QUEUED", "RUNNING", "DELIVERED", "VERIFIED", "RECOVERING", "FAILED", "WAITING_USER", "COMPLETED"]);
+  if (!Array.isArray(input) || input.length > 100) throw new Error("Invalid autonomous task graph");
+  const ids = new Set<string>();
+  for (const item of input) {
+    if (!item || typeof item !== "object" || Array.isArray(item)) throw new Error("Invalid autonomous task graph node");
+    const row = item as Record<string, unknown>;
+    for (const [key, limit] of Object.entries({ id: 128, action: 1000, description: 1000, status: 32 })) {
+      if (typeof row[key] !== "string" || (row[key] as string).length > limit) throw new Error(`Invalid autonomous task graph ${key}`);
+    }
+    if (!row.id || ids.has(row.id as string) || !phases.has(row.status as string)) throw new Error("Invalid graph identity or phase");
+    ids.add(row.id as string);
+    if (!Array.isArray(row.dependencies) || row.dependencies.length > 100
+        || !row.dependencies.every(dep => typeof dep === "string" && dep.length > 0 && dep.length <= 128)) throw new Error("Invalid graph dependencies");
+    for (const [key, limit] of Object.entries({ execution_backend: 512, resolution_backend: 512, verification_result: 1000, result: 12000 })) {
+      if (row[key] !== undefined && (typeof row[key] !== "string" || (row[key] as string).length > limit)) throw new Error(`Invalid graph ${key}`);
+    }
+  }
+  for (const row of input) {
+    if (row.dependencies.some((dep: string) => dep === row.id || !ids.has(dep))) throw new Error("Unknown graph dependency");
+  }
+  return input as NonNullable<FullAccessMissionResult["task_graph"]>;
 }
 
 export function validateMissionResult(input: unknown): FullAccessMissionResult {
@@ -112,13 +137,7 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
   }
   if (parsed.requires_user_action && parsed.status !== "waiting_user") throw new Error("Invalid user-action checkpoint status");
   if (parsed.task_graph !== undefined) {
-    if (!Array.isArray(parsed.task_graph) || parsed.task_graph.length > 100 || !parsed.task_graph.every(item => {
-      if (!item || typeof item !== "object" || Array.isArray(item)) return false;
-      const row = item as Record<string, unknown>;
-      return typeof row.id === "string" && typeof row.action === "string" && typeof row.description === "string"
-        && typeof row.status === "string" && Array.isArray(row.dependencies)
-        && row.dependencies.every(dep => typeof dep === "string");
-    })) throw new Error("Invalid autonomous task graph");
+    validateTaskGraph(parsed.task_graph);
   }
   if (parsed.engine_visibility !== undefined && (!Array.isArray(parsed.engine_visibility) || parsed.engine_visibility.length > 50)) {
     throw new Error("Invalid engine visibility");
@@ -186,6 +205,13 @@ function handleWorkerLine(state: WorkerState, raw: string) {
   }
   if (value.type === "observation" && typeof value.id === "string") {
     state.pending.get(value.id)?.onProgress?.("observation", JSON.stringify({ frame: value.frame, preview: value.preview }));
+    return;
+  }
+  if (value.type === "task_graph" && typeof value.id === "string") {
+    let nodes;
+    try { nodes = validateTaskGraph(value.nodes); }
+    catch { return; }
+    state.pending.get(value.id)?.onProgress?.("task_graph", JSON.stringify(nodes));
     return;
   }
   if (value.type !== "result" || typeof value.id !== "string") return;

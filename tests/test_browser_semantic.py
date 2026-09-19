@@ -36,7 +36,7 @@ class BrowserRuntimeTests(unittest.TestCase):
         with patch("core.process_control.check_cancelled", side_effect=check):
             with self.assertRaisesRegex(RuntimeError, "stopped"):
                 runtime.call("page", operation="click", selector="#send")
-        command, args, reply, cancelled = runtime._commands.get_nowait()
+        command, args, reply, cancelled, context = runtime._commands.get_nowait()
         self.assertTrue(cancelled.is_set())
         runtime._active_cancel = cancelled
         with self.assertRaisesRegex(RuntimeError, "abandoned"):

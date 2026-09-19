@@ -61,9 +61,20 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                     "Cannot mark a step completed before a successful non-task tool result provides execution or observation evidence."
                 )
             verified_evidence = next(
-                (trace for trace in evidence if str(trace.result).startswith("VERIFIED:")),
+                (trace for index, trace in reversed(list(enumerate(orchestrator.current.traces)))
+                 if index >= max(orchestrator.current.last_mutation_index, len(orchestrator.current.traces) - len(recent))
+                 and trace in evidence and str(trace.result).startswith("VERIFIED:")),
                 None,
             )
+            latest_verification = orchestrator.current.verifications[-1] if orchestrator.current.verifications else None
+            independently_verified = bool(
+                latest_verification and latest_verification.verified
+                and latest_verification.evidence.strip()
+                and latest_verification.evidence_trace_index >= max(
+                    orchestrator.current.last_mutation_index, len(orchestrator.current.traces) - len(recent))
+            )
+            if verified_evidence is None and not independently_verified:
+                raise ValueError("Cannot complete a step from delivery alone; observe the outcome and verify it first")
 
         orchestrator.update_step(step_id, normalized, result)
         if normalized == "completed" and verified_evidence is not None:

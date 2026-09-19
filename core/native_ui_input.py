@@ -6,9 +6,11 @@ from typing import Any
 from .desktop_input import InputDeliveryError
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
+from .semantic_target import SELECTOR_SCHEMA
+from .execution_telemetry import record_backend
 
 
-def ui_type_native(text: str, target: str = "", title: str = "") -> str:
+def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[str, Any] | None = None) -> str:
     """Type through the Rust daemon while UIA resolves/focuses and verifies the editor."""
     value = str(text)
     if not value or len(value) > 4096 or "\0" in value:
@@ -22,6 +24,10 @@ def ui_type_native(text: str, target: str = "", title: str = "") -> str:
         _focus_control,
         _focus_window,
         _guard_foreground,
+        _guard_native_target,
+        _has_focus,
+        _target_binding,
+        _validate_target,
         _meta,
         _window,
         ui_type,
@@ -33,8 +39,9 @@ def ui_type_native(text: str, target: str = "", title: str = "") -> str:
     win = _window(title)
     hwnd = _focus_window(win)
     _guard_foreground(hwnd)
-    control = _find_control(win, target, editable=True)
+    control = _find_control(win, target, editable=True, selector=selector)
     _focus_control(control, hwnd)
+    binding = _target_binding(win, control)
     before_value = _control_value(control)
     if before_value is None:
         raise InputDeliveryError(
@@ -44,22 +51,27 @@ def ui_type_native(text: str, target: str = "", title: str = "") -> str:
 
     client, status = _preflight()
     if client is None:
-        # Compatibility is allowed only for explicitly requested auto mode. The normal
+        # Compatibility is allowed for auto or explicitly selected Python mode. The normal
         # JARVIS X launcher uses strict rust mode and must fail closed if the daemon/config
         # is unavailable instead of silently typing through Python.
-        if native_engine_mode() == "auto":
-            return ui_type(text=value, target=target, title=title, submit=False, replace=False)
+        if native_engine_mode() in {"auto", "python"}:
+            return ui_type(text=value, target=target, title=title, submit=False, replace=False, selector=selector)
         raise RustEngineUnavailable(
             "Strict Rust mode requires the native daemon before semantic keyboard input"
         )
 
-    _guard_foreground(hwnd)
+    _validate_target(win, control, binding)
+    _guard_native_target(hwnd, status)
+    if not _has_focus(control) or _control_value(control) != before_value:
+        raise InputDeliveryError("Editor focus or draft changed during Rust preflight; no input delivered")
+    if before_value or any(char in value for char in "\r\n"):
+        raise InputDeliveryError("Native typing requires an empty single-line composer; use ui_type with a writable Value pattern for drafts or multiline text")
     _SNAPSHOTS.invalidate(hwnd)
     try:
         result = client.type_text(value, status)
     except RustEngineUnavailable:
         if native_engine_mode() == "auto":
-            return ui_type(text=value, target=target, title=title, submit=False, replace=False)
+            return ui_type(text=value, target=target, title=title, submit=False, replace=False, selector=selector)
         raise
 
     if result.get("executed") is not True or result.get("simulation") is not False:
@@ -69,6 +81,7 @@ def ui_type_native(text: str, target: str = "", title: str = "") -> str:
 
     def value_matches() -> bool:
         _guard_foreground(hwnd)
+        record_backend("windows_uia", phase="verify", detail="Exact editor readback after native input")
         return _control_value(control) == expected
 
     try:
@@ -113,6 +126,7 @@ def register_native_ui_input_tools(registry: ToolRegistry) -> None:
                     "text": {"type": "string", "minLength": 1, "maxLength": 4096},
                     "target": {"type": "string"},
                     "title": {"type": "string"},
+                    "selector": SELECTOR_SCHEMA,
                 },
                 "required": ["text"],
                 "additionalProperties": False,

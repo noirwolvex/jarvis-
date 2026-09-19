@@ -71,6 +71,7 @@ class ExecutionPlanStep(PlanStep):
 class ExecutionToolTrace(ToolTrace):
     execution_backend: str = ""
     resolution_backend: str = ""
+    operations: list[dict[str, str]] = field(default_factory=list)
 
 
 @dataclass
@@ -89,10 +90,10 @@ class AutonomousTaskRun(TaskRun):
 
 
 class ExecutionRouter:
-    """Classify the real execution path and expose the preferred deterministic fallback order.
+    """Describe preferred routes for planning, never evidence of actual execution.
 
     This class does not blindly switch methods. It describes the route selected by the
-    runtime and the legal preference order. Recovery still has to re-observe state and
+    planner and the legal preference order. Recovery still has to re-observe state and
     determine whether a fallback is safe before mutating the desktop.
     """
 
@@ -171,6 +172,16 @@ class ExecutionRouter:
 
 class AutonomousTaskOrchestrator(TaskOrchestrator):
     """TaskOrchestrator with execution contracts, backend visibility and recovery history."""
+
+    def _persist(self, task: TaskRun) -> None:
+        super()._persist(task)
+        callback = getattr(self, "on_task_graph", None)
+        if callback is not None:
+            # Progress is read-only and must never turn a delivered action into a retry.
+            try:
+                callback(self.live_task_graph())
+            except Exception:
+                task.metrics["progress_delivery_errors"] = task.metrics.get("progress_delivery_errors", 0) + 1
 
     def begin(self, goal: str) -> AutonomousTaskRun:
         self.current = AutonomousTaskRun(
@@ -268,7 +279,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                 "running": "RUNNING",
                 "failed": "FAILED",
                 "completed": "COMPLETED",
-                "skipped": "COMPLETED",
+                "skipped": "FAILED",
             }
             step.phase = phase_by_status.get(status, step.phase)
             self._persist(self.current)
@@ -306,6 +317,10 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             return
 
         route = ExecutionRouter.classify(name, arguments)
+        evidence = getattr(result, "execution", {})
+        operations = evidence.get("operations", [])
+        backend = evidence.get("backend", "unreported")
+        resolution = "+".join(dict.fromkeys(row["engine"] for row in operations if row["phase"] == "resolve"))
         base = self.current.traces[-1]
         self.current.traces[-1] = ExecutionToolTrace(
             name=base.name,
@@ -314,16 +329,18 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             success=base.success,
             duration_ms=base.duration_ms,
             turn=base.turn,
-            execution_backend=route.execution_backend,
-            resolution_backend=route.resolution_backend,
+            execution_backend=backend,
+            resolution_backend=resolution,
+            operations=operations,
         )
 
         running = [step for step in self.current.plan if step.status == "running"]
         if running:
             step = running[-1]
             if isinstance(step, ExecutionPlanStep):
-                step.execution_backend = route.execution_backend
-                step.resolution_backend = route.resolution_backend
+                if mutation or not step.execution_backend:
+                    step.execution_backend = backend
+                    step.resolution_backend = resolution
                 if not step.fallback_strategy:
                     step.fallback_strategy = list(route.fallback_chain)
                 if mutation and tool_succeeded(result):
@@ -356,8 +373,6 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             (step for step in reversed(self.current.plan) if step.status in {"running", "failed"}),
             None,
         )
-        route = ExecutionRouter.classify(tool_name)
-        selected = route.fallback_chain[0] if route.fallback_chain else ""
         if isinstance(active, ExecutionPlanStep):
             active.phase = "RECOVERING"
             step_id = active.id
@@ -368,7 +383,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                 step_id=step_id,
                 failure=str(result)[:4000],
                 recovery_action=hint,
-                selected_backend=selected,
+                selected_backend="",  # Inspection guidance is not an executed fallback.
             ))
         self._persist(self.current)
         return hint
@@ -430,6 +445,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                 "duration_ms": trace.duration_ms,
                 "execution_backend": getattr(trace, "execution_backend", ""),
                 "resolution_backend": getattr(trace, "resolution_backend", ""),
+                "operations": getattr(trace, "operations", []),
             })
         data.update({
             "task_graph": self.live_task_graph(),

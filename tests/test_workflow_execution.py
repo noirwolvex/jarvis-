@@ -280,8 +280,10 @@ class WorkflowExecutionTests(unittest.TestCase):
         native_press.assert_called_once_with(key="enter")
         observe.assert_called_once()
         summary = autonomous.summary()
-        self.assertEqual(summary["engine_visibility"][0]["execution_backend"], "RUST_NATIVE")
-        self.assertEqual(summary["engine_visibility"][1]["execution_backend"], "RUST_NATIVE")
+        # These fixture handlers do not dispatch a native adapter. Tool names and
+        # result prose must never masquerade as actual Rust execution evidence.
+        self.assertEqual(summary["engine_visibility"][0]["execution_backend"], "unreported")
+        self.assertEqual(summary["engine_visibility"][1]["execution_backend"], "unreported")
         self.assertFalse(autonomous.needs_action_review())
 
     def test_failed_parallel_tool_response_defers_later_mutation(self):

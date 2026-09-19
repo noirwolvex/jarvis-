@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { freemem, totalmem } from "node:os";
-import { runFullAccessMission, stopFullAccessWorker } from "./full-access-bridge";
+import { runFullAccessMission, stopFullAccessWorker, validateTaskGraph, type FullAccessMissionResult } from "./full-access-bridge";
 import {
   launchLegacyApplication,
   parseLegacyLaunchMission,
@@ -147,6 +147,18 @@ export function submitHybridMission(title: string) {
   return { id };
 }
 
+function syncAgentGraph(task: TaskView, nodes: NonNullable<FullAccessMissionResult["task_graph"]>) {
+  if (!nodes.length) return;
+  const idMap = new Map(nodes.map(node => [node.id, `${task.id}:agent:${node.id}`]));
+  task.nodes = nodes.map(node => ({
+    id: idMap.get(node.id)!, title: node.description || node.action,
+    action: [node.execution_backend, node.resolution_backend, node.action,
+      node.verification_result, node.result].filter(Boolean).join(" · "),
+    dependencies: node.dependencies.map(dep => idMap.get(dep)!), status: node.status,
+  }));
+  getState().version += 1;
+}
+
 async function runFullMission(task: TaskView) {
   const value = getState();
   const abort = new AbortController();
@@ -161,6 +173,12 @@ async function runFullMission(task: TaskView) {
   try {
     const result = await runFullAccessMission(task.title, abort.signal, (kind, message) => {
       if (kind === "emergency_stop") { emergencyStopHybrid(); return; }
+      if (kind === "task_graph") {
+        if (value.emergencyStopped || abort.signal.aborted || value.accessMode !== "full") return;
+        try { syncAgentGraph(task, validateTaskGraph(JSON.parse(message))); }
+        catch { /* Invalid progress must not interrupt or retry a running mission. */ }
+        return;
+      }
       if (kind === "observation") {
         if (value.emergencyStopped || abort.signal.aborted || value.accessMode !== "full") return;
         const observation = JSON.parse(message);
@@ -184,15 +202,7 @@ async function runFullMission(task: TaskView) {
     execute.status = "VERIFIED";
 
     if (result.task_graph?.length) {
-      const idMap = new Map(result.task_graph.map(node => [node.id, `${task.id}:agent:${node.id}`]));
-      task.nodes = result.task_graph.map(node => ({
-        id: idMap.get(node.id)!,
-        title: node.description || node.action,
-        action: [node.execution_backend, node.resolution_backend, node.action].filter(Boolean).join(" · "),
-        dependencies: node.dependencies.map(dep => idMap.get(dep) ?? `${task.id}:agent:${dep}`),
-        status: node.status,
-      }));
-      value.version += 1;
+      syncAgentGraph(task, result.task_graph);
       addEvent("TASK_GRAPH_SYNCED", task.id, `Loaded ${task.nodes.length} agent execution nodes`);
     }
     for (const route of result.engine_visibility ?? []) {

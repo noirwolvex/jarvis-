@@ -51,6 +51,8 @@ def run_command(argv: list[str], cwd=None, timeout: float = 60) -> str:
         from .windows_job import WindowsJob
         job = WindowsJob()
     try:
+        from .execution_telemetry import record_backend
+        record_backend("direct_process", detail="Execute command")
         process = subprocess.Popen(argv, cwd=cwd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
                                    stderr=subprocess.STDOUT, creationflags=(subprocess.CREATE_NO_WINDOW | 4) if job else 0)
     except BaseException:

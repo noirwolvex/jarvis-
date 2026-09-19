@@ -13,6 +13,7 @@ from typing import Any, Callable
 from jsonschema import Draft202012Validator
 
 from .desktop_input import paste_text
+from .execution_telemetry import record_backend
 from .permissions import PermissionEngine, Risk
 
 _BROWSER = None
@@ -47,20 +48,30 @@ class ToolRegistry:
         ]
 
     def execute(self, name: str, arguments: dict[str, Any], approved: bool = False) -> str:
-        spec = self._tools.get(name)
-        if not spec:
-            return f"ERROR: Unknown tool: {name}"
-        ok, reason = self.permissions.check(name, spec.risk, approved)
-        if not ok:
-            return f"PERMISSION_DENIED: {reason}"
+        from .execution_telemetry import begin_execution, finish_execution
+        span, token = begin_execution()
+        dispatched = False
+        result = "ERROR: Tool did not return a result"
         try:
-            encoded = json.dumps(arguments, allow_nan=False)
-            if len(encoded.encode("utf-8")) > 65536:
-                raise ValueError("Tool arguments exceed 64 KiB")
-            self._validators[name].validate(arguments)
-            return spec.handler(**arguments)
+            spec = self._tools.get(name)
+            if not spec:
+                result = f"ERROR: Unknown tool: {name}"
+            else:
+                ok, reason = self.permissions.check(name, spec.risk, approved)
+                if not ok:
+                    result = f"PERMISSION_DENIED: {reason}"
+                else:
+                    encoded = json.dumps(arguments, allow_nan=False)
+                    if len(encoded.encode("utf-8")) > 65536:
+                        raise ValueError("Tool arguments exceed 64 KiB")
+                    self._validators[name].validate(arguments)
+                    dispatched = True
+                    result = spec.handler(**arguments)
         except Exception as exc:
-            return f"ERROR executing {name}: {type(exc).__name__}: {exc}"
+            result = f"ERROR executing {name}: {type(exc).__name__}: {exc}"
+        finally:
+            outcome = finish_execution(span, token, result, dispatched=dispatched)
+        return outcome
 
     def _register_builtin_tools(self) -> None:
         self.register(ToolSpec("run_powershell", "Run a non-interactive PowerShell command. Use only when needed to accomplish the user's request.", Risk.HIGH, {"type": "object", "properties": {"command": {"type": "string"}}, "required": ["command"]}, _run_powershell))
@@ -119,7 +130,9 @@ def _application_executable(command: str) -> str:
 def _launch_application(command: str) -> subprocess.Popen:
     # On Windows a string command line is accepted directly by CreateProcess.
     # shell=False keeps operators such as &, |, > and && from becoming shell syntax.
-    return subprocess.Popen(_application_executable(command), shell=False)
+    validated = _application_executable(command)
+    record_backend("direct_process", detail="Launch application")
+    return subprocess.Popen(validated, shell=False)
 
 
 def _open_application(command: str) -> str:
@@ -322,11 +335,14 @@ def _safe_path(path: str) -> Path:
 
 
 def _read_file(path: str) -> str:
-    return _safe_path(path).read_text(encoding="utf-8")[:20000]
+    target = _safe_path(path)
+    record_backend("direct_filesystem", phase="observe", detail="Read file")
+    return target.read_text(encoding="utf-8")[:20000]
 
 
 def _write_file(path: str, content: str) -> str:
     target = _safe_path(path)
+    record_backend("direct_filesystem", detail="Write file")
     target.parent.mkdir(parents=True, exist_ok=True)
     target.write_text(content, encoding="utf-8")
     return f"Wrote {len(content)} characters to {target}"
@@ -334,6 +350,7 @@ def _write_file(path: str, content: str) -> str:
 
 def _list_directory(path: str) -> str:
     target = _safe_path(path)
+    record_backend("direct_filesystem", phase="observe", detail="List directory")
     entries = [{"name": p.name, "type": "directory" if p.is_dir() else "file"} for p in sorted(target.iterdir(), key=lambda p: (not p.is_dir(), p.name.lower()))[:500]]
     return json.dumps({"path": str(target), "entries": entries}, ensure_ascii=False)
 

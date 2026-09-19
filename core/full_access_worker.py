@@ -182,6 +182,16 @@ def _handle(raw: str) -> dict[str, Any]:
             if not _STOPPED.is_set():
                 _write({"type": "observation", "id": request_id, **value})
 
+        last_graph = None
+
+        def task_graph(nodes):
+            nonlocal last_graph
+            from .mission_progress import compact_task_graph
+            compact = compact_task_graph(nodes)
+            if not _STOPPED.is_set() and compact != last_graph:
+                _write({"type": "task_graph", "id": request_id, "nodes": compact})
+                last_graph = compact
+
         payload = run_agent_mission(
             _agent(),
             title,
@@ -189,6 +199,7 @@ def _handle(raw: str) -> dict[str, Any]:
             cancel_event=_STOPPED,
             allow_shell=message.get("allow_shell") is True,
             observation_emit=observation,
+            task_graph_emit=task_graph,
         )
         return {"type": "result", "id": request_id, "ok": True, "payload": payload}
     except Exception as exc:

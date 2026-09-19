@@ -96,6 +96,7 @@ def run_agent_mission(
     cancel_event=None,
     allow_shell: bool = False,
     observation_emit=None,
+    task_graph_emit=None,
 ) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
@@ -114,6 +115,8 @@ def run_agent_mission(
     from .live_desktop import LiveDesktopMonitor, enabled as live_enabled
 
     monitor = None
+    previous_graph_callback = getattr(agent.orchestrator, "on_task_graph", None)
+    agent.orchestrator.on_task_graph = task_graph_emit
     agent.live_monitor = None
     agent._explicit_vision_pending = False
     try:
@@ -150,6 +153,7 @@ def run_agent_mission(
                     )
                     agent.orchestrator._persist(agent.orchestrator.current)
         finally:
+            agent.orchestrator.on_task_graph = previous_graph_callback
             agent.live_monitor = None
             # Cleanup still runs if capture or checkpoint persistence fails.
             release_held_inputs()

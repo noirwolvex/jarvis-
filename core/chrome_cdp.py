@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import threading
 import time
+from contextvars import Context, copy_context
 from pathlib import Path
 from typing import Any
 
@@ -15,7 +16,7 @@ class _ChromeRuntime:
     """Own all Playwright Sync API objects on one dedicated Python thread."""
 
     def __init__(self) -> None:
-        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any], threading.Event]] = queue.Queue()
+        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any], threading.Event, Context]] = queue.Queue()
         self._ready = threading.Event()
         self._startup_error: Exception | None = None
         self._browser: Any = None
@@ -32,7 +33,7 @@ class _ChromeRuntime:
         try:
             self._ready.set()
             while True:
-                command, args, reply, cancelled = self._commands.get()
+                command, args, reply, cancelled, context = self._commands.get()
                 self._active_cancel = cancelled
                 if command == "shutdown":
                     try:
@@ -45,7 +46,7 @@ class _ChromeRuntime:
                     return
                 try:
                     self._check_cancelled()
-                    result = getattr(self, f"_cmd_{command}")(**args)
+                    result = context.run(getattr(self, f"_cmd_{command}"), **args)
                     reply.put((True, result))
                 except Exception as exc:
                     reply.put((False, exc))
@@ -64,7 +65,7 @@ class _ChromeRuntime:
             raise RuntimeError(f"Chrome runtime thread failed: {self._startup_error}")
         reply: queue.Queue[Any] = queue.Queue(maxsize=1)
         cancelled = threading.Event()
-        self._commands.put((command, args, reply, cancelled))
+        self._commands.put((command, args, reply, cancelled, copy_context()))
         deadline = time.monotonic() + 60
         try:
             while True:
@@ -91,6 +92,8 @@ class _ChromeRuntime:
             raise RuntimeError("CANCELLED: Browser command was abandoned")
 
     def _cmd_connect(self, endpoint: str, session_type: str = "real") -> dict[str, Any]:
+        from .execution_telemetry import record_backend
+        record_backend("chrome_cdp", phase="observe", detail="Connect browser session")
         from playwright.sync_api import sync_playwright
 
         if self._browser is not None:
@@ -139,6 +142,8 @@ class _ChromeRuntime:
         return pages
 
     def _cmd_tabs(self) -> list[dict[str, Any]]:
+        from .execution_telemetry import record_backend
+        record_backend("chrome_cdp", phase="observe", detail="Read tabs")
         return _page_rows(self._refresh_pages())
 
     def _cmd_use_tab(self, index: int) -> dict[str, Any]:
@@ -147,6 +152,8 @@ class _ChromeRuntime:
             raise IndexError(f"Tab index {index} is out of range; {len(pages)} tabs are available.")
         self._page = pages[index]
         self._check_cancelled()
+        from .execution_telemetry import record_backend
+        record_backend("chrome_cdp", detail="Select existing tab")
         self._page.bring_to_front()
         return {
             "selected": index,
@@ -156,6 +163,8 @@ class _ChromeRuntime:
         }
 
     def _cmd_current(self) -> dict[str, Any]:
+        from .execution_telemetry import record_backend
+        record_backend("chrome_cdp", phase="observe", detail="Read current tab")
         if self._page is None:
             raise RuntimeError("No browser tab is selected.")
         return {
@@ -169,6 +178,10 @@ class _ChromeRuntime:
         if self._page is None:
             raise RuntimeError("No browser page is open")
         page = self._page
+        from .execution_telemetry import record_backend
+        record_backend("chrome_cdp", phase="execute" if operation in {
+            "semantic_action", "goto", "click", "fill", "press", "youtube_playback"
+        } else "observe", detail=operation)
         if operation in {"semantic_snapshot", "semantic_action", "wait_state", "challenge_state", "youtube_state", "youtube_playback", "youtube_results"}:
             from .browser_semantic import run_browser_operation
             return run_browser_operation(page, operation, args, self._check_cancelled)

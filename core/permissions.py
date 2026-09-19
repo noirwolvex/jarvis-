@@ -88,7 +88,7 @@ class PermissionEngine:
             return False, f"Tool {tool_name} is explicitly denied by policy."
         if self.access_mode == "restricted" and (
             tool_name.startswith("desktop_") and tool_name != "desktop_cursor"
-            or tool_name.startswith(("ui_", "discord_", "youtube_", "workflow_")) and tool_name not in {"ui_inspect", "ui_wait_state", "workflow_review", "workflow_status"}
+            or tool_name.startswith(("ui_", "discord_", "youtube_", "workflow_")) and tool_name not in {"ui_inspect", "ui_resolve", "ui_wait_state", "workflow_review", "workflow_status"}
             or tool_name in {"open_application", "open_application_and_type", "launch_installed_app", "focus_window", "focus_window_advanced", "close_window", "vscode_open"}
         ):
             return False, "Desktop interaction is disabled in restricted mode."

@@ -42,12 +42,17 @@ class _Control:
     def window_text(self):
         return self.element_info.name
 
+    def top_level_parent(self):
+        return self._owner
+
 
 class _Window:
     def __init__(self, controls):
         self._controls = controls
         self.handle = 123
         self.reads = 0
+        for control in controls:
+            control._owner = self
 
     def descendants(self):
         self.reads += 1
@@ -152,13 +157,13 @@ class SemanticUiToolsTests(unittest.TestCase):
         with patch.object(ui, "_window", return_value=win), \
              patch.object(ui, "_focus_window", return_value=123), \
              patch.object(ui, "_guard_foreground"), \
-             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True})), \
+             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}})), \
              patch("core.rust_engine.native_engine_mode", return_value="rust"):
             result = ui.ui_activate("Open")
         self.assertTrue(result.startswith("DELIVERED:"))
         data = json.loads(result.split(": ", 1)[1])
         self.assertEqual(data["method"], "rust_uia_center_click")
-        client.click.assert_called_once_with(250, 50, {"native_input": True})
+        client.click.assert_called_once_with(250, 50, {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}})
 
     def test_uncertain_invoke_never_retries_select_or_physical_click(self):
         button = _Control("Open", "Button")
@@ -267,16 +272,17 @@ class SemanticUiToolsTests(unittest.TestCase):
 
     def test_strict_rust_semantic_hotkey_does_not_bypass_native_engine(self):
         client = Mock()
+        status = {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}}
         client.hotkey.return_value = {"executed": True, "simulation": False}
         with patch.object(ui, "_window", return_value=_Window([])), \
              patch.object(ui, "_focus_window", return_value=123), \
              patch.object(ui, "_guard_foreground"), \
-             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True})), \
+             patch("core.rust_engine._preflight", return_value=(client, status)), \
              patch("core.rust_engine.native_engine_mode", return_value="rust"), \
              patch("core.tools._desktop_hotkey") as python_hotkey:
             result = ui.ui_hotkey(["ctrl", "l"])
         self.assertTrue(result.startswith("DELIVERED:"))
-        client.hotkey.assert_called_once_with(["ctrl", "l"], {"native_input": True})
+        client.hotkey.assert_called_once_with(["ctrl", "l"], status)
         python_hotkey.assert_not_called()
         self.assertEqual(json.loads(result.split(": ", 1)[1])["method"], "rust_native_hotkey")
 
@@ -284,6 +290,7 @@ class SemanticUiToolsTests(unittest.TestCase):
         editor = _Editor()
         del editor.iface_value
         client = Mock()
+        status = {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}}
         def deliver(text, status):
             editor.value += text
             return {"executed": True, "simulation": False}
@@ -291,12 +298,12 @@ class SemanticUiToolsTests(unittest.TestCase):
         with patch.object(ui, "_window", return_value=_Window([editor])), \
              patch.object(ui, "_focus_window", return_value=123), \
              patch.object(ui, "_guard_foreground"), \
-             patch("core.rust_engine._preflight", return_value=(client, {"native_input": True})), \
+             patch("core.rust_engine._preflight", return_value=(client, status)), \
              patch("core.rust_engine.native_engine_mode", return_value="rust"), \
              patch.object(ui, "paste_text") as python_type:
             result = ui.ui_type("hello", target="Message")
         self.assertTrue(result.startswith("VERIFIED:"))
-        client.type_text.assert_called_once_with("hello", {"native_input": True})
+        client.type_text.assert_called_once_with("hello", status)
         python_type.assert_not_called()
         self.assertEqual(json.loads(result.split(": ", 1)[1])["method"], "rust_native_input")
 

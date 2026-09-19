@@ -10,6 +10,7 @@ from core.autonomous_orchestrator import (
     AutonomousTaskOrchestrator,
     ExecutionRouter,
 )
+from core.execution_telemetry import ToolResult
 
 
 class ExecutionRouterTests(unittest.TestCase):
@@ -52,7 +53,7 @@ class AutonomousTaskOrchestratorTests(unittest.TestCase):
             orchestrator.record_tool(
                 "desktop_type",
                 {"text": "hello"},
-                "RUST_EXECUTED: typed",
+                ToolResult("RUST_EXECUTED: typed", {"backend": "rust_native", "operations": []}),
                 4.0,
                 1,
                 mutation=True,
@@ -60,8 +61,8 @@ class AutonomousTaskOrchestratorTests(unittest.TestCase):
             )
             self.assertFalse(orchestrator.needs_action_review())
             summary = orchestrator.summary()
-            self.assertEqual(summary["engine_visibility"][-1]["execution_backend"], "RUST_NATIVE")
-            self.assertEqual(summary["engine_visibility"][-1]["resolution_backend"], "FOREGROUND_WINDOW")
+            self.assertEqual(summary["engine_visibility"][-1]["execution_backend"], "rust_native")
+            self.assertEqual(summary["engine_visibility"][-1]["resolution_backend"], "")
 
             orchestrator.require_action_review()
             self.assertTrue(orchestrator.needs_action_review())
@@ -107,7 +108,7 @@ class AutonomousTaskOrchestratorTests(unittest.TestCase):
                 )
                 graph = orchestrator.live_task_graph()
                 self.assertEqual(graph[0]["status"], "DELIVERED")
-                self.assertEqual(graph[0]["execution_backend"], "DIRECT")
+                self.assertEqual(graph[0]["execution_backend"], "unreported")
                 self.assertEqual(graph[1]["retry_policy"]["max_attempts"], 2)
 
                 orchestrator.verify(
@@ -120,7 +121,7 @@ class AutonomousTaskOrchestratorTests(unittest.TestCase):
                 self.assertEqual(orchestrator.live_task_graph()[0]["status"], "COMPLETED")
 
                 summary = orchestrator.summary()
-                self.assertEqual(summary["engine_visibility"][-1]["execution_backend"], "DIRECT")
+                self.assertEqual(summary["engine_visibility"][-1]["execution_backend"], "unreported")
                 self.assertIn("task_graph", summary)
                 self.assertEqual(
                     summary["execution_priority"],
