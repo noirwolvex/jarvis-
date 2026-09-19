@@ -597,8 +597,22 @@ mod windows_input {
     }
 
     pub fn scroll(clicks: i32) -> Result<()> {
-        let data = clicks.saturating_mul(WHEEL_DELTA) as u32;
-        send(&[mouse_input(MOUSEEVENTF_WHEEL, data)], "mouse wheel")
+        if clicks == 0 {
+            return Ok(());
+        }
+        if clicks.abs() > SCROLL_CHUNK_STEPS {
+            return Err(Error::Limit("native scroll batch"));
+        }
+        // Preserve one physical wheel notch per INPUT record so applications that
+        // clamp or special-case large wheel deltas behave the same as real repeated
+        // wheel input, while one SendInput call still carries the whole bounded batch.
+        let data = if clicks > 0 {
+            WHEEL_DELTA as u32
+        } else {
+            (-WHEEL_DELTA) as u32
+        };
+        let inputs = vec![mouse_input(MOUSEEVENTF_WHEEL, data); clicks.abs() as usize];
+        send(&inputs, "mouse wheel")
     }
 
     fn virtual_key(value: &str) -> Result<(u16, u32)> {
