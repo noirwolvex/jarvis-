@@ -124,6 +124,10 @@ impl ProcessManager {
         Ok(rule)
     }
 
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Preserve explicit process authority, cancellation and output channels at this boundary"
+    )]
     pub async fn run(
         &self,
         id: &str,

@@ -9,6 +9,19 @@ from scripts import jarvis_runtime as runtime
 
 
 class RuntimeBootstrapTests(unittest.TestCase):
+    def test_default_runtime_builds_and_selects_optimized_native_executable(self):
+        with patch.dict(runtime.os.environ, {}, clear=True):
+            self.assertIn("--release", runtime._daemon_build_command("cargo"))
+            self.assertEqual(runtime._daemon_executable().parent.name, "release")
+
+    def test_debug_profile_is_explicit_and_invalid_profile_cannot_select_arbitrary_path(self):
+        with patch.dict(runtime.os.environ, {"JARVIS_RUST_PROFILE": "debug"}):
+            self.assertNotIn("--release", runtime._daemon_build_command("cargo"))
+            self.assertEqual(runtime._daemon_executable().parent.name, "debug")
+        with patch.dict(runtime.os.environ, {"JARVIS_RUST_PROFILE": "../unexpected"}):
+            with self.assertRaises(ValueError):
+                runtime._daemon_executable()
+
     def test_stale_daemon_cleanup_targets_only_exact_project_binary(self) -> None:
         target = Path("/repo/daemon/rust/target/debug/jarvis-daemon.exe")
 

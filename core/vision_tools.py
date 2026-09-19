@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import ctypes
 import hashlib
+import io
 import json
 import os
 import time
@@ -48,6 +49,10 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76, settl
 
     from PIL import ImageGrab, ImageChops, ImageStat
     from .desktop_observation import foreground_identity, remember_signature
+    from .process_control import check_cancelled
+    from .ui_state import cancellable_delay
+
+    check_cancelled()
 
     # Keep capture and input in physical pixels across monitors with different DPI.
     try:
@@ -55,46 +60,57 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76, settl
     except (AttributeError, OSError):
         pass
     foreground = foreground_identity()
+    origin_x, origin_y = _virtual_origin()
     from .execution_telemetry import record_backend
     record_backend("vision_capture", phase="observe", detail="Capture live desktop")
     capture_started = time.monotonic()
     image = ImageGrab.grab(all_screens=True)
+    captured_at_ms = int(time.time() * 1000)
+    check_cancelled()
     stable = False
-    deadline = capture_started + max(60, min(settle_ms, 1000)) / 1000
-    previous = image.resize((96, 54)).convert("RGB")
+    deadline = time.monotonic() + max(0, min(settle_ms, 1000)) / 1000
+    previous = image.resize((192, 108)).convert("RGB")
+    source_size = image.size
     while time.monotonic() < deadline:
-        time.sleep(0.06)
+        cancellable_delay(min(0.025, max(0, deadline - time.monotonic())))
         image = ImageGrab.grab(all_screens=True)
-        current = image.resize((96, 54)).convert("RGB")
-        difference = sum(ImageStat.Stat(ImageChops.difference(previous, current)).mean) / 3
-        if difference <= 1.5:
+        captured_at_ms = int(time.time() * 1000)
+        check_cancelled()
+        if image.size != source_size:
+            raise RuntimeError("Display geometry changed during capture; observe again")
+        current = image.resize((192, 108)).convert("RGB")
+        difference = ImageChops.difference(previous, current)
+        mean = sum(ImageStat.Stat(difference).mean) / 3
+        # A small popup or moving control must not vanish inside a whole-screen average.
+        peak = max(high for _, high in difference.getextrema())
+        if mean <= 1.5 and peak <= 8:
             stable = True
             break
         previous = current
-    if foreground != foreground_identity():
-        raise RuntimeError("Foreground changed during capture; observe again")
+    if foreground != foreground_identity() or (origin_x, origin_y) != _virtual_origin():
+        raise RuntimeError("Foreground or display geometry changed during capture; observe again")
     source_width, source_height = image.size
     source_signature = image.resize((192, 108)).convert("RGB")
-    origin_x, origin_y = _virtual_origin()
     target_width, target_height = _bounded_size(source_width, source_height, max_dimension)
     if (target_width, target_height) != (source_width, source_height):
         image = image.resize((target_width, target_height))
     if image.mode != "RGB":
         image = image.convert("RGB")
 
+    bounded_quality = max(45, min(int(quality), 88))
+    output = io.BytesIO()
+    image.save(output, format="JPEG", quality=bounded_quality)
+    raw = output.getvalue()
+    size = len(raw)
+    if size < 1 or size > _MAX_FILE_BYTES:
+        raise RuntimeError(f"Visual observation size is outside the allowed range: {size} bytes")
+
+    check_cancelled()
     out_dir = _workspace() / ".jarvis" / "vision"
     out_dir.mkdir(parents=True, exist_ok=True)
     path = out_dir / f"screen-{uuid.uuid4().hex}.jpg"
-    bounded_quality = max(45, min(int(quality), 88))
-    image.save(path, format="JPEG", quality=bounded_quality, optimize=True)
-    size = path.stat().st_size
-    if size < 1 or size > _MAX_FILE_BYTES:
-        try:
-            path.unlink(missing_ok=True)
-        finally:
-            raise RuntimeError(f"Visual observation size is outside the allowed range: {size} bytes")
-
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
     remember_signature(digest, source_signature)
     # Bounded disk retention, including long missions. Never follow arbitrary file names.
     for old in sorted(out_dir.glob("screen-*.jpg"), key=lambda item: item.stat().st_mtime, reverse=True)[8:]:
@@ -112,7 +128,7 @@ def screen_observe(max_dimension: int = _MAX_DIMENSION, quality: int = 76, settl
         "desktop_scale_y": source_height / float(target_height),
         "bytes": size,
         "sha256": digest,
-        "captured_at_ms": int(time.time() * 1000),
+        "captured_at_ms": captured_at_ms,
         "foreground_hwnd": foreground,
         "stable": stable,
         "scene_bound": True,
@@ -205,7 +221,7 @@ def register_vision_tools(registry: ToolRegistry) -> None:
                 "properties": {
                     "max_dimension": {"type": "integer", "minimum": 320, "maximum": 1920},
                     "quality": {"type": "integer", "minimum": 45, "maximum": 88},
-                    "settle_ms": {"type": "integer", "minimum": 60, "maximum": 1000},
+                    "settle_ms": {"type": "integer", "minimum": 0, "maximum": 1000},
                 },
                 "additionalProperties": False,
             },

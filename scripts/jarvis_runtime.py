@@ -39,9 +39,22 @@ def _run_checked(command: list[str], env: dict[str, str] | None = None) -> None:
         raise RuntimeError(f"Command failed ({completed.returncode}): {' '.join(command)}")
 
 
+def _rust_profile() -> str:
+    profile = os.getenv("JARVIS_RUST_PROFILE", "release").strip().lower()
+    if profile not in {"release", "debug"}:
+        raise ValueError("JARVIS_RUST_PROFILE must be release or debug")
+    return profile
+
+
+def _daemon_build_command(cargo: str) -> list[str]:
+    return [cargo, "build", "--quiet", "--locked", "--manifest-path", str(RUST_MANIFEST),
+            "--features", "native", "--bin", "jarvis-daemon",
+            *(["--release"] if _rust_profile() == "release" else [])]
+
+
 def _daemon_executable() -> Path:
     suffix = ".exe" if os.name == "nt" else ""
-    return ROOT / "daemon" / "rust" / "target" / "debug" / f"jarvis-daemon{suffix}"
+    return ROOT / "daemon" / "rust" / "target" / _rust_profile() / f"jarvis-daemon{suffix}"
 
 
 def _stop_stale_project_daemons(executable: Path) -> list[int]:
@@ -273,6 +286,7 @@ def _strict_engine_status(env: dict[str, str]) -> dict[str, Any]:
 
 def bootstrap() -> tuple[subprocess.Popen[Any], Any, Path, dict[str, str], dict[str, Any]]:
     _require_windows()
+    _rust_profile()  # Reject invalid configuration before provisioning or stopping anything.
     cargo = _tool("cargo")
     session_dir = RUNTIME_ROOT / f"{int(time.time())}-{os.getpid()}-{uuid.uuid4().hex[:8]}"
     session_dir.parent.mkdir(parents=True, exist_ok=True)
@@ -298,20 +312,7 @@ def bootstrap() -> tuple[subprocess.Popen[Any], Any, Path, dict[str, str], dict[
     # this repository; never use a broad taskkill by image name.
     _stop_stale_project_daemons(_daemon_executable())
 
-    _run_checked(
-        [
-            cargo,
-            "build",
-            "--quiet",
-            "--locked",
-            "--manifest-path",
-            str(RUST_MANIFEST),
-            "--features",
-            "native",
-            "--bin",
-            "jarvis-daemon",
-        ]
-    )
+    _run_checked(_daemon_build_command(cargo))
     executable = _daemon_executable()
     if not executable.is_file():
         raise RuntimeError(f"Rust daemon executable was not produced: {executable}")

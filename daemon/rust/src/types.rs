@@ -79,6 +79,8 @@ pub enum Action {
         frame_id: Uuid,
         x: i32,
         y: i32,
+        #[serde(default)]
+        duration_ms: u64,
         foreground: ForegroundBinding,
     },
     Drag {

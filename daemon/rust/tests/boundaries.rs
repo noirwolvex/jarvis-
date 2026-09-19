@@ -325,3 +325,41 @@ fn arbitrary_commands_unknown_json_fields_and_argv_limits_are_rejected() {
     assert!(serde_json::from_str::<Action>(r#"{"kind":"status","admin":true}"#).is_err());
     assert!(serde_json::from_str::<Action>(r#"{"kind":"type_text","display_id":0,"frame_id":"00000000-0000-0000-0000-000000000000","text":"hello"}"#).is_err());
 }
+
+#[test]
+fn pointer_duration_is_backward_compatible_and_bounded_before_delivery() {
+    let raw = serde_json::json!({"kind": "pointer_move", "display_id": 0,
+        "frame_id": "00000000-0000-0000-0000-000000000000", "x": 1, "y": 2,
+        "foreground": foreground()});
+    assert!(matches!(
+        serde_json::from_value::<Action>(raw.clone()).unwrap(),
+        Action::PointerMove { duration_ms: 0, .. }
+    ));
+    let mut timed = raw;
+    timed["duration_ms"] = serde_json::json!(120);
+    assert!(matches!(
+        serde_json::from_value::<Action>(timed).unwrap(),
+        Action::PointerMove {
+            duration_ms: 120,
+            ..
+        }
+    ));
+    let frame = SimulationCapture.capture(0, 16_384).unwrap();
+    let latch = EmergencyLatch::default();
+    assert!(
+        SimulationInput
+            .pointer_move(&frame, 1, 2, 120, &foreground(), &latch)
+            .is_ok()
+    );
+    assert!(
+        SimulationInput
+            .pointer_move(&frame, 1, 2, 2_001, &foreground(), &latch)
+            .is_err()
+    );
+    latch.stop();
+    assert!(
+        SimulationInput
+            .pointer_move(&frame, 1, 2, 120, &foreground(), &latch)
+            .is_err()
+    );
+}

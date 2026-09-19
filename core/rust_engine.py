@@ -482,9 +482,17 @@ class RustDaemonClient:
         x: int,
         y: int,
         status: dict[str, Any] | None = None,
+        *,
+        duration: float = 0.0,
     ) -> dict[str, Any]:
+        seconds = float(duration)
+        if not 0 <= seconds <= 2:
+            raise ValueError("Rust pointer duration must be between 0 and 2 seconds")
         self._keyboard_frame_cache = None
         state = status or self.status()
+        duration_ms = int(round(seconds * 1000))
+        if duration_ms and "timed_pointer_move" not in state.get("input_features", []):
+            raise RustEngineUnavailable("Rust daemon does not support timed pointer movement; rebuild the daemon or use duration=0")
         display = self._display_for_point(state, int(x), int(y))
         display_id = int(display["id"])
         foreground, frame = self._input_context_for_display(state, display_id)
@@ -495,6 +503,7 @@ class RustDaemonClient:
                 "frame_id": frame["id"],
                 "x": int(x),
                 "y": int(y),
+                **({"duration_ms": duration_ms} if duration_ms else {}),
                 "foreground": foreground,
             },
             self.config.capability("input", display_id),
@@ -804,13 +813,26 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
             y=y,
         )
 
-    def desktop_move(x: int, y: int, duration: float = 0.1) -> str:
+    def desktop_move(x: int, y: int, duration: float | None = None) -> str:
+        def invoke(client, status):
+            seconds = float(duration) if duration is not None else 0.0
+            if duration is None and "timed_pointer_move" in status.get("input_features", []):
+                pointer = status.get("pointer")
+                if isinstance(pointer, dict) and all(isinstance(pointer.get(key), int) for key in ("x", "y")):
+                    try:
+                        source = client._display_for_point(status, pointer["x"], pointer["y"])
+                        target = client._display_for_point(status, int(x), int(y))
+                        if source["id"] == target["id"]:
+                            seconds = 0.08
+                    except RustEngineUnavailable:
+                        pass  # No known in-display path; the client still validates the destination.
+            return client.pointer_move(int(x), int(y), status, duration=seconds)
         return run_atomic(
             "desktop_move",
-            lambda client, status: client.pointer_move(int(x), int(y), status),
+            invoke,
             x=x,
             y=y,
-            duration=duration,
+            duration=0.08 if duration is None else duration,
         )
 
     def desktop_drag(

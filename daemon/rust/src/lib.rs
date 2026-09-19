@@ -5,6 +5,8 @@ pub mod dispatcher;
 pub mod governance;
 pub mod input;
 pub mod ipc;
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
+mod motion;
 pub mod plugin;
 pub mod process;
 pub mod resources;

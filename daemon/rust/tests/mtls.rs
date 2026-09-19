@@ -5,7 +5,7 @@ use jarvis_execution_daemon::{
     governance::{Capability, Policy, Scope},
     ipc::{self, read_frame, write_frame},
     process::ProcessManager,
-    types::{Action, Reply, Request, now_ms},
+    types::{Action, ForegroundBinding, Reply, Request, now_ms},
 };
 use sha2::{Digest, Sha256};
 use std::{sync::Arc, time::Duration};
@@ -89,7 +89,7 @@ async fn generated_development_identity_works_with_strict_python_openssl() {
 }
 
 #[tokio::test]
-async fn mtls_status_capture_stop_and_replay_close_connection() {
+async fn mtls_capture_timed_input_stop_and_replay_close_connection() {
     let pki = Pki::new();
     let directory = tempfile::tempdir().unwrap();
     pki.write(directory.path());
@@ -105,8 +105,13 @@ async fn mtls_status_capture_stop_and_replay_close_connection() {
         expires_at_ms: now_ms() + 60_000,
         scope: Scope::Observe { display_id: 0 },
     };
+    let input_cap = Capability {
+        id: "input".into(),
+        scope: Scope::Input { display_id: 0 },
+        ..cap.clone()
+    };
     let dispatcher = Dispatcher::start(
-        Policy::new(true, vec![cap], now_ms()).unwrap(),
+        Policy::new(true, vec![cap, input_cap], now_ms()).unwrap(),
         ProcessManager::new(vec![], false).unwrap(),
         false,
         false,
@@ -168,7 +173,57 @@ async fn mtls_status_capture_stop_and_replay_close_connection() {
     req.capability_id = Some("observe".into());
     write_frame(&mut stream, &req).await.unwrap();
     let reply: Reply = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
-    assert!(matches!(reply, Reply::Result { ok: true, .. }));
+    let Reply::Result { ok: true, data, .. } = reply else {
+        panic!("expected authorized capture")
+    };
+    let frame_id = serde_json::from_value(data["frame"]["id"].clone()).unwrap();
+    let foreground = ForegroundBinding {
+        hwnd: 1001,
+        process_id: 42,
+        title: "Simulation input fixture".into(),
+    };
+    req.seq += 1;
+    req.request_id = Uuid::new_v4();
+    req.action = Action::PointerMove {
+        display_id: 0,
+        frame_id,
+        x: 1,
+        y: 2,
+        duration_ms: 80,
+        foreground: foreground.clone(),
+    };
+    // Observation authority cannot authorize a mutation, even in simulation.
+    write_frame(&mut stream, &req).await.unwrap();
+    let reply: Reply = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
+    assert!(matches!(reply, Reply::Result { ok: false, .. }));
+    req.seq += 1;
+    req.request_id = Uuid::new_v4();
+    req.capability_id = Some("input".into());
+    write_frame(&mut stream, &req).await.unwrap();
+    let reply: Reply = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
+    let Reply::Result { ok: true, data, .. } = reply else {
+        panic!("expected authorized simulated movement")
+    };
+    assert_eq!(data["pointer"]["duration_ms"], 80);
+    assert_eq!(data["simulation"], true);
+    assert_eq!(data["executed"], false);
+    assert_eq!(data["verified"], false);
+    req.seq += 1;
+    req.request_id = Uuid::new_v4();
+    req.action = Action::TypeText {
+        display_id: 0,
+        frame_id,
+        text: "ع🦀".repeat(2048),
+        foreground,
+    };
+    write_frame(&mut stream, &req).await.unwrap();
+    let reply: Reply = serde_json::from_slice(&read_frame(&mut stream).await.unwrap()).unwrap();
+    let Reply::Result { ok: true, data, .. } = reply else {
+        panic!("expected authorized simulated Unicode input")
+    };
+    assert_eq!(data["characters"], 4096);
+    assert_eq!(data["executed"], false);
+    assert_eq!(data["verified"], false);
     req.seq += 1;
     req.action = Action::EmergencyStop {};
     req.capability_id = None;

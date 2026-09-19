@@ -15,6 +15,10 @@ pub trait InputController: Send + Sync {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()>;
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Keep the existing explicit input-adapter contract compatible"
+    )]
     fn click_button(
         &self,
         frame: &Frame,
@@ -30,9 +34,14 @@ pub trait InputController: Send + Sync {
         frame: &Frame,
         x: i32,
         y: i32,
+        duration_ms: u64,
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()>;
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "Endpoints and authorization are explicit in the existing adapter contract"
+    )]
     fn drag(
         &self,
         frame: &Frame,
@@ -119,6 +128,73 @@ fn validate_hotkey(keys: &[String]) -> Result<()> {
     Ok(())
 }
 
+fn validate_text(text: &str) -> Result<()> {
+    if text.is_empty() || text.chars().count() > 4096 || text.contains('\0') {
+        return Err(Error::Limit("keyboard text"));
+    }
+    Ok(())
+}
+
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
+fn unicode_chunks(text: &str, mut deliver: impl FnMut(&[u16]) -> Result<()>) -> Result<()> {
+    let mut chunk = [0u16; 64];
+    let mut used = 0;
+    for character in text.chars() {
+        if used + character.len_utf16() > chunk.len() {
+            deliver(&chunk[..used])?;
+            used = 0;
+        }
+        let mut encoded = [0u16; 2];
+        let units = character.encode_utf16(&mut encoded);
+        chunk[used..used + units.len()].copy_from_slice(units);
+        used += units.len();
+    }
+    if used > 0 {
+        deliver(&chunk[..used])?;
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod unicode_tests {
+    use super::*;
+
+    #[test]
+    fn arabic_and_emoji_use_character_limit_instead_of_utf8_byte_limit() {
+        assert!(validate_text(&"ع".repeat(4096)).is_ok());
+        assert!(validate_text(&"🦀".repeat(4096)).is_ok());
+        assert!(validate_text(&"🦀".repeat(4097)).is_err());
+        assert!(validate_text("").is_err());
+        assert!(validate_text("hello\0world").is_err());
+    }
+
+    #[test]
+    fn chunk_boundaries_never_split_surrogate_pairs() {
+        let text = format!("{}🦀{}ع", "x".repeat(63), "🎹".repeat(70));
+        let mut recovered = String::new();
+        unicode_chunks(&text, |chunk| {
+            assert!(chunk.len() <= 64);
+            recovered.push_str(
+                &String::from_utf16(chunk).expect("each chunk contains complete scalars"),
+            );
+            Ok(())
+        })
+        .unwrap();
+        assert_eq!(recovered, text);
+    }
+
+    #[test]
+    fn cancelled_chunk_stops_without_retry_or_delivering_remainder() {
+        let mut calls = 0;
+        let result = unicode_chunks(&"🎹".repeat(100), |_| {
+            calls += 1;
+            Err(Error::Emergency)
+        });
+        assert!(matches!(result, Err(Error::Emergency)));
+        assert_eq!(calls, 1);
+    }
+}
+
 pub struct SimulationInput;
 impl InputController for SimulationInput {
     fn click(
@@ -155,9 +231,13 @@ impl InputController for SimulationInput {
         frame: &Frame,
         x: i32,
         y: i32,
+        duration_ms: u64,
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
+        if duration_ms > 2_000 {
+            return Err(Error::Limit("pointer motion duration"));
+        }
         validate_binding(foreground)?;
         validate_frame(frame, x, y, emergency)
     }
@@ -231,10 +311,7 @@ impl InputController for SimulationInput {
     ) -> Result<()> {
         validate_binding(foreground)?;
         validate_keyboard_frame(frame, emergency)?;
-        if text.len() > 4096 || text.contains('\0') {
-            return Err(Error::Limit("keyboard text"));
-        }
-        Ok(())
+        validate_text(text)
     }
 }
 
@@ -279,7 +356,19 @@ mod windows_foreground {
 pub fn current_foreground_binding() -> Result<Option<ForegroundBinding>> {
     #[cfg(all(feature = "native", target_os = "windows"))]
     {
-        return windows_foreground::current();
+        windows_foreground::current()
+    }
+    #[cfg(not(all(feature = "native", target_os = "windows")))]
+    {
+        Ok(None)
+    }
+}
+
+/// Read physical desktop coordinates without generating input.
+pub fn current_pointer_position() -> Result<Option<(i32, i32)>> {
+    #[cfg(all(feature = "native", target_os = "windows"))]
+    {
+        windows_input::position().map(Some)
     }
     #[cfg(not(all(feature = "native", target_os = "windows")))]
     {
@@ -423,19 +512,24 @@ mod windows_input {
         if unsafe { SetPhysicalCursorPos(x, y) } == 0 {
             return Err(Error::Operation("physical pointer movement failed".into()));
         }
+        let point = position()?;
+        if point != (x, y) {
+            return Err(Error::Operation(format!(
+                "physical pointer reached ({}, {}) instead of ({}, {})",
+                point.0, point.1, x, y
+            )));
+        }
+        Ok(())
+    }
+
+    pub fn position() -> Result<(i32, i32)> {
         let mut point = Point { x: 0, y: 0 };
         if unsafe { GetPhysicalCursorPos(&mut point) } == 0 {
             return Err(Error::Operation(
                 "physical pointer verification failed".into(),
             ));
         }
-        if point.x != x || point.y != y {
-            return Err(Error::Operation(format!(
-                "physical pointer reached ({}, {}) instead of ({}, {})",
-                point.x, point.y, x, y
-            )));
-        }
-        Ok(())
+        Ok((point.x, point.y))
     }
 
     fn button_flags(button: MouseButton) -> (u32, u32) {
@@ -578,11 +672,11 @@ mod windows_input {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        let units = text.encode_utf16().collect::<Vec<_>>();
-        for chunk in units.chunks(64) {
+        let mut events = Vec::with_capacity(128);
+        unicode_chunks(text, |chunk| {
             emergency.check()?;
             verify_foreground(foreground)?;
-            let mut events = Vec::with_capacity(chunk.len() * 2);
+            events.clear();
             for unit in chunk {
                 events.push(keyboard_input(0, *unit, KEYEVENTF_UNICODE));
                 events.push(keyboard_input(
@@ -601,8 +695,8 @@ mod windows_input {
                 let _ = send(&releases, "unicode keyboard cleanup");
                 return Err(error);
             }
-        }
-        Ok(())
+            Ok(())
+        })
     }
 }
 
@@ -664,6 +758,7 @@ impl InputController for NativeInput {
         frame: &Frame,
         x: i32,
         y: i32,
+        duration_ms: u64,
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
@@ -674,9 +769,24 @@ impl InputController for NativeInput {
             ));
         }
         verify_foreground(foreground)?;
-        emergency.check()?;
-        verify_foreground(foreground)?;
-        windows_input::move_to(x, y)
+        let from = windows_input::position()?;
+        let motion = crate::motion::Motion::new(from, (x, y), duration_ms)?;
+        if duration_ms > 0 && !frame.contains(from.0, from.1) {
+            return Err(Error::Denied(
+                "smooth movement starts outside authorized display; use duration_ms=0 for cross-display repositioning",
+            ));
+        }
+        let started = Instant::now();
+        motion.run(
+            || started.elapsed(),
+            std::thread::sleep,
+            || {
+                emergency
+                    .check()
+                    .and_then(|_| verify_foreground(foreground))
+            },
+            windows_input::move_to,
+        )
     }
 
     fn drag(
@@ -705,29 +815,22 @@ impl InputController for NativeInput {
         windows_input::move_to(start_x, start_y)?;
         emergency.check()?;
         verify_foreground(foreground)?;
-        windows_input::button_down(button)?;
-
-        let steps = ((duration_ms.max(16) + 15) / 16).clamp(1, 125);
-        let mut movement_result = Ok(());
-        for step in 1..=steps {
-            if let Err(error) = emergency
-                .check()
-                .and_then(|_| verify_foreground(foreground))
-            {
-                movement_result = Err(error);
-                break;
-            }
-            let progress = step as f64 / steps as f64;
-            let x = start_x as f64 + (end_x - start_x) as f64 * progress;
-            let y = start_y as f64 + (end_y - start_y) as f64 * progress;
-            if let Err(error) = windows_input::move_to(x.round() as i32, y.round() as i32) {
-                movement_result = Err(error);
-                break;
-            }
-            if step < steps && duration_ms > 0 {
-                std::thread::sleep(Duration::from_millis((duration_ms / steps).max(1)));
-            }
+        let motion = crate::motion::Motion::new((start_x, start_y), (end_x, end_y), duration_ms)?;
+        if let Err(error) = windows_input::button_down(button) {
+            let _ = windows_input::button_up(button);
+            return Err(error);
         }
+        let started = Instant::now();
+        let movement_result = motion.run(
+            || started.elapsed(),
+            std::thread::sleep,
+            || {
+                emergency
+                    .check()
+                    .and_then(|_| verify_foreground(foreground))
+            },
+            windows_input::move_to,
+        );
 
         let release_result = windows_input::button_up(button);
         movement_result?;
@@ -817,9 +920,7 @@ impl InputController for NativeInput {
                 "simulation evidence cannot authorize native input",
             ));
         }
-        if text.len() > 4096 || text.contains('\0') {
-            return Err(Error::Limit("keyboard text"));
-        }
+        validate_text(text)?;
         verify_foreground(foreground)?;
         emergency.check()?;
         verify_foreground(foreground)?;
@@ -856,6 +957,7 @@ impl InputController for NativeInput {
         _frame: &Frame,
         _x: i32,
         _y: i32,
+        _duration_ms: u64,
         _foreground: &ForegroundBinding,
         _emergency: &EmergencyLatch,
     ) -> Result<()> {

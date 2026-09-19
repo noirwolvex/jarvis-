@@ -4,7 +4,9 @@ use crate::{
     Error, Result,
     capture::{CaptureRing, ScreenCapture, SimulationCapture, preview_bmp},
     governance::{EmergencyLatch, EventJournal, Policy},
-    input::{InputController, SimulationInput, current_foreground_binding},
+    input::{
+        InputController, SimulationInput, current_foreground_binding, current_pointer_position,
+    },
     process::ProcessManager,
     types::{Action, Reply, Request, now_ms},
 };
@@ -156,6 +158,11 @@ impl Worker {
                     Ok(displays) => (displays, true, None),
                     Err(error) => (Vec::new(), false, Some(error.to_string())),
                 };
+                let pointer = if self.native_input {
+                    current_pointer_position()?.map(|(x, y)| json!({"x": x, "y": y}))
+                } else {
+                    None
+                };
                 Ok(json!({
                     "simulation": self.policy.simulation,
                     "emergency_stopped": self.emergency.check().is_err(),
@@ -163,7 +170,9 @@ impl Worker {
                     "capture_ring_bytes": self.ring.bytes(),
                     "audit_events_retained": self.journal.entries().len(),
                     "native_input": self.native_input,
+                    "input_features": ["timed_pointer_move", "unicode_scalar_limit"],
                     "foreground": foreground,
+                    "pointer": pointer,
                     "displays": displays,
                     "capture_available": capture_available,
                     "capture_error": capture_error,
@@ -252,6 +261,7 @@ impl Worker {
                 frame_id,
                 x,
                 y,
+                duration_ms,
                 foreground,
             } => {
                 let frame = self.ring.get(*frame_id)?;
@@ -259,13 +269,19 @@ impl Worker {
                     return Err(Error::Denied("frame display mismatch"));
                 }
                 self.authorize(job)?;
-                self.input
-                    .pointer_move(frame, *x, *y, foreground, &self.emergency)?;
+                self.input.pointer_move(
+                    frame,
+                    *x,
+                    *y,
+                    *duration_ms,
+                    foreground,
+                    &self.emergency,
+                )?;
                 Ok(json!({
                     "simulation": self.policy.simulation,
                     "executed": !self.policy.simulation && self.native_input,
                     "verified": false,
-                    "pointer": {"x": x, "y": y},
+                    "pointer": {"x": x, "y": y, "duration_ms": duration_ms},
                     "verification": "requires_independent_postcondition_evidence"
                 }))
             }

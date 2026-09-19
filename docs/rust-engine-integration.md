@@ -13,7 +13,7 @@ The integrated path is:
 5. The Rust daemon rechecks capability scope, request expiry, frame freshness, display bounds, foreground identity and the emergency latch immediately before native execution.
 6. The Python orchestrator still requires independent post-action evidence before another mutation or final mission completion.
 
-Rust currently owns the supported `desktop_click`, `desktop_type` and left-button `desktop_click_button` primitives when selected. High-resolution `screen_observe`, browser/CDP operations, UI Automation, application discovery, file tools and planning remain in Python because they need richer model-facing semantics than the daemon's bounded IPC preview provides.
+Rust owns the supported atomic click, double-click, button-click, pointer movement, drag, scroll, typing, key press and shortcut primitives when selected. High-resolution `screen_observe`, browser/CDP operations, UI Automation, application discovery, file tools and planning remain in Python because they need richer model-facing semantics than the daemon's bounded IPC preview provides.
 
 ## Backend modes
 
@@ -82,7 +82,7 @@ The integration deliberately avoids transparent replay after uncertain mutations
 
 Emergency stop is propagated to both execution planes. The Full Access worker sets its local cancellation latch, releases Python-held synthetic keys/buttons, terminates tracked process trees and also sends the Rust daemon's independent `emergency_stop` action when configured. The Rust emergency latch requires a daemon restart before native work resumes.
 
-Rust capability grants remain peer-certificate-bound and scope-bound. Their maximum lifetime is now 30 minutes so a grant can cover the dashboard's maximum mission duration; each IPC request still has its own short expiry and sequence/replay checks.
+Rust capability grants remain peer-certificate-bound and scope-bound. Their maximum lifetime is 24 hours so a launcher session can cover long missions; each IPC request still has its own short expiry and sequence/replay checks. The runtime launcher owns its daemon lifecycle; a long-lived daemon grant does not enable Full Access or bypass its mission permissions.
 
 The daemon still does not bypass Windows secure desktop, UAC, elevated-window isolation or account permissions. Rust execution is not an OS sandbox. Full Access terminal commands remain a separate permission path and are not silently converted into unrestricted Rust process execution.
 
@@ -136,3 +136,35 @@ The Python worker streams bounded, redacted task graphs while a mission runs. Th
 Validation in this checkout: 306 Python tests, 42 Node tests across the Control Center/runtime/database, 20 Rust tests (3 ignored), all workspace typechecks, native Rust compilation and the production dashboard build passed. Tests use fixture controls and transports; no real user application input was sent.
 
 A read-only engine check using this shell plus the repository `.env` returned `mode=auto`, `backend=python`, `rust_configured=false`. This does not inspect environment overrides injected into an already-running launcher/dashboard process. Live Rust input and arbitrary multi-application mission reliability remain unqualified by this check. The strict runtime launcher can provision session configuration; no service, certificate, Full Access setting or user desktop state was changed during this verification.
+
+## Mouse, keyboard and screen performance upgrade — September 19, 2026
+
+The existing Python-to-Rust route now preserves `desktop_move` timing. Rust advertises `timed_pointer_move` in status and accepts an optional `duration_ms` (0–2000); omitted timing remains immediate for older wire clients. Python rejects unsupported explicit timing before dispatch instead of silently dropping it. An omitted tool duration chooses 80 ms only when the reported pointer and target are on the same display; older daemons, unknown pointer locations and cross-display moves use immediate repositioning. Explicit smooth paths cannot leave their authorized display.
+
+Pointer movement and dragging use elapsed-time smoothstep trajectories, skip redundant intermediate pixels and verify the exact final cursor position. Scheduler delays advance to the current trajectory position rather than replaying missed movements. Foreground identity and emergency stop are checked before each delivered point. Drag cleanup releases the button on success or failure. These are input-delivery checks; application outcomes still require independent verification.
+
+Native text limits now count Unicode scalars, matching Python's 4096-character contract for Arabic and emoji. UTF-16 batches preserve complete surrogate pairs, reuse their input buffer, check foreground and emergency stop between batches, and stop without replay after a delivery failure.
+
+`screen_observe(settle_ms=0)` performs one capture and returns `stable=false`; it is useful for visual reading and cannot establish stable coordinate evidence. Settled observations sample every 25 ms and require both bounded mean and peak image differences, so a localized popup is less likely to be missed by averaging. Capture detects foreground/display changes, checks cancellation, and timestamps the actual captured frame. JPEG data is encoded once in memory, bounded, hashed and written once; existing retention and size limits remain enforced.
+
+An offline benchmark using synthetic 1280×720 UI pixels, 3 warmups and 40 measured iterations produced:
+
+| Encoding and file I/O path | Median | p95 | JPEG size |
+| --- | ---: | ---: | ---: |
+| Previous optimized JPEG plus disk readback | 10.189 ms | 12.091 ms | 101,968 bytes |
+| Single in-memory encode and write | 2.017 ms | 2.757 ms | 106,198 bytes |
+
+This is approximately 5× faster for that encoding/file-I/O stage, with a 4.1% larger fixture JPEG. It excludes OS capture, semantic resolution, model calls and application response time; it is not an end-to-end mission speed claim. Reproduce with `python scripts/benchmark_desktop_pipeline.py --iterations 40`.
+
+The managed launcher (`scripts/jarvis_runtime.py`) now builds and selects the optimized release daemon by default. Set `JARVIS_RUST_PROFILE=debug` to opt into debug builds; other values are rejected before provisioning or process cleanup. The release binary was successfully built locally. An existing debug daemon was left running during validation, so **close and restart the current JARVIS session normally to load the new native engine**. Starting another instance alongside it is not an upgrade of the active process. Full Access remains explicitly user-enabled.
+
+Validation: 319 Python tests, 42 Node tests, 29 portable Rust tests (3 ignored), 10 native-feature Rust library tests, and strict all-target/all-feature Clippy passed. The authenticated TLS integration suite now exercises timed pointer requests, scoped input authority, 4096-character Arabic/emoji text and simulation result flags; simulation never reports real execution or verification. Motion tests use an injected clock and input sink, and screen tests use fixture images. No real mouse or keyboard input was sent, and live multi-application missions still require supervised qualification.
+
+When a development daemon holds the default Windows debug executable open, use a separate test output directory instead of interrupting it:
+
+```powershell
+cargo test --locked --manifest-path daemon/rust/Cargo.toml --target-dir .jarvis/validation-native-control
+cargo test --locked --manifest-path daemon/rust/Cargo.toml --features native --lib
+cargo clippy --manifest-path daemon/rust/Cargo.toml --all-targets --all-features --locked -- -D warnings
+cargo build --release --locked --manifest-path daemon/rust/Cargo.toml --features native --bin jarvis-daemon
+```
