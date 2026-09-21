@@ -12,6 +12,29 @@ from core.live_desktop import LiveDesktopMonitor
 
 
 class LiveDesktopTests(unittest.TestCase):
+    def test_encode_time_cannot_make_an_old_capture_fresh(self):
+        monitor = LiveDesktopMonitor(lambda: False, capture=lambda: (Image.new("RGB", (20, 20)), 1, (0, 0)))
+        clock = [10.0]
+        save = Image.Image.save
+        def delayed_save(image, *args, **kwargs):
+            clock[0] += 4
+            return save(image, *args, **kwargs)
+        with patch("core.live_desktop.time.monotonic", side_effect=lambda: clock[0]), \
+             patch.object(Image.Image, "save", delayed_save):
+            self.assertFalse(monitor.poll())
+            self.assertIsNone(monitor.latest())
+
+    def test_identical_pixels_cannot_authorize_changed_display_geometry(self):
+        from core.desktop_observation import remember_signature, scene_matches
+        remember_signature("geometry-fixture", Image.new("RGB", (192, 108), "blue"))
+        frame = {"source_width": 1920, "source_height": 1080, "virtual_origin_x": 0, "virtual_origin_y": 0}
+        with patch("PIL.ImageGrab.grab", return_value=Image.new("RGB", (1280, 720), "blue")), \
+             patch("core.vision_tools._virtual_origin", return_value=(0, 0)):
+            self.assertFalse(scene_matches("geometry-fixture", frame))
+        with patch("PIL.ImageGrab.grab", return_value=Image.new("RGB", (1920, 1080), "blue")), \
+             patch("core.vision_tools._virtual_origin", return_value=(-1920, 0)):
+            self.assertFalse(scene_matches("geometry-fixture", frame))
+
     def test_unchanged_scene_reuses_latest_frame_without_queue_or_new_emit(self):
         emit = Mock()
         capture = Mock(return_value=(Image.new("RGB", (1920, 1080), "blue"), 123, (-1920, 0)))
@@ -143,7 +166,7 @@ class MissionMonitoringTests(unittest.TestCase):
 class ResponsiveInputTests(unittest.TestCase):
     def test_pointer_samples_have_no_pause_and_keep_foreground_binding(self):
         from core.desktop_control_tools import move_pointer
-        fake = SimpleNamespace(position=lambda: SimpleNamespace(x=0, y=0), moveTo=Mock())
+        fake = SimpleNamespace(position=Mock(side_effect=[SimpleNamespace(x=0, y=0), SimpleNamespace(x=-40, y=10)]), moveTo=Mock())
         with patch.dict(sys.modules, {"pyautogui": fake}), patch("core.desktop_control_tools._windows_only"), \
              patch("core.desktop_observation.foreground_identity", side_effect=[12, 12]), \
              patch("core.desktop_control_tools.time.sleep") as sleep:

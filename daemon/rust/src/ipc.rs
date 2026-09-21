@@ -26,6 +26,13 @@ use uuid::Uuid;
 
 pub const MAX_WIRE_BYTES: usize = 256 * 1024;
 pub const MAX_CONNECTIONS: usize = 4;
+pub const MAX_EMERGENCY_CONNECTIONS: usize = 1;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Admission {
+    Normal,
+    EmergencyOnly,
+}
 
 pub struct Session {
     pub id: Uuid,
@@ -85,11 +92,14 @@ pub async fn write_frame<W: AsyncWrite + Unpin, T: serde::Serialize>(
     writer: &mut W,
     value: &T,
 ) -> Result<()> {
-    let data = serde_json::to_vec(value)?;
-    if data.len() > MAX_WIRE_BYTES {
+    let mut data = vec![0; 4];
+    serde_json::to_writer(&mut data, value)?;
+    let payload_len = data.len() - 4;
+    if payload_len > MAX_WIRE_BYTES {
         return Err(Error::Limit("IPC reply bytes"));
     }
-    writer.write_u32(data.len() as u32).await?;
+    data[..4].copy_from_slice(&(payload_len as u32).to_be_bytes());
+    // One bounded write avoids a tiny prefix TLS record before each response.
     writer.write_all(&data).await?;
     writer.flush().await?;
     Ok(())
@@ -156,14 +166,21 @@ pub async fn serve_listener(
         return Err(Error::Denied("IPC must bind loopback"));
     }
     let connections = Arc::new(Semaphore::new(MAX_CONNECTIONS));
+    let emergency_connections = Arc::new(Semaphore::new(MAX_EMERGENCY_CONNECTIONS));
     let acceptor = TlsAcceptor::from(tls);
     loop {
         let (socket, peer) = listener.accept().await?;
         if !peer.ip().is_loopback() {
             continue;
         }
-        let Ok(permit) = connections.clone().try_acquire_owned() else {
-            continue;
+        // Reserve bounded admission for stop requests even when all persistent
+        // execution sessions are occupied. This never admits additional jobs.
+        let (permit, admission) = match connections.clone().try_acquire_owned() {
+            Ok(permit) => (permit, Admission::Normal),
+            Err(_) => match emergency_connections.clone().try_acquire_owned() {
+                Ok(permit) => (permit, Admission::EmergencyOnly),
+                Err(_) => continue,
+            },
         };
         let acceptor = acceptor.clone();
         let dispatcher = dispatcher.clone();
@@ -171,8 +188,12 @@ pub async fn serve_listener(
             let _permit = permit;
             // Authentication failures are deliberately not reflected as plaintext.
             let _ = tokio::time::timeout(
-                Duration::from_secs(300),
-                connection(socket, acceptor, dispatcher),
+                Duration::from_secs(if admission == Admission::Normal {
+                    300
+                } else {
+                    5
+                }),
+                connection(socket, acceptor, dispatcher, admission),
             )
             .await;
         });
@@ -183,7 +204,9 @@ async fn connection(
     socket: TcpStream,
     acceptor: TlsAcceptor,
     dispatcher: Dispatcher,
+    admission: Admission,
 ) -> Result<()> {
+    socket.set_nodelay(true)?;
     let mut stream = tokio::time::timeout(Duration::from_secs(5), acceptor.accept(socket))
         .await
         .map_err(|_| Error::Protocol("TLS handshake timeout"))??;
@@ -205,6 +228,29 @@ async fn connection(
         },
     )
     .await?;
+    if admission == Admission::EmergencyOnly {
+        // The reserved slot has one bounded read and response, not a dispatch
+        // queue. Reject every other action and release it promptly for a stop.
+        let bytes = tokio::time::timeout(Duration::from_secs(1), read_frame(&mut stream))
+            .await
+            .map_err(|_| Error::Protocol("emergency request idle timeout"))??;
+        let request: Request = serde_json::from_slice(&bytes)?;
+        session.validate(&request, now_ms())?;
+        let result = if matches!(request.action, Action::EmergencyStop {}) {
+            dispatcher.emergency.stop();
+            Ok(serde_json::json!({"emergency_stopped": true, "restart_required": true}))
+        } else {
+            Err(Error::Limit(
+                "execution connections full; reserved for emergency stop",
+            ))
+        };
+        return tokio::time::timeout(
+            Duration::from_secs(2),
+            write_frame(&mut stream, &Reply::result(request.request_id, result)),
+        )
+        .await
+        .map_err(|_| Error::Protocol("reply write timeout"))?;
+    }
     let (mut reader, mut writer) = tokio::io::split(stream);
     let (outbound, mut replies) = mpsc::channel::<Reply>(REPLY_CAPACITY);
     let disconnected = CancellationToken::new();

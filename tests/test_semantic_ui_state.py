@@ -7,6 +7,24 @@ from core.ui_state import SnapshotCache, cancellable_delay, wait_until
 
 
 class SemanticUiStateTests(unittest.TestCase):
+    def test_target_binding_reduces_provider_reads_without_losing_identity_evidence(self):
+        from scripts.benchmark_ui_target_binding import measure
+        result = measure()
+        self.assertTrue(result["identical_binding"])
+        self.assertLess(result["fixture_provider_reads_after"], result["fixture_provider_reads_before"])
+
+    def test_changed_window_process_still_invalidates_optimized_target_binding(self):
+        from scripts.benchmark_ui_target_binding import Control
+        from core import semantic_ui_tools as ui
+        from core.desktop_input import InputDeliveryError
+        window, editor = Control([0], [1]), Control([0], [2])
+        editor.top_level_parent = lambda: window
+        binding = ui._target_binding(window, editor)
+        window.element_info.values["process_id"] = 99
+        with patch.object(ui, "_guard_foreground"):
+            with self.assertRaises(InputDeliveryError):
+                ui._validate_target(window, editor, binding)
+
     def test_wait_returns_immediately_on_ready_state(self):
         with patch("core.ui_state.time.sleep") as sleep:
             self.assertEqual(wait_until(lambda: "ready"), "ready")

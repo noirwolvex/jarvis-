@@ -126,6 +126,7 @@ async function connect(config: DaemonConfig) {
     ALPNProtocols: [ALPN],
     rejectUnauthorized: true,
   });
+  socket.setNoDelay(true);
   await new Promise<void>((resolve, reject) => {
     const timeout = setTimeout(() => {
       socket.destroy();

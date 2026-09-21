@@ -16,6 +16,11 @@ _HELD_KEYS: set[str] = set()
 def _windows_only() -> None:
     if os.name != "nt":
         raise RuntimeError("Desktop control is supported on Windows only")
+    import pyautogui
+    pyautogui.PAUSE = 0
+    pyautogui.FAILSAFE = False
+    pyautogui.MINIMUM_DURATION = 0
+    pyautogui.MINIMUM_SLEEP = 0
 
 
 def _button(value: str) -> Literal["left", "right", "middle"]:
@@ -49,9 +54,31 @@ def desktop_click_button(x: int, y: int, button: str = "left", clicks: int = 1) 
     import pyautogui
 
     chosen = _button(button)
-    count = max(1, min(int(clicks), 3))
-    pyautogui.click(x=int(x), y=int(y), clicks=count, interval=0.06, button=chosen, _pause=False)
-    return f"Clicked {chosen} at ({int(x)}, {int(y)}) x{count}"
+    if type(clicks) is not int or not 1 <= clicks <= 3:
+        raise ValueError("Click count must be between 1 and 3")
+    from .desktop_observation import foreground_identity
+    from .process_control import check_cancelled
+    from .ui_state import cancellable_delay
+    from .desktop_input import InputDeliveryError
+    check_cancelled()
+    hwnd = foreground_identity()
+    if not hwnd:
+        raise InputDeliveryError("Foreground window unavailable; click was not dispatched")
+    move_pointer(int(x), int(y), 0, expected_foreground=hwnd)
+    for index in range(clicks):
+        check_cancelled()
+        point = pyautogui.position()
+        if foreground_identity() != hwnd or (point.x, point.y) != (int(x), int(y)):
+            raise InputDeliveryError("Click target changed; inspect before continuing")
+        # One complete down/up pair at a time; never replay a failed pair or move
+        # the cursor back after the user changes it between repeated clicks.
+        try:
+            pyautogui.click(button=chosen, _pause=False)
+        except Exception as exc:
+            raise InputDeliveryError("Click delivery is uncertain; inspect before retrying") from exc
+        if index + 1 < clicks:
+            cancellable_delay(0.045)
+    return f"DELIVERED: clicked {chosen} at ({int(x)}, {int(y)}) x{clicks}; application outcome requires verification"
 
 
 def move_pointer(x: int, y: int, duration: float = 0.08, *, expected_foreground: int | None = None) -> None:
@@ -67,15 +94,23 @@ def move_pointer(x: int, y: int, duration: float = 0.08, *, expected_foreground:
     if not 0 <= duration <= 2:
         raise ValueError("Pointer movement duration must be between 0 and 2 seconds")
     origin = pyautogui.position()
+    previous = (origin.x, origin.y)
+    destination = (int(x), int(y))
     start = time.monotonic()
     while True:
         check_cancelled()
         if foreground_identity() != hwnd:
             raise RuntimeError("Foreground changed during pointer movement")
-        progress = 1.0 if duration == 0 else min(1.0, (time.monotonic() - start) / duration)
+        progress = 1.0 if duration == 0 or previous == destination else min(1.0, (time.monotonic() - start) / duration)
         eased = progress * progress * (3 - 2 * progress)
-        pyautogui.moveTo(round(origin.x + (x - origin.x) * eased), round(origin.y + (y - origin.y) * eased), _pause=False)
+        point = (round(origin.x + (x - origin.x) * eased), round(origin.y + (y - origin.y) * eased))
+        if point != previous:
+            pyautogui.moveTo(*point, _pause=False)
+            previous = point
         if progress >= 1:
+            actual = pyautogui.position()
+            if (actual.x, actual.y) != destination:
+                raise RuntimeError("Pointer did not reach the requested destination")
             return
         time.sleep(min(0.016, max(0, duration - (time.monotonic() - start))))
 

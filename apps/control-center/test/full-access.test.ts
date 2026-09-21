@@ -135,6 +135,15 @@ test("completion rejects missing evidence and retains actionable failure checkpo
   assert.equal(validateMissionResult({ ...result, execution_metrics: { model_calls: 2, workflow_batches: 1 } }).execution_metrics?.model_calls, 2);
   const graph = [{ id: "step-1", action: "launch", description: "Open WhatsApp", dependencies: [], status: "COMPLETED", execution_backend: "DIRECT" }];
   assert.equal(validateMissionResult({ ...result, task_graph: graph }).task_graph?.[0]?.execution_backend, "DIRECT");
+  for (const status of ["RUNNING", "DELIVERED", "VERIFIED", "FAILED", "WAITING_USER"]) {
+    assert.throws(() => validateMissionResult({ ...result, task_graph: [{ ...graph[0], status }] }), /unfinished/);
+  }
+  for (const verification_result of ["FAILED", " failed "]) {
+    assert.throws(() => validateMissionResult({ ...result, verified: true,
+      task_graph: [{ ...graph[0], verification_result }] }), /contradicts failed/);
+  }
+  assert.equal(validateMissionResult({ ...result,
+    task_graph: [{ ...graph[0], verification_result: "VERIFIED" }] }).mission_completed, true);
   assert.throws(() => validateMissionResult({ ...result, task_graph: [{ id: 1 }] }), /task graph/);
   assert.throws(() => validateMissionResult({ ...result, execution_metrics: { model_calls: -1 } }), /metrics/);
   assert.throws(() => validateMissionResult({ ok: false, result: "Provider timeout", task_id: "task-1-01234567" }), /Provider timeout.*checkpoint/);
@@ -148,6 +157,9 @@ test("live task graph validation rejects ambiguous identities, missing dependenc
   assert.throws(() => validateTaskGraph([{ ...node, status: "SUCCESS_GUESSED" }]), /phase/);
   assert.throws(() => validateTaskGraph([{ ...node, execution_backend: {} }]), /backend/);
   assert.throws(() => validateTaskGraph([{ ...node, action: "x".repeat(1001) }]), /graph/);
+  assert.throws(() => validateTaskGraph([
+    { ...node, dependencies: ["two"] }, { ...node, id: "two", dependencies: ["one"] },
+  ]), /cycle/);
 });
 
 test("live execution graph updates before completion and rejects stale updates after revocation", { skip: process.platform !== "win32" }, async () => {

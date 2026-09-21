@@ -112,10 +112,47 @@ fn validate_keyboard_frame(frame: &Frame, emergency: &EmergencyLatch) -> Result<
 fn validate_binding(binding: &ForegroundBinding) -> Result<()> {
     if binding.hwnd == 0
         || binding.process_id == 0
-        || binding.title.len() > 512
+        || binding.title.chars().count() > 512
         || binding.title.contains('\0')
     {
         return Err(Error::Denied("invalid foreground binding"));
+    }
+    Ok(())
+}
+
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
+fn validate_pointer_target(
+    intended: (i32, i32),
+    actual: (i32, i32),
+    expected_window: u64,
+    hit_window: u64,
+) -> Result<()> {
+    if actual != intended {
+        return Err(Error::Denied(
+            "pointer moved before input; resolve target again",
+        ));
+    }
+    if expected_window == 0 || hit_window != expected_window {
+        return Err(Error::Denied(
+            "pointer target is covered or belongs to another window",
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
+fn click_sequence(
+    clicks: u8,
+    mut guard: impl FnMut() -> Result<()>,
+    mut deliver: impl FnMut() -> Result<()>,
+    mut wait: impl FnMut(Duration),
+) -> Result<()> {
+    for index in 0..clicks {
+        guard()?;
+        deliver()?;
+        if index + 1 < clicks {
+            wait(Duration::from_millis(45));
+        }
     }
     Ok(())
 }
@@ -212,7 +249,13 @@ mod unicode_tests {
         assert_eq!(scroll_chunk(7), 7);
         assert_eq!(scroll_chunk(-7), -7);
         assert_eq!(scroll_chunk(0), 0);
-        assert!((1000 + SCROLL_CHUNK_STEPS - 1) / SCROLL_CHUNK_STEPS <= 32);
+        let mut remaining = 1000;
+        let mut calls = 0;
+        while remaining > 0 {
+            remaining -= scroll_chunk(remaining);
+            calls += 1;
+        }
+        assert!(calls <= 32);
     }
 
     #[test]
@@ -224,6 +267,120 @@ mod unicode_tests {
         });
         assert!(matches!(result, Err(Error::Emergency)));
         assert_eq!(calls, 1);
+    }
+}
+
+#[cfg(test)]
+mod pointer_target_tests {
+    use super::*;
+    use std::cell::Cell;
+
+    #[test]
+    fn pointer_drift_between_clicks_stops_without_repositioning_or_replaying() {
+        let actual = Cell::new((-10, 20));
+        let delivered = Cell::new(0);
+        let result = click_sequence(
+            3,
+            || validate_pointer_target((-10, 20), actual.get(), 7, 7),
+            || {
+                delivered.set(delivered.get() + 1);
+                Ok(())
+            },
+            |_| actual.set((100, 100)),
+        );
+        assert!(result.is_err());
+        assert_eq!(delivered.get(), 1);
+    }
+
+    #[test]
+    fn overlay_or_missing_target_prevents_first_click() {
+        for hit in [0, 8] {
+            let result = click_sequence(
+                1,
+                || validate_pointer_target((10, 20), (10, 20), 7, hit),
+                || panic!("covered target must not receive input"),
+                |_| panic!("no delay before first click"),
+            );
+            assert!(result.is_err());
+        }
+    }
+
+    #[test]
+    fn verified_double_click_waits_only_between_deliveries() {
+        let delivered = Cell::new(0);
+        let waits = Cell::new(0);
+        click_sequence(
+            2,
+            || Ok(()),
+            || {
+                delivered.set(delivered.get() + 1);
+                Ok(())
+            },
+            |_| {
+                assert_eq!(delivered.get(), 1);
+                waits.set(waits.get() + 1);
+            },
+        )
+        .unwrap();
+        assert_eq!(delivered.get(), 2);
+        assert_eq!(waits.get(), 1);
+    }
+
+    #[test]
+    fn uncertain_click_is_never_repeated() {
+        let calls = Cell::new(0);
+        let result = click_sequence(
+            3,
+            || Ok(()),
+            || {
+                calls.set(calls.get() + 1);
+                Err(Error::Operation("partial input".into()))
+            },
+            |_| panic!("no wait or retry after uncertainty"),
+        );
+        assert!(result.is_err());
+        assert_eq!(calls.get(), 1);
+    }
+}
+
+#[cfg(all(test, feature = "native", target_os = "windows"))]
+mod foreground_benchmark {
+    use super::*;
+    use std::hint::black_box;
+
+    #[test]
+    #[ignore = "Opt-in foreground read benchmark; never sends input"]
+    fn benchmark_foreground_guards_read_only() {
+        let expected = current_foreground_binding()
+            .unwrap()
+            .expect("foreground required");
+        let mut old = Vec::new();
+        let mut new = Vec::new();
+        for _ in 0..7 {
+            let started = Instant::now();
+            for _ in 0..10_000 {
+                validate_binding(black_box(&expected)).unwrap();
+                let actual = current_foreground_binding()
+                    .unwrap()
+                    .expect("foreground required");
+                assert_eq!(
+                    (actual.hwnd, actual.process_id),
+                    (expected.hwnd, expected.process_id)
+                );
+            }
+            old.push(started.elapsed().as_nanos() / 10_000);
+            let started = Instant::now();
+            for _ in 0..10_000 {
+                verify_foreground(black_box(&expected)).unwrap();
+            }
+            new.push(started.elapsed().as_nanos() / 10_000);
+        }
+        old.sort_unstable();
+        new.sort_unstable();
+        println!(
+            "foreground_guard_median_ns: title_read={}, identity_only={}",
+            old[3], new[3]
+        );
     }
 }
 
@@ -358,25 +515,33 @@ mod windows_foreground {
         fn GetWindowTextW(hwnd: isize, text: *mut u16, max_count: i32) -> i32;
     }
 
-    pub fn current() -> Result<Option<ForegroundBinding>> {
+    pub fn identity() -> Option<(u64, u32)> {
         let hwnd = unsafe { GetForegroundWindow() };
         if hwnd == 0 {
-            return Ok(None);
+            return None;
         }
         let mut process_id = 0u32;
         unsafe { GetWindowThreadProcessId(hwnd, &mut process_id) };
-        if process_id == 0 {
-            return Ok(None);
+        if process_id == 0 || unsafe { GetForegroundWindow() } != hwnd {
+            return None;
         }
+        Some((hwnd as u64, process_id))
+    }
+
+    pub fn current() -> Result<Option<ForegroundBinding>> {
+        let Some((hwnd, process_id)) = identity() else {
+            return Ok(None);
+        };
         let mut buffer = [0u16; 513];
-        let length = unsafe { GetWindowTextW(hwnd, buffer.as_mut_ptr(), buffer.len() as i32) };
+        let length =
+            unsafe { GetWindowTextW(hwnd as isize, buffer.as_mut_ptr(), buffer.len() as i32) };
         let title = if length > 0 {
             String::from_utf16_lossy(&buffer[..length as usize])
         } else {
             String::new()
         };
         let binding = ForegroundBinding {
-            hwnd: hwnd as u64,
+            hwnd,
             process_id,
             title,
         };
@@ -411,9 +576,9 @@ pub fn current_pointer_position() -> Result<Option<(i32, i32)>> {
 #[cfg(all(feature = "native", target_os = "windows"))]
 fn verify_foreground(expected: &ForegroundBinding) -> Result<()> {
     validate_binding(expected)?;
-    let actual =
-        current_foreground_binding()?.ok_or(Error::Denied("foreground window unavailable"))?;
-    if actual.hwnd != expected.hwnd || actual.process_id != expected.process_id {
+    // Titles are diagnostic and can change on every keystroke. Avoid allocating
+    // or querying them on every motion tick and Unicode batch.
+    if windows_foreground::identity() != Some((expected.hwnd, expected.process_id)) {
         return Err(Error::Denied("foreground window changed"));
     }
     Ok(())
@@ -486,6 +651,8 @@ mod windows_input {
     unsafe extern "system" {
         fn SetPhysicalCursorPos(x: i32, y: i32) -> i32;
         fn GetPhysicalCursorPos(point: *mut Point) -> i32;
+        fn WindowFromPhysicalPoint(point: Point) -> isize;
+        fn GetAncestor(hwnd: isize, flags: u32) -> isize;
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
     }
 
@@ -564,6 +731,27 @@ mod windows_input {
         Ok((point.x, point.y))
     }
 
+    fn root_at(x: i32, y: i32) -> u64 {
+        let hit = unsafe { WindowFromPhysicalPoint(Point { x, y }) };
+        // GA_ROOT walks parents, not owners: an unexpected owned popup is also
+        // a different target and must be resolved explicitly.
+        if hit == 0 {
+            0
+        } else {
+            (unsafe { GetAncestor(hit, 2) }) as u64
+        }
+    }
+
+    pub fn verify_window_at(x: i32, y: i32, expected: &ForegroundBinding) -> Result<()> {
+        validate_pointer_target((x, y), (x, y), expected.hwnd, root_at(x, y))
+    }
+
+    pub fn verify_pointer_at(x: i32, y: i32, expected: &ForegroundBinding) -> Result<()> {
+        let actual = position()?;
+        validate_pointer_target((x, y), actual, expected.hwnd, root_at(x, y))?;
+        verify_foreground(expected)
+    }
+
     fn button_flags(button: MouseButton) -> (u32, u32) {
         match button {
             MouseButton::Left => (MOUSEEVENTF_LEFTDOWN, MOUSEEVENTF_LEFTUP),
@@ -600,7 +788,7 @@ mod windows_input {
         if clicks == 0 {
             return Ok(());
         }
-        if clicks.abs() > SCROLL_CHUNK_STEPS {
+        if clicks.unsigned_abs() > SCROLL_CHUNK_STEPS as u32 {
             return Err(Error::Limit("native scroll batch"));
         }
         // Preserve one physical wheel notch per INPUT record so applications that
@@ -611,7 +799,7 @@ mod windows_input {
         } else {
             (-WHEEL_DELTA) as u32
         };
-        let inputs = vec![mouse_input(MOUSEEVENTF_WHEEL, data); clicks.abs() as usize];
+        let inputs = vec![mouse_input(MOUSEEVENTF_WHEEL, data); clicks.unsigned_abs() as usize];
         send(&inputs, "mouse wheel")
     }
 
@@ -718,7 +906,7 @@ mod windows_input {
         foreground: &ForegroundBinding,
         emergency: &EmergencyLatch,
     ) -> Result<()> {
-        let mut events = Vec::with_capacity(128);
+        let mut events = Vec::with_capacity(UNICODE_CHUNK_UNITS * 2);
         unicode_chunks(text, |chunk| {
             emergency.check()?;
             verify_foreground(foreground)?;
@@ -785,18 +973,18 @@ impl InputController for NativeInput {
             return Err(Error::Limit("mouse click count"));
         }
         verify_foreground(foreground)?;
+        windows_input::verify_window_at(x, y, foreground)?;
         emergency.check()?;
-        verify_foreground(foreground)?;
         windows_input::move_to(x, y)?;
-        for index in 0..clicks {
-            emergency.check()?;
-            verify_foreground(foreground)?;
-            windows_input::click(button)?;
-            if index + 1 < clicks {
-                std::thread::sleep(Duration::from_millis(45));
-            }
-        }
-        Ok(())
+        click_sequence(
+            clicks,
+            || {
+                emergency.check()?;
+                windows_input::verify_pointer_at(x, y, foreground)
+            },
+            || windows_input::click(button),
+            std::thread::sleep,
+        )
     }
 
     fn pointer_move(
@@ -858,9 +1046,10 @@ impl InputController for NativeInput {
             return Err(Error::Limit("drag duration"));
         }
         verify_foreground(foreground)?;
+        windows_input::verify_window_at(start_x, start_y, foreground)?;
         windows_input::move_to(start_x, start_y)?;
         emergency.check()?;
-        verify_foreground(foreground)?;
+        windows_input::verify_pointer_at(start_x, start_y, foreground)?;
         let motion = crate::motion::Motion::new((start_x, start_y), (end_x, end_y), duration_ms)?;
         if let Err(error) = windows_input::button_down(button) {
             let _ = windows_input::button_up(button);
@@ -900,10 +1089,11 @@ impl InputController for NativeInput {
             return Err(Error::Limit("scroll steps"));
         }
         verify_foreground(foreground)?;
+        let (x, y) = windows_input::position()?;
         let mut remaining = clicks;
         while remaining != 0 {
             emergency.check()?;
-            verify_foreground(foreground)?;
+            windows_input::verify_pointer_at(x, y, foreground)?;
             let chunk = scroll_chunk(remaining);
             // Keep emergency/foreground checks between bounded batches while reducing
             // Win32 SendInput overhead for long scrolls. Positive means scroll up.
@@ -927,7 +1117,6 @@ impl InputController for NativeInput {
             ));
         }
         validate_key_name(key)?;
-        verify_foreground(foreground)?;
         emergency.check()?;
         verify_foreground(foreground)?;
         windows_input::press_key(key)
@@ -947,7 +1136,6 @@ impl InputController for NativeInput {
                 "simulation evidence cannot authorize native input",
             ));
         }
-        verify_foreground(foreground)?;
         emergency.check()?;
         verify_foreground(foreground)?;
         windows_input::hotkey(keys)
@@ -967,9 +1155,6 @@ impl InputController for NativeInput {
             ));
         }
         validate_text(text)?;
-        verify_foreground(foreground)?;
-        emergency.check()?;
-        verify_foreground(foreground)?;
         windows_input::type_text(text, foreground, emergency)
     }
 }

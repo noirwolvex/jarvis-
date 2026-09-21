@@ -130,6 +130,15 @@ _VERSION_JS = r"""() => {
   return `${s.epoch}:${s.version}`;
 }"""
 
+_ACTION_READBACK_JS = r"""(el, {action, value}) => {
+  if (!el.isConnected) return false;
+  if (action === 'fill' || action === 'select')
+    return ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null)) === value;
+  if (action === 'check' || action === 'uncheck') return el.checked === (action === 'check');
+  if (action === 'focus') return el === el.getRootNode().activeElement;
+  return false;
+}"""
+
 _VIDEO_STATE_JS = r"""() => {
   const v = document.querySelector('video'); const p = document.querySelector('#movie_player');
   const selected = new URL(location.href).searchParams.get('v') || '';
@@ -217,10 +226,14 @@ def _target(page: Any, target: dict[str, Any], expected_version: str = "") -> An
         locator = page.locator(target["selector"])
     else:
         raise ValueError("Target requires node_id, exact role/name, or selector")
-    count = locator.count()
-    if count != 1:
-        raise RuntimeError(f"Target must resolve uniquely; observed {count} matches")
-    return locator
+    # Pin the actual DOM object once. A Locator re-resolves on each operation and
+    # can silently target a replacement between preflight, input and readback.
+    handles = locator.element_handles()
+    if len(handles) != 1:
+        for handle in handles:
+            handle.dispose()
+        raise RuntimeError(f"Target must resolve uniquely; observed {len(handles)} matches")
+    return handles[0]
 
 
 def _release_target(target: Any) -> None:
@@ -229,7 +242,7 @@ def _release_target(target: Any) -> None:
         target.dispose()
 
 
-def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None]) -> dict[str, Any]:
+def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], outer_page: Any = None) -> dict[str, Any]:
     state = args.get("state", "visible")
     if state not in {"visible", "hidden", "enabled", "text"}:
         raise ValueError("Unsupported wait state")
@@ -240,7 +253,10 @@ def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None]) -> d
     polls = 0
     while True:
         check()
+        if outer_page is not None and outer_page is not page:
+            require_clear_page(outer_page)
         require_clear_page(page)
+        check()
         polls += 1
         locator = page.get_by_role(target["role"], name=target.get("name", ""), exact=True) if target.get("role") else page.locator(target["selector"])
         count = locator.count()
@@ -257,6 +273,7 @@ def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None]) -> d
             else:
                 matched = locator.is_visible() and locator.inner_text(timeout=500).strip() == str(args.get("text", "")).strip()
         if matched:
+            check()
             return {"matched": True, "state": state, "polls": polls}
         if time.monotonic() >= deadline:
             raise TimeoutError(f"Browser state '{state}' did not become true after {polls} observations")
@@ -267,6 +284,11 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
     check()
     if operation == "challenge_state":
         return challenge_state(page)
+    if operation == "wait_state":
+        # The polling loop owns inspection. Avoid checking the same document twice
+        # before a ready-state probe, and keep its parent protected on every poll.
+        selected = _frame(page, str(args.get("frame_selector", "")))
+        return _wait_state(selected, args, check, outer_page=page)
     require_clear_page(page)
     selected = _frame(page, str(args.get("frame_selector", "")))
     if selected is not page:
@@ -275,8 +297,6 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
         result = selected.evaluate(_SNAPSHOT_JS, {"force": bool(args.get("force", False)), "max_nodes": max(1, min(int(args.get("max_nodes", 160)), 250))})
         result["frame_selector"] = args.get("frame_selector", "")
         return result
-    if operation == "wait_state":
-        return _wait_state(selected, args, check)
     if operation == "semantic_action":
         action = args["action"]
         if action not in {"click", "fill", "press", "select", "check", "uncheck", "focus"}:
@@ -298,26 +318,19 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
             # A single bounded action attempt. Timeouts may have side effects: never replay here.
             if action == "fill":
                 target.fill(value, timeout=1500)
-                verified = target.input_value(timeout=500) == value
             elif action == "select":
                 target.select_option(value=value, timeout=1500)
-                verified = target.input_value(timeout=500) == value
             elif action in {"check", "uncheck"}:
                 getattr(target, action)(timeout=1500)
-                verified = target.is_checked() == (action == "check")
             elif action == "press":
                 target.press(value, timeout=1500)
-                verified = False
             elif action == "focus":
-                if args["target"].get("node_id"):
-                    target.focus()  # ElementHandle.focus has no timeout parameter.
-                else:
-                    target.focus(timeout=1500)
-                verified = bool(target.evaluate("el => el === el.getRootNode().activeElement"))
+                target.focus()  # All targets are pinned ElementHandles.
             else:
                 target.click(timeout=1500)
-                verified = False
             check()
+            verified = action in {"fill", "select", "check", "uncheck", "focus"} and bool(
+                target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": value}))
             require_clear_page(page)
             if selected is not page:
                 require_clear_page(selected)
@@ -377,10 +390,8 @@ def _require_video(state: dict[str, Any], expected: str, *, check_playback_error
 
 
 def browser_semantic_snapshot(force: bool = False, max_nodes: int = 160, frame_selector: str = "") -> str:
-    from .chrome_cdp import chrome_current_tab, chrome_page_operation, chrome_tabs
+    from .chrome_cdp import chrome_page_operation
     result = chrome_page_operation("semantic_snapshot", force=force, max_nodes=max_nodes, frame_selector=frame_selector)
-    result["tab"] = json.loads(chrome_current_tab())
-    result["tabs"] = json.loads(chrome_tabs())[:40]
     return json.dumps(result, ensure_ascii=False)
 
 

@@ -3,9 +3,11 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import shutil
 import subprocess
 import sys
+import threading
 import time
 import urllib.request
 import uuid
@@ -404,31 +406,121 @@ def run_dashboard(kind: str) -> int:
             daemon_log.close()
 
 
-def _read_worker_message(process: subprocess.Popen[str], request_id: str | None = None) -> dict[str, Any]:
-    assert process.stdout is not None
-    deadline = time.monotonic() + 15.0
-    while time.monotonic() < deadline:
-        if process.poll() is not None:
-            stderr = process.stderr.read() if process.stderr else ""
-            raise RuntimeError(f"Python worker exited with code {process.returncode}: {stderr[-2000:]}")
-        line = process.stdout.readline()
-        if not line:
-            time.sleep(0.02)
-            continue
-        value = json.loads(line)
-        if request_id is None and value.get("type") == "ready":
-            return value
-        if request_id is not None and value.get("type") == "result" and value.get("id") == request_id:
-            return value
-    raise RuntimeError("Timed out waiting for Python worker protocol response")
+class _WorkerProtocolReader:
+    """Drain owned diagnostic-worker pipes without blocking the response deadline."""
+
+    MAX_LINE = 2 * 1024 * 1024
+
+    def __init__(self, process: subprocess.Popen[str]):
+        if process.stdout is None or process.stderr is None:
+            raise ValueError("Diagnostic worker requires stdout and stderr pipes")
+        self.process = process
+        self._lines: queue.Queue[str] = queue.Queue(maxsize=8)
+        self._closed = threading.Event()
+        self._stdout_done = threading.Event()
+        self._lock = threading.Lock()
+        self._failure = ""
+        self._stderr = ""
+        self._threads = [
+            threading.Thread(target=self._read_stdout, name="jarvis-probe-stdout", daemon=True),
+            threading.Thread(target=self._read_stderr, name="jarvis-probe-stderr", daemon=True),
+        ]
+        for thread in self._threads:
+            thread.start()
+
+    def _fail(self, message: str) -> None:
+        with self._lock:
+            if not self._failure:
+                self._failure = message
+
+    def _read_stdout(self) -> None:
+        assert self.process.stdout is not None
+        try:
+            while not self._closed.is_set():
+                line = self.process.stdout.readline(self.MAX_LINE + 1)
+                if not line:
+                    return
+                if len(line) > self.MAX_LINE:
+                    self._fail("Python worker protocol line exceeded its safety limit")
+                    return
+                try:
+                    self._lines.put_nowait(line)
+                except queue.Full:
+                    self._fail("Python worker protocol queue exceeded its safety limit")
+                    return
+        except (OSError, ValueError) as exc:
+            if not self._closed.is_set():
+                self._fail(f"Python worker output pipe failed: {exc}")
+        finally:
+            self._stdout_done.set()
+
+    def _read_stderr(self) -> None:
+        assert self.process.stderr is not None
+        try:
+            while not self._closed.is_set():
+                chunk = self.process.stderr.read(4096)
+                if not chunk:
+                    return
+                with self._lock:
+                    self._stderr = (self._stderr + chunk)[-8192:]
+        except (OSError, ValueError) as exc:
+            if not self._closed.is_set():
+                self._fail(f"Python worker error pipe failed: {exc}")
+
+    def read_message(self, request_id: str | None = None, timeout_s: float = 15.0) -> dict[str, Any]:
+        deadline = time.monotonic() + timeout_s
+        while True:
+            with self._lock:
+                failure = self._failure
+            if failure:
+                raise RuntimeError(failure)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise RuntimeError("Timed out waiting for Python worker protocol response")
+            try:
+                line = self._lines.get(timeout=min(remaining, 0.05))
+            except queue.Empty:
+                if self._stdout_done.is_set() or self._closed.is_set():
+                    self._threads[1].join(timeout=0.1)
+                    with self._lock:
+                        detail = self._stderr[-2000:]
+                    raise RuntimeError(f"Python worker protocol closed (code={self.process.poll()}): {detail}")
+                continue
+            try:
+                value = json.loads(line)
+            except json.JSONDecodeError as exc:
+                raise RuntimeError("Python worker returned invalid protocol JSON") from exc
+            if not isinstance(value, dict):
+                raise RuntimeError("Python worker returned a non-object protocol message")
+            if request_id is None and value.get("type") == "ready":
+                return value
+            if request_id is not None and value.get("type") == "result" and value.get("id") == request_id:
+                return value
+
+    def close(self) -> None:
+        if self._closed.is_set():
+            return
+        self._closed.set()
+        # Only this diagnostic child is owned here. Stopping it releases blocked pipe
+        # reads; close handles after the reader threads finish using them.
+        _stop_process(self.process)
+        for thread in self._threads:
+            thread.join(timeout=3)
+        for stream in (self.process.stdin, self.process.stdout, self.process.stderr):
+            if stream is not None:
+                stream.close()
 
 
-def _worker_probe(process: subprocess.Popen[str], probe: dict[str, Any]) -> dict[str, Any]:
+def _read_worker_message(reader: _WorkerProtocolReader, request_id: str | None = None) -> dict[str, Any]:
+    return reader.read_message(request_id)
+
+
+def _worker_probe(process: subprocess.Popen[str], reader: _WorkerProtocolReader, probe: dict[str, Any]) -> dict[str, Any]:
     assert process.stdin is not None
     request_id = uuid.uuid4().hex
     process.stdin.write(json.dumps({"protocol": 1, "id": request_id, "action": "native_input_probe", "probe": probe}) + "\n")
     process.stdin.flush()
-    result = _read_worker_message(process, request_id)
+    result = _read_worker_message(reader, request_id)
     if result.get("ok") is not True:
         raise RuntimeError(f"Python worker native probe failed: {result.get('error')}")
     payload = result.get("payload")
@@ -444,6 +536,7 @@ def live_qualify() -> int:
     _require_windows()
     daemon: subprocess.Popen[Any] | None = None
     worker: subprocess.Popen[str] | None = None
+    worker_reader: _WorkerProtocolReader | None = None
     daemon_log = None
     try:
         daemon, daemon_log, _session, env, engine = bootstrap()
@@ -460,7 +553,8 @@ def live_qualify() -> int:
             encoding="utf-8",
             bufsize=1,
         )
-        ready = _read_worker_message(worker)
+        worker_reader = _WorkerProtocolReader(worker)
+        ready = _read_worker_message(worker_reader)
         native = ready.get("native_engine")
         if not isinstance(native, dict) or native.get("backend") != "rust" or native.get("rust_input_ready") is not True:
             raise RuntimeError(f"Running Python worker is not connected to Rust: {ready}")
@@ -546,7 +640,7 @@ def live_qualify() -> int:
                     f"({left},{top},{width},{height})"
                 )
 
-            _worker_probe(worker, {"kind": "click", "x": ex, "y": ey})
+            _worker_probe(worker, worker_reader, {"kind": "click", "x": ex, "y": ey})
             root.update()
             if root.focus_get() is not entry:
                 raise RuntimeError(
@@ -554,7 +648,7 @@ def live_qualify() -> int:
                 )
 
             token = f"RUST-LIVE-{display_id}-{uuid.uuid4().hex[:8]}"
-            _worker_probe(worker, {"kind": "type_text", "text": token})
+            _worker_probe(worker, worker_reader, {"kind": "type_text", "text": token})
             root.update()
             if entry.get() != token:
                 raise RuntimeError(
@@ -565,8 +659,8 @@ def live_qualify() -> int:
             # Ctrl+A must select the existing token; the replacement proves that the
             # modifier + letter shortcut was delivered atomically by the Rust daemon.
             replacement = f"HOTKEY-{display_id}-{uuid.uuid4().hex[:8]}"
-            _worker_probe(worker, {"kind": "hotkey", "keys": ["ctrl", "a"]})
-            _worker_probe(worker, {"kind": "type_text", "text": replacement})
+            _worker_probe(worker, worker_reader, {"kind": "hotkey", "keys": ["ctrl", "a"]})
+            _worker_probe(worker, worker_reader, {"kind": "type_text", "text": replacement})
             root.update()
             if entry.get() != replacement:
                 raise RuntimeError(
@@ -576,8 +670,8 @@ def live_qualify() -> int:
 
             # A standalone navigation key must also arrive through the VK path.
             prefix = "VK-"
-            _worker_probe(worker, {"kind": "press_key", "key": "home"})
-            _worker_probe(worker, {"kind": "type_text", "text": prefix})
+            _worker_probe(worker, worker_reader, {"kind": "press_key", "key": "home"})
+            _worker_probe(worker, worker_reader, {"kind": "type_text", "text": prefix})
             root.update()
             if entry.get() != prefix + replacement:
                 raise RuntimeError(
@@ -587,7 +681,7 @@ def live_qualify() -> int:
 
             bx = button.winfo_rootx() + button.winfo_width() // 2
             by = button.winfo_rooty() + button.winfo_height() // 2
-            _worker_probe(worker, {"kind": "click", "x": bx, "y": by})
+            _worker_probe(worker, worker_reader, {"kind": "click", "x": bx, "y": by})
             root.update()
             if not clicked["value"]:
                 raise RuntimeError(
@@ -627,7 +721,10 @@ def live_qualify() -> int:
                     worker.stdin.flush()
             except Exception:
                 pass
-            _stop_process(worker)
+            if worker_reader is not None:
+                worker_reader.close()
+            else:
+                _stop_process(worker)
         _stop_process(daemon)
         if daemon_log is not None:
             daemon_log.close()

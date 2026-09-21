@@ -16,7 +16,7 @@ class _ChromeRuntime:
     """Own all Playwright Sync API objects on one dedicated Python thread."""
 
     def __init__(self) -> None:
-        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any], threading.Event, Context]] = queue.Queue()
+        self._commands: queue.Queue[tuple[str, dict[str, Any], queue.Queue[Any], threading.Event, Context]] = queue.Queue(maxsize=32)
         self._ready = threading.Event()
         self._startup_error: Exception | None = None
         self._browser: Any = None
@@ -65,7 +65,10 @@ class _ChromeRuntime:
             raise RuntimeError(f"Chrome runtime thread failed: {self._startup_error}")
         reply: queue.Queue[Any] = queue.Queue(maxsize=1)
         cancelled = threading.Event()
-        self._commands.put((command, args, reply, cancelled, copy_context()))
+        try:
+            self._commands.put_nowait((command, args, reply, cancelled, copy_context()))
+        except queue.Full as exc:
+            raise RuntimeError("Browser command queue is full; no action was queued") from exc
         deadline = time.monotonic() + 60
         try:
             while True:
@@ -96,26 +99,27 @@ class _ChromeRuntime:
         record_backend("chrome_cdp", phase="observe", detail="Connect browser session")
         from playwright.sync_api import sync_playwright
 
-        if self._browser is not None:
+        reused = bool(self._browser is not None and self._browser.is_connected() and self._endpoint == endpoint)
+        if not reused:
+            if self._playwright is not None:
+                self._playwright.stop()
+            self._browser = self._playwright = self._page = None
+            self._pages = []
+            driver = sync_playwright().start()
             try:
-                self._browser.contexts
-            except Exception:
-                self._browser = None
-                self._playwright = None
-
-        if self._browser is None:
-            self._playwright = sync_playwright().start()
-            self._browser = self._playwright.chromium.connect_over_cdp(endpoint, timeout=5000)
+                self._browser = driver.chromium.connect_over_cdp(endpoint, timeout=5000)
+            except BaseException:
+                driver.stop()
+                raise
+            self._playwright = driver
 
         pages: list[Any] = []
         for context in self._browser.contexts:
             pages.extend(context.pages)
-        if not pages:
-            context = self._browser.contexts[0] if self._browser.contexts else self._browser.new_context()
-            self._page = context.new_page()
-            pages = [self._page]
+        if not reused:
+            self._page = pages[-1] if pages else None
         elif self._page not in pages:
-            self._page = pages[-1]
+            self._page = None
         self._pages = pages
         self._session_type = session_type
         self._endpoint = endpoint
@@ -124,9 +128,14 @@ class _ChromeRuntime:
             "endpoint": endpoint,
             "session_type": session_type,
             "pages": _page_rows(pages),
-            "active_url": self._page.url,
-            "active_title": self._page.title(),
+            "active_url": self._page.url if self._page is not None else "",
+            "active_title": self._page.title() if self._page is not None else "",
         }
+
+    def _cmd_connected(self) -> bool:
+        # A closed selected tab does not make a healthy browser connection disappear.
+        # Callers must explicitly select or create a page, not reconnect and retarget.
+        return bool(self._browser is not None and self._browser.is_connected())
 
     def _refresh_pages(self) -> list[Any]:
         if self._browser is None:
@@ -135,11 +144,61 @@ class _ChromeRuntime:
         for context in self._browser.contexts:
             pages.extend(context.pages)
         self._pages = pages
-        if self._page not in pages and pages:
-            self._page = pages[-1]
-        elif not pages:
+        if self._page not in pages:
+            # Closing a target does not authorize acting on another tab.
             self._page = None
         return pages
+
+    def _cmd_new_tab(self, url: str) -> dict[str, Any]:
+        from .browser_tab_tools import _normalize_tab_url
+        from .browser_semantic import require_clear_page
+        from .execution_telemetry import record_backend
+        target_url = _normalize_tab_url(url)
+        self._check_cancelled()
+        self._refresh_pages()
+        selected = self._page
+        if selected is not None:
+            require_clear_page(selected)
+        reused = bool(selected is not None and self._session_type == "managed"
+                      and target_url != "about:blank" and selected.url == "about:blank"
+                      and not selected.title().strip())
+        self._check_cancelled()
+        if not reused:
+            contexts = self._browser.contexts
+            if selected is not None:
+                context = selected.context
+            elif len(contexts) == 1:
+                context = contexts[0]
+            else:
+                raise RuntimeError("Select a browser context before creating a tab")
+            record_backend("chrome_cdp", detail="Create exact browser page")
+            selected = context.new_page()
+            # Retain this object even on navigation failure so recovery never creates
+            # a duplicate or guesses the target from a changing list of tab indexes.
+            self._page = selected
+        self._check_cancelled()
+        selected.bring_to_front()
+        if target_url != "about:blank":
+            self._check_cancelled()
+            record_backend("chrome_cdp", detail="Navigate exact browser page")
+            selected.goto(target_url, wait_until="domcontentloaded", timeout=30000)
+        self._check_cancelled()
+        require_clear_page(selected)
+        actual = selected.url
+        if target_url != "about:blank":
+            from urllib.parse import urlparse
+            destination = urlparse(actual)
+            if actual == "about:blank":
+                raise RuntimeError(f"Chrome tab stayed on about:blank instead of navigating to {target_url}")
+            if destination.scheme not in {"http", "https"} or not destination.netloc:
+                raise RuntimeError("Chrome navigation did not produce a valid web destination")
+        pages = self._refresh_pages()
+        if selected not in pages:
+            raise RuntimeError("Created browser tab closed before verification; inspect existing tabs")
+        return {"created": not reused, "reused_managed_placeholder": reused,
+                "selected": pages.index(selected), "requested_url": target_url,
+                "url": actual, "title": selected.title(), "session_type": self._session_type,
+                "target_id": "", "verified": True}
 
     def _cmd_tabs(self) -> list[dict[str, Any]]:
         from .execution_telemetry import record_backend
@@ -150,22 +209,32 @@ class _ChromeRuntime:
         pages = self._refresh_pages()
         if index < 0 or index >= len(pages):
             raise IndexError(f"Tab index {index} is out of range; {len(pages)} tabs are available.")
-        self._page = pages[index]
+        selected = pages[index]
         self._check_cancelled()
         from .execution_telemetry import record_backend
         record_backend("chrome_cdp", detail="Select existing tab")
-        self._page.bring_to_front()
-        return {
-            "selected": index,
-            "session_type": self._session_type,
-            "title": self._page.title(),
-            "url": self._page.url,
-        }
+        try:
+            selected.bring_to_front()
+            self._check_cancelled()
+            result = {
+                "selected": index,
+                "session_type": self._session_type,
+                "title": selected.title(),
+                "url": selected.url,
+            }
+        except BaseException:
+            # Focus may have changed even if the request failed or was cancelled.
+            # Require a fresh explicit selection before any later page mutation.
+            self._page = None
+            raise
+        self._page = selected
+        return result
 
     def _cmd_current(self) -> dict[str, Any]:
         from .execution_telemetry import record_backend
         record_backend("chrome_cdp", phase="observe", detail="Read current tab")
-        if self._page is None:
+        if self._page is None or self._page.is_closed():
+            self._page = None
             raise RuntimeError("No browser tab is selected.")
         return {
             "session_type": self._session_type,
@@ -175,7 +244,8 @@ class _ChromeRuntime:
 
     def _cmd_page(self, operation: str, **args: Any) -> Any:
         self._check_cancelled()
-        if self._page is None:
+        if self._page is None or self._page.is_closed():
+            self._page = None
             raise RuntimeError("No browser page is open")
         page = self._page
         from .execution_telemetry import record_backend
@@ -184,7 +254,17 @@ class _ChromeRuntime:
         } else "observe", detail=operation)
         if operation in {"semantic_snapshot", "semantic_action", "wait_state", "challenge_state", "youtube_state", "youtube_playback", "youtube_results"}:
             from .browser_semantic import run_browser_operation
-            return run_browser_operation(page, operation, args, self._check_cancelled)
+            result = run_browser_operation(page, operation, args, self._check_cancelled)
+            if operation == "semantic_snapshot":
+                # Keep page metadata in the same owner-thread command. Separate
+                # current/tabs commands can interleave a queued page selection.
+                self._check_cancelled()
+                result["tab"] = {"session_type": self._session_type, "url": page.url,
+                                 "title": page.title() if args.get("frame_selector") else result["title"]}
+                result["tabs"] = _page_rows(self._refresh_pages()[:40])
+            return result
+        if operation == "current":
+            return self._cmd_current()
         if operation == "goto":
             page.goto(args["url"], wait_until="domcontentloaded", timeout=30000)
             return {"title": page.title(), "url": page.url}
@@ -227,14 +307,14 @@ class _ChromeRuntime:
                 locator = page.locator(selector)
             if locator.count() != 1:
                 raise RuntimeError("Browser click target is missing or ambiguous; observe and use an exact unique target")
-            self._check_cancelled()
+            self._guard_page_input(page)
             locator.click(timeout=1500)
             return True
         if operation == "fill":
             locator = page.locator(args["selector"])
             if locator.count() != 1:
                 raise RuntimeError("Browser fill target is missing or ambiguous; observe and use an exact unique target")
-            self._check_cancelled()
+            self._guard_page_input(page)
             locator.fill(args["text"], timeout=1500)
             return True
         if operation == "wait":
@@ -242,6 +322,7 @@ class _ChromeRuntime:
             run_browser_operation(page, "wait_state", {"target": {"selector": args["selector"]}, "state": "visible", "timeout_ms": args.get("timeout_ms", 15000)}, self._check_cancelled)
             return True
         if operation == "press":
+            self._guard_page_input(page)
             page.keyboard.press(args["key"])
             return True
         if operation == "screenshot":
@@ -249,15 +330,25 @@ class _ChromeRuntime:
             return True
         raise ValueError(f"Unsupported Chrome page operation: {operation}")
 
+    def _guard_page_input(self, page: Any) -> None:
+        # Agent-level inspection occurs in an earlier command and can become stale.
+        # Check the exact page on its owning thread at the input boundary as well.
+        from .browser_semantic import require_clear_page
+        self._check_cancelled()
+        require_clear_page(page)
+        self._check_cancelled()
+
 
 def _runtime() -> _ChromeRuntime:
     global _RUNTIME
-    if _RUNTIME is None:
-        _RUNTIME = _ChromeRuntime()
+    with _RUNTIME_LOCK:
+        if _RUNTIME is None:
+            _RUNTIME = _ChromeRuntime()
     return _RUNTIME
 
 
 _RUNTIME: _ChromeRuntime | None = None
+_RUNTIME_LOCK = threading.Lock()
 
 
 def _cdp_url() -> str:
@@ -408,8 +499,7 @@ def chrome_is_connected() -> bool:
     if _RUNTIME is None:
         return False
     try:
-        _RUNTIME.call("current")
-        return True
+        return bool(_RUNTIME.call("connected"))
     except Exception:
         check_cancelled()
         return False

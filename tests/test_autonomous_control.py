@@ -139,7 +139,8 @@ class InputPrecisionTests(unittest.TestCase):
         def send(count, inputs, size):
             calls.append((count, [item.ki.wScan for item in inputs], size))
             return count
-        with patch("core.desktop_input.ctypes.windll", SimpleNamespace(user32=SimpleNamespace(SendInput=send)), create=True):
+        with patch("core.desktop_input.ctypes.windll", SimpleNamespace(user32=SimpleNamespace(SendInput=send)), create=True), \
+             patch("core.desktop_observation.foreground_identity", return_value=7):
             _send_unicode_text("A\U0001f600\r\n")
         self.assertEqual(calls[0][1], [65, 65, 0xD83D, 0xD83D, 0xDE00, 0xDE00, 13, 13])
 

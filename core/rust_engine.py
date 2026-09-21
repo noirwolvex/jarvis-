@@ -167,6 +167,8 @@ class RustDaemonClient:
         self._socket: ssl.SSLSocket | None = None
         self._session = ""
         self._sequence = 0
+        self._connected_at: float | None = None
+        self._last_activity: float | None = None
         self._keyboard_frame_cache: tuple[int, int, int, dict[str, Any], float] | None = None
 
     def close(self) -> None:
@@ -174,6 +176,7 @@ class RustDaemonClient:
             sock, self._socket = self._socket, None
             self._session = ""
             self._sequence = 0
+            self._connected_at = self._last_activity = None
             self._keyboard_frame_cache = None
             if sock is not None:
                 try:
@@ -212,6 +215,7 @@ class RustDaemonClient:
         tls: ssl.SSLSocket | None = None
         try:
             raw = socket.create_connection((self.config.host, self.config.port), timeout=5.0)
+            raw.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
             tls = context.wrap_socket(raw, server_hostname=self.config.server_name)
             tls.settimeout(10.0)
             if tls.selected_alpn_protocol() != _ALPN:
@@ -226,6 +230,7 @@ class RustDaemonClient:
             self._socket = tls
             self._session = session
             self._sequence = 0
+            self._connected_at = self._last_activity = time.monotonic()
         except Exception as exc:
             if tls is not None:
                 try:
@@ -247,7 +252,16 @@ class RustDaemonClient:
         mutating: bool = False,
     ) -> dict[str, Any]:
         with self._lock:
-            if self._socket is None or self._sequence >= 240:
+            from .process_control import check_cancelled
+            control = action.get("kind") in {"status", "emergency_stop"}
+            if not control:
+                check_cancelled()
+            now = time.monotonic()
+            idle = self._last_activity is not None and now - self._last_activity >= 25
+            aged = self._connected_at is not None and now - self._connected_at >= 270
+            # The server expires idle sessions after 30 s and all sessions after
+            # 300 s. Renew before dispatch so long model turns do not break input.
+            if self._socket is None or self._sequence >= 240 or idle or aged:
                 self._connect()
             assert self._socket is not None
             request_id = str(uuid.uuid4())
@@ -266,6 +280,8 @@ class RustDaemonClient:
                 raise ValueError("Rust daemon request exceeds frame limit")
             dispatch_may_have_started = False
             try:
+                if not control:
+                    check_cancelled()
                 # sendall can fail after transmitting a partial request. Mark a mutation
                 # uncertain before the first write attempt so auto mode never replays it
                 # through the Python fallback after a transport error.
@@ -275,7 +291,10 @@ class RustDaemonClient:
                                detail=str(action.get("kind", "request")))
                 self._socket.sendall(struct.pack(">I", len(encoded)) + encoded)
                 for _ in range(64):
+                    if not control:
+                        check_cancelled()
                     reply = self._read_frame(self._socket)
+                    self._last_activity = time.monotonic()
                     if reply.get("type") != "result" or reply.get("request_id") != request_id:
                         continue
                     data = reply.get("data")
@@ -306,7 +325,14 @@ class RustDaemonClient:
         )
 
     def emergency_stop(self) -> dict[str, Any]:
-        return self._request({"kind": "emergency_stop"}, mutating=True)
+        # The execution connection holds its lock while waiting for replies.
+        # Use a separate authenticated control connection so stop never queues
+        # behind a slow capture or input request on that connection.
+        control = RustDaemonClient(self.config)
+        try:
+            return control._request({"kind": "emergency_stop"}, mutating=True)
+        finally:
+            control.close()
 
     @staticmethod
     def _displays(status: dict[str, Any]) -> list[dict[str, Any]]:

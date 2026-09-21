@@ -2,7 +2,7 @@ use jarvis_execution_daemon::{
     capture::{CaptureRing, Frame, ScreenCapture, SimulationCapture, preview_bmp},
     governance::{Capability, EmergencyLatch, Policy, Scope},
     input::{InputController, SimulationInput},
-    ipc::{MAX_WIRE_BYTES, Session, read_frame},
+    ipc::{MAX_WIRE_BYTES, Session, read_frame, write_frame},
     process::{ProcessManager, validate_argv},
     types::{Action, ForegroundBinding, MouseButton, Request, now_ms},
 };
@@ -311,6 +311,54 @@ async fn oversized_frame_is_rejected_before_payload_allocation() {
     assert!(read_frame(&mut server).await.is_err());
 }
 
+#[tokio::test]
+async fn outbound_frame_is_one_write_and_oversized_data_never_reaches_transport() {
+    use std::{
+        pin::Pin,
+        task::{Context, Poll},
+    };
+    use tokio::io::AsyncWrite;
+    #[derive(Default)]
+    struct Writer {
+        bytes: Vec<u8>,
+        writes: usize,
+    }
+    impl AsyncWrite for Writer {
+        fn poll_write(
+            mut self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+            bytes: &[u8],
+        ) -> Poll<std::io::Result<usize>> {
+            self.writes += 1;
+            self.bytes.extend_from_slice(bytes);
+            Poll::Ready(Ok(bytes.len()))
+        }
+        fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+        fn poll_shutdown(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+            Poll::Ready(Ok(()))
+        }
+    }
+    let mut writer = Writer::default();
+    let value = serde_json::json!({"type": "result", "ok": true});
+    write_frame(&mut writer, &value).await.unwrap();
+    assert_eq!(writer.writes, 1);
+    let count = u32::from_be_bytes(writer.bytes[..4].try_into().unwrap()) as usize;
+    assert_eq!(count, writer.bytes.len() - 4);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&writer.bytes[4..]).unwrap(),
+        value
+    );
+    let mut rejected = Writer::default();
+    assert!(
+        write_frame(&mut rejected, &"x".repeat(MAX_WIRE_BYTES))
+            .await
+            .is_err()
+    );
+    assert_eq!(rejected.writes, 0);
+}
+
 #[test]
 fn arbitrary_commands_unknown_json_fields_and_argv_limits_are_rejected() {
     let manager = ProcessManager::new(vec![], false).unwrap();
@@ -360,6 +408,25 @@ fn pointer_duration_is_backward_compatible_and_bounded_before_delivery() {
     assert!(
         SimulationInput
             .pointer_move(&frame, 1, 2, 120, &foreground(), &latch)
+            .is_err()
+    );
+}
+
+#[test]
+fn non_ascii_window_titles_use_the_same_character_budget_as_the_python_binding() {
+    let frame = SimulationCapture.capture(0, 16_384).unwrap();
+    let latch = EmergencyLatch::default();
+    let mut binding = foreground();
+    binding.title = "ع".repeat(512);
+    assert!(
+        SimulationInput
+            .type_text(&frame, "fixture", &binding, &latch)
+            .is_ok()
+    );
+    binding.title.push('ع');
+    assert!(
+        SimulationInput
+            .type_text(&frame, "fixture", &binding, &latch)
             .is_err()
     );
 }

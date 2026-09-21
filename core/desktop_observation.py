@@ -15,12 +15,20 @@ def remember_signature(key: str, image) -> None:
         _SIGNATURES.popitem(last=False)
 
 
-def scene_matches(key: str) -> bool:
+def scene_matches(key: str, frame: dict[str, Any] | None = None) -> bool:
     from PIL import ImageGrab, ImageChops
     expected = _SIGNATURES.get(key)
     if expected is None:
         return False
-    current = ImageGrab.grab(all_screens=True).resize(expected.size).convert("RGB")
+    from .vision_tools import _virtual_origin
+    origin = _virtual_origin()
+    current = ImageGrab.grab(all_screens=True)
+    if origin != _virtual_origin():
+        return False
+    if frame is not None and (current.size != (frame["source_width"], frame["source_height"])
+                              or origin != (frame["virtual_origin_x"], frame["virtual_origin_y"])):
+        return False
+    current = current.resize(expected.size).convert("RGB")
     return all(high <= 12 for _, high in ImageChops.difference(expected, current).getextrema())
 
 
@@ -58,7 +66,7 @@ class DesktopObservationGate:
             self.invalidate()
             raise ValueError("Foreground changed since observation; inspect the current screen")
         if frame.get("scene_bound"):
-            if not scene_matches(frame["sha256"]) or foreground_identity() != frame["foreground_hwnd"]:
+            if not scene_matches(frame["sha256"], frame) or foreground_identity() != frame["foreground_hwnd"]:
                 self.invalidate()
                 raise ValueError("Fresh screen_observe required: visible UI changed before input")
         left, top = frame["virtual_origin_x"], frame["virtual_origin_y"]

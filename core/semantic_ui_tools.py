@@ -108,6 +108,13 @@ def _rect(control: Any) -> list[int]:
         return [0, 0, 0, 0]
 
 
+def _process_id(control: Any) -> int | None:
+    try:
+        return int(control.element_info.process_id)
+    except Exception:
+        return None
+
+
 def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
     row: dict[str, Any] = {
         "name": _control_name(control)[:512],
@@ -137,10 +144,7 @@ def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
         row["runtime_id"] = list(control.element_info.runtime_id)
     except Exception:
         row["runtime_id"] = None
-    try:
-        row["process_id"] = int(control.element_info.process_id)
-    except Exception:
-        row["process_id"] = None
+    row["process_id"] = _process_id(control)
     return row
 
 
@@ -320,9 +324,14 @@ def _find_control(win: Any, target: str = "", control_type: str = "", editable: 
 
 
 def _target_binding(win: Any, control: Any) -> dict[str, Any]:
+    metadata = _meta(control)
+    runtime_id = metadata["runtime_id"]
+    # Window labels, rectangles and selection/focus patterns are not part of this
+    # binding. Avoid fetching that whole UIA record merely to obtain its PID.
     return {"window_hwnd": int(win.handle), "window_identity": _node_identity(win),
-            "window_process_id": _meta(win).get("process_id"), "identity": _node_identity(control),
-            "control": _meta(control), "generation": _SNAPSHOTS.generation}
+            "window_process_id": _process_id(win),
+            "identity": ("uia", *runtime_id) if runtime_id else ("object", id(control)),
+            "control": metadata, "generation": _SNAPSHOTS.generation}
 
 
 def _validate_target(win: Any, control: Any, binding: dict[str, Any],

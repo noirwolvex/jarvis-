@@ -76,7 +76,7 @@ type WorkerState = {
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-export const FULL_ACCESS_WORKER_REVISION = 6;
+export const FULL_ACCESS_WORKER_REVISION = 8;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
@@ -110,6 +110,12 @@ export function validateTaskGraph(input: unknown): NonNullable<FullAccessMission
   for (const row of input) {
     if (row.dependencies.some((dep: string) => dep === row.id || !ids.has(dep))) throw new Error("Unknown graph dependency");
   }
+  const resolved = new Set<string>();
+  while (resolved.size < input.length) {
+    const ready = input.filter(row => !resolved.has(row.id) && row.dependencies.every((dep: string) => resolved.has(dep)));
+    if (!ready.length) throw new Error("Autonomous task graph contains a dependency cycle");
+    for (const row of ready) resolved.add(row.id);
+  }
   return input as NonNullable<FullAccessMissionResult["task_graph"]>;
 }
 
@@ -137,7 +143,13 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
   }
   if (parsed.requires_user_action && parsed.status !== "waiting_user") throw new Error("Invalid user-action checkpoint status");
   if (parsed.task_graph !== undefined) {
-    validateTaskGraph(parsed.task_graph);
+    const graph = validateTaskGraph(parsed.task_graph);
+    if (parsed.mission_completed && graph.some(node => node.status !== "COMPLETED")) {
+      throw new Error("Full Access completion contains unfinished task graph steps");
+    }
+    if (parsed.mission_completed && graph.some(node => node.verification_result?.trim().toUpperCase() === "FAILED")) {
+      throw new Error("Full Access completion contradicts failed task graph verification");
+    }
   }
   if (parsed.engine_visibility !== undefined && (!Array.isArray(parsed.engine_visibility) || parsed.engine_visibility.length > 50)) {
     throw new Error("Invalid engine visibility");

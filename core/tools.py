@@ -403,9 +403,8 @@ def _browser_type(selector: str, text: str) -> str:
 
 
 def _desktop_click(x: int, y: int) -> str:
-    import pyautogui
-    pyautogui.click(x=x, y=y)
-    return f"Clicked desktop at ({x}, {y})"
+    from .desktop_control_tools import desktop_click_button
+    return desktop_click_button(x, y)
 
 
 def _desktop_press(key: str) -> str:

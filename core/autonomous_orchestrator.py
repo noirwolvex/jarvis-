@@ -5,6 +5,7 @@ import re
 import time
 import uuid
 from dataclasses import asdict, dataclass, field
+from functools import wraps
 from pathlib import Path
 from typing import Any
 
@@ -170,10 +171,34 @@ class ExecutionRouter:
         return EngineRoute("DIRECT", "", cls._fallbacks("DIRECT"))
 
 
+def _atomic_checkpoint(method):
+    """Commit base state and its rich metadata together, before returning to execution.
+
+    Restricted to synchronous state updates below; never wrap tool dispatch or an
+    entire workflow. Intent journaling must still reach disk before every effect.
+    """
+    @wraps(method)
+    def update(self, *args, **kwargs):
+        self._checkpoint_depth = getattr(self, "_checkpoint_depth", 0) + 1
+        try:
+            return method(self, *args, **kwargs)
+        finally:
+            self._checkpoint_depth -= 1
+            if not self._checkpoint_depth:
+                pending = getattr(self, "_pending_checkpoint", None)
+                self._pending_checkpoint = None
+                if pending is not None:
+                    self._persist(pending)
+    return update
+
+
 class AutonomousTaskOrchestrator(TaskOrchestrator):
     """TaskOrchestrator with execution contracts, backend visibility and recovery history."""
 
     def _persist(self, task: TaskRun) -> None:
+        if getattr(self, "_checkpoint_depth", 0):
+            self._pending_checkpoint = task
+            return
         super()._persist(task)
         callback = getattr(self, "on_task_graph", None)
         if callback is not None:
@@ -251,6 +276,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             verification_result=str(raw.get("verification_result") or ""),
         )
 
+    @_atomic_checkpoint
     def set_plan(self, steps: list[PlanStep | dict[str, Any] | str]) -> list[ExecutionPlanStep]:
         rich = [self._rich_step(raw, index) for index, raw in enumerate(steps, start=1)]
         plan = super().set_plan(rich)
@@ -268,6 +294,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             self._persist(self.current)
         return list(plan)
 
+    @_atomic_checkpoint
     def update_step(self, step_id: str, status: str, result: str = "") -> None:
         super().update_step(step_id, status, result)
         if not self.current:
@@ -294,6 +321,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         step.result = reason[:12000]
         self._persist(self.current)
 
+    @_atomic_checkpoint
     def record_tool(
         self,
         name: str,
@@ -347,6 +375,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                     step.phase = "DELIVERED"
         self._persist(self.current)
 
+    @_atomic_checkpoint
     def verify(self, claim: str, verified: bool, evidence: str = "") -> bool:
         ok = super().verify(claim, verified, evidence)
         if not self.current:
@@ -354,7 +383,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         for step in self.current.plan:
             if not isinstance(step, ExecutionPlanStep):
                 continue
-            if step.id not in claim:
+            if not re.search(rf"(?<![\w-]){re.escape(step.id)}(?![\w-])", claim):
                 continue
             step.verification_result = "VERIFIED" if verified else "FAILED"
             if verified:

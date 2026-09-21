@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import tempfile
+import threading
 import unittest
 from types import SimpleNamespace
 from pathlib import Path
@@ -9,6 +10,40 @@ from unittest.mock import Mock, patch
 
 
 class AppDiscoveryCacheTests(unittest.TestCase):
+    def test_clear_during_discovery_prevents_stale_refill_without_blocking_other_queries(self):
+        import core.app_discovery_cache as cache
+
+        started, release = threading.Event(), threading.Event()
+        failures = []
+        def discover(query):
+            if query == "Slow":
+                started.set()
+                if not release.wait(2):
+                    raise RuntimeError("Discovery was blocked by cache bookkeeping")
+            return [{"name": query}]
+        def slow_query():
+            try:
+                cache._cached_discover("Slow")
+            except Exception as exc:
+                failures.append(exc)
+        cache.clear_app_discovery_cache()
+        with patch.object(cache, "_ORIGINAL", side_effect=discover), \
+             patch.object(cache, "_ttl_seconds", return_value=90):
+            worker = threading.Thread(target=slow_query, daemon=True)
+            worker.start()
+            try:
+                self.assertTrue(started.wait(1))
+                cache.clear_app_discovery_cache()
+                self.assertEqual(cache._cached_discover("Fast"), [{"name": "Fast"}])
+            finally:
+                release.set()
+                worker.join(2)
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(failures, [])
+        self.assertNotIn("slow", cache._CACHE)
+        self.assertIn("fast", cache._CACHE)
+        cache.clear_app_discovery_cache()
+
     def test_cache_reuses_friendly_name_and_bypasses_explicit_path(self) -> None:
         import core.app_discovery_cache as cache
 

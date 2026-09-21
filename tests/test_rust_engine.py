@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import tempfile
+import json
+import socket
+import threading
 import unittest
 from unittest.mock import Mock, patch
 from pathlib import Path
@@ -26,6 +29,93 @@ class _FailingSocket:
 
 
 class RustEngineTests(unittest.TestCase):
+    def fixture_client(self):
+        client = RustDaemonClient(RustEngineConfig("127.0.0.1", 7443, "localhost",
+            Path("ca"), Path("cert"), Path("key"), {}, {}))
+        client._socket = Mock()
+        client._session = "fixture"
+        return client
+
+    def test_idle_and_aged_sessions_renew_before_a_single_dispatch(self):
+        for connected_at, last_activity, should_reconnect in [(100, 199, False), (100, 174, True), (-80, 199, True)]:
+            with self.subTest(connected_at=connected_at, last_activity=last_activity):
+                client = self.fixture_client()
+                client._connected_at, client._last_activity = connected_at, last_activity
+                def response(sock):
+                    request = json.loads(sock.sendall.call_args.args[0][4:])
+                    return {"type": "result", "request_id": request["request_id"], "ok": True, "data": {"fixture": True}}
+                with patch("core.rust_engine.time.monotonic", return_value=200), \
+                     patch.object(client, "_connect") as reconnect, \
+                     patch.object(client, "_read_frame", side_effect=response):
+                    self.assertEqual(client.status(), {"fixture": True})
+                self.assertEqual(reconnect.call_count, int(should_reconnect))
+                client._socket.sendall.assert_called_once()
+
+    def test_stop_remains_deliverable_when_local_cancellation_is_latched(self):
+        client = self.fixture_client()
+        control_socket = Mock()
+        def connect(control):
+            control._socket = control_socket
+            control._session = "control"
+        def response(sock):
+            request = json.loads(sock.sendall.call_args.args[0][4:])
+            return {"type": "result", "request_id": request["request_id"], "ok": True, "data": {"emergency_stopped": True}}
+        with patch("core.process_control.check_cancelled", side_effect=RuntimeError("stopped")), \
+             patch.object(RustDaemonClient, "_connect", connect), \
+             patch.object(RustDaemonClient, "_read_frame", side_effect=response):
+            self.assertTrue(client.emergency_stop()["emergency_stopped"])
+        control_socket.sendall.assert_called_once()
+        control_socket.close.assert_called_once()
+        client._socket.sendall.assert_not_called()
+
+    def test_stop_uses_control_connection_while_execution_lock_is_held(self):
+        client = self.fixture_client()
+        dispatched = threading.Event()
+        results = []
+        def request(control, action, **kwargs):
+            self.assertIsNot(control, client)
+            self.assertIs(control.config, client.config)
+            self.assertEqual(action, {"kind": "emergency_stop"})
+            self.assertTrue(kwargs["mutating"])
+            dispatched.set()
+            return {"emergency_stopped": True}
+        with patch.object(RustDaemonClient, "_request", request):
+            with client._lock:
+                worker = threading.Thread(target=lambda: results.append(client.emergency_stop()), daemon=True)
+                worker.start()
+                delivered_while_locked = dispatched.wait(1)
+            worker.join(1)
+        self.assertTrue(delivered_while_locked, "Stop must not wait for the execution connection lock")
+        self.assertEqual(results, [{"emergency_stopped": True}])
+
+    def test_stop_closes_control_connection_after_uncertain_failure_without_retry(self):
+        client = self.fixture_client()
+        with patch.object(RustDaemonClient, "_request", side_effect=RustEngineExecutionError("uncertain")) as request, \
+             patch.object(RustDaemonClient, "close") as close:
+            with self.assertRaises(RustEngineExecutionError):
+                client.emergency_stop()
+        request.assert_called_once()
+        close.assert_called_once()
+
+    def test_cancelled_native_action_never_reaches_socket(self):
+        client = self.fixture_client()
+        with patch("core.process_control.check_cancelled", side_effect=RuntimeError("stopped")):
+            with self.assertRaisesRegex(RuntimeError, "stopped"):
+                client._request({"kind": "pointer_move"}, mutating=True)
+        client._socket.sendall.assert_not_called()
+
+    def test_connection_disables_nagle_without_relaxing_tls(self):
+        client = self.fixture_client()
+        with patch("core.rust_engine.ssl.create_default_context") as context, \
+             patch("core.rust_engine.socket.create_connection") as connect, \
+             patch.object(client, "_read_frame", return_value={"type": "hello", "protocol": 1,
+                        "session": "fixture", "max_frame_bytes": 262144}):
+            tls = context.return_value.wrap_socket.return_value
+            tls.selected_alpn_protocol.return_value = "jarvis-execution/1"
+            client._connect()
+        connect.return_value.setsockopt.assert_called_once_with(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+        self.assertIsNotNone(client._last_activity)
+
     def test_engine_mode_is_explicit_and_rejects_unknown_values(self) -> None:
         self.assertEqual(native_engine_mode({}), "auto")
         self.assertEqual(native_engine_mode({"JARVIS_NATIVE_ENGINE": "python"}), "python")

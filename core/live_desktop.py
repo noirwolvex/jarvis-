@@ -15,11 +15,12 @@ def _capture():
     from .desktop_observation import foreground_identity
     from .vision_tools import _virtual_origin
     before = foreground_identity()
+    origin = _virtual_origin()
     image = ImageGrab.grab(all_screens=True)
     after = foreground_identity()
-    if before != after:
-        raise RuntimeError("Foreground changed during live capture")
-    return image, after, _virtual_origin()
+    if before != after or origin != _virtual_origin():
+        raise RuntimeError("Foreground or display geometry changed during live capture")
+    return image, after, origin
 
 
 class LiveDesktopMonitor:
@@ -71,6 +72,8 @@ class LiveDesktopMonitor:
             return False
         started = time.monotonic()
         image, hwnd, origin = self.capture()
+        captured_at = int(time.time() * 1000)
+        captured_monotonic = time.monotonic()
         if self._stopped() or self.busy():
             return False
         self.captures += 1
@@ -81,8 +84,8 @@ class LiveDesktopMonitor:
         if not changed:
             with self._lock:
                 if self._latest:
-                    self._latest["frame"]["last_seen_at_ms"] = int(time.time() * 1000)
-                    self._latest["seen_monotonic"] = time.monotonic()
+                    self._latest["frame"]["last_seen_at_ms"] = captured_at
+                    self._latest["seen_monotonic"] = captured_monotonic
             return False
         source_width, source_height = image.size
         from .vision_tools import _bounded_size
@@ -93,9 +96,8 @@ class LiveDesktopMonitor:
         raw = output.getvalue()
         if len(raw) > 750_000:
             raise RuntimeError("Live preview exceeded its memory budget")
-        if self._stopped():
+        if self._stopped() or self.busy() or time.monotonic() - captured_monotonic > 3:
             return False
-        captured_at = int(time.time() * 1000)
         frame = {"sha256": hashlib.sha256(raw).hexdigest(), "captured_at_ms": captured_at,
                  "last_seen_at_ms": captured_at, "foreground_hwnd": hwnd,
                  "source_width": source_width, "source_height": source_height,
@@ -108,7 +110,7 @@ class LiveDesktopMonitor:
         self._signature, self._binding = signature, binding
         self.changes += 1
         with self._lock:
-            self._latest = {**observation, "seen_monotonic": time.monotonic()}
+            self._latest = {**observation, "seen_monotonic": captured_monotonic}
         if self.emit and not self._stopped() and not self.busy():
             self.emit(observation)
         return True

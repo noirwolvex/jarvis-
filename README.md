@@ -4,6 +4,10 @@ A Windows-first desktop AI agent powered by Claude.
 
 ## Autonomous desktop upgrade
 
+See the [September 21 execution review](docs/project-review-2026-09-21.md) for the latest fixes, measured checkpoint improvement, branch inventory, regression results and remaining live qualification requirements.
+
+The [mouse and keyboard performance follow-up](docs/input-performance-2026-09-21.md) adds guarded click delivery, physical-window hit checks, fewer redundant movements and UIA reads, with isolated benchmark results and activation notes.
+
 The hybrid control center now connects the existing Python agent to guarded screen, mouse, keyboard, browser, application, file, Git and terminal tools. It adds atomic task checkpoints, recovery recall, action-review gates, live progress and desktop previews, and a Full Access emergency-stop latch with **Ctrl+Alt+Escape**. Terminal commands require an additional explicit session permission.
 
 Full Access also includes ordered semantic workflows: compile known steps once, execute through the existing permission gates, verify meaningful checkpoints, and recover without replaying completed actions. Bounded DOM/UIA snapshots, cancellable state waits, Discord conversation checks and verified YouTube playback reduce repeated model calls and screenshots. See the runbook for measured fixture results and live-testing limits.

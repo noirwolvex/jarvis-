@@ -15,6 +15,7 @@ class BrowserRuntimeTests(unittest.TestCase):
         runtime = _ChromeRuntime.__new__(_ChromeRuntime)
         runtime._active_cancel = None
         runtime._page = MagicMock()
+        runtime._page.is_closed.return_value = False
         target = runtime._page.get_by_text.return_value
         target.count.return_value = 2
         with self.assertRaisesRegex(RuntimeError, "ambiguous"):

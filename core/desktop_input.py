@@ -38,30 +38,45 @@ def _uia_type_and_verify(title: str, text: str) -> tuple[bool, str]:
     attempted = False
     try:
         from pywinauto import Desktop
+        from .process_control import check_cancelled
 
+        def ensure_active():
+            try:
+                check_cancelled()
+            except Exception as exc:
+                raise InputDeliveryError("UIA typing cancelled; automatic fallback refused") from exc
+
+        ensure_active()
         window = Desktop(backend="uia").window(title_re=re.escape(title))
         window.wait("visible", timeout=5)
+        ensure_active()
         window.set_focus()
 
         # Modern Notepad exposes its document as an Edit control through UIA.
         edits = window.descendants(control_type="Edit")
+        ensure_active()
         if not edits:
             return False, "No UIA Edit control found"
 
-        target = next((edit for edit in edits if edit.is_visible() and edit.is_enabled()), edits[0])
+        candidates = [edit for edit in edits if edit.is_visible() and edit.is_enabled()]
+        if len(candidates) != 1:
+            raise InputDeliveryError("Editor target is missing or ambiguous; resolve a semantic control first")
+        target = candidates[0]
+        ensure_active()
         target.set_focus()
+        ensure_active()
         attempted = True
         target.set_edit_text(text)
-        time.sleep(0.25)
-
-        try:
-            actual = target.get_value()
-        except Exception:
-            actual = target.window_text()
-
-        if actual == text:
-            return True, f"Verified text in UIA editor ({len(text)} characters)"
-        raise InputDeliveryError("UIA text did not match after writing; inspect before retrying")
+        from .ui_state import wait_until
+        def matches():
+            try:
+                return target.get_value() == text
+            except Exception:
+                return target.window_text() == text
+        wait_until(matches, description="exact editor value")
+        return True, f"Verified text in UIA editor ({len(text)} characters)"
+    except InputDeliveryError:
+        raise
     except Exception as exc:
         if attempted:
             raise InputDeliveryError("UIA write outcome is uncertain; automatic fallback refused") from exc
@@ -74,6 +89,15 @@ def _send_unicode_text(text: str) -> None:
         return
     if not hasattr(ctypes, "windll"):
         raise RuntimeError("Direct Unicode input is supported on Windows only")
+    from .desktop_observation import foreground_identity
+    from .process_control import check_cancelled
+    try:
+        check_cancelled()
+        foreground = foreground_identity()
+    except Exception as exc:
+        raise InputDeliveryError("Native typing preflight failed; text was not sent") from exc
+    if not foreground:
+        raise InputDeliveryError("No foreground window; native text was not sent")
 
     user32 = ctypes.windll.user32
     INPUT_KEYBOARD = 1
@@ -86,8 +110,34 @@ def _send_unicode_text(text: str) -> None:
         inputs.append(_INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(0, unit, KEYEVENTF_UNICODE, 0, 0))))
         inputs.append(_INPUT(INPUT_KEYBOARD, _INPUTUNION(ki=_KEYBDINPUT(0, unit, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP, 0, 0))))
 
+    def deliver() -> None:
+        if not inputs:
+            return
+        try:
+            check_cancelled()
+            if foreground_identity() != foreground:
+                raise InputDeliveryError("Foreground changed during typing; inspect before continuing")
+        except Exception as exc:
+            raise InputDeliveryError("Native typing stopped; automatic fallback refused") from exc
+        try:
+            sent = user32.SendInput(len(inputs), (_INPUT * len(inputs))(*inputs), ctypes.sizeof(_INPUT))
+        except Exception as exc:
+            raise InputDeliveryError("Native typing outcome is uncertain; inspect before retrying") from exc
+        if sent != len(inputs):
+            # Release Unicode units from this batch only; never resend its text.
+            releases = [item for item in inputs if item.ki.dwFlags & KEYEVENTF_KEYUP]
+            try:
+                user32.SendInput(len(releases), (_INPUT * len(releases))(*releases), ctypes.sizeof(_INPUT))
+            except Exception:
+                pass
+            raise InputDeliveryError(f"SendInput accepted {sent}/{len(inputs)} events; inspect before retrying")
+        inputs.clear()
+
     for char in text.replace("\r\n", "\n"):
         codepoint = ord(char)
+        units = 1 if codepoint <= 0xFFFF else 2
+        if len(inputs) + units * 2 > 128:
+            deliver()
         if codepoint == 0x0A:
             append_unit(0x0D)
         elif codepoint <= 0xFFFF:
@@ -97,19 +147,19 @@ def _send_unicode_text(text: str) -> None:
             append_unit(0xD800 + (codepoint >> 10))
             append_unit(0xDC00 + (codepoint & 0x3FF))
 
-    sent = user32.SendInput(len(inputs), (_INPUT * len(inputs))(*inputs), ctypes.sizeof(_INPUT))
-    if sent != len(inputs):
-        raise InputDeliveryError(f"SendInput accepted {sent}/{len(inputs)} events; inspect before retrying")
+    deliver()
 
 
 def _clipboard_paste(text: str) -> None:
     import pyperclip
     import pyautogui
+    pyautogui.PAUSE = 0
+    pyautogui.FAILSAFE = False
 
     pyperclip.copy(text)
-    time.sleep(0.15)
+    time.sleep(0.05)
     pyautogui.hotkey("ctrl", "v")
-    time.sleep(max(0.1, min(1.5, len(text) / 500)))
+    time.sleep(max(0.05, min(0.5, len(text) / 2000)))
 
 
 def paste_text(text: str, window_title: str | None = None, verify: bool = False) -> str:
@@ -127,7 +177,6 @@ def paste_text(text: str, window_title: str | None = None, verify: bool = False)
     direct_error = None
     try:
         _send_unicode_text(text)
-        time.sleep(max(0.08, min(1.5, len(text) / 600)))
         method = "Windows Unicode input"
     except InputDeliveryError:
         raise

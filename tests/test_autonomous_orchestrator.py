@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import inspect
+import json
+import os
 import tempfile
 import unittest
 from pathlib import Path
@@ -36,6 +38,40 @@ class ExecutionRouterTests(unittest.TestCase):
 
 
 class AutonomousTaskOrchestratorTests(unittest.TestCase):
+    def test_rich_updates_publish_one_complete_durable_checkpoint(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            task = orchestrator.begin("Fixture mission")
+            snapshots = []
+            path = Path(tmp) / f"{task.task_id}.json"
+            orchestrator.on_task_graph = lambda graph: snapshots.append(json.loads(path.read_text(encoding="utf-8")))
+            with patch("core.orchestrator.os.fsync", wraps=os.fsync) as sync:
+                orchestrator.set_plan([{"id": "step-1", "description": "Fixture"}])
+                orchestrator.update_step("step-1", "running")
+                orchestrator.start_action("fixture", {})
+                self.assertEqual(json.loads(path.read_text())["in_flight"]["name"], "fixture")
+                orchestrator.record_tool("fixture", {}, ToolResult("VERIFIED: fixture", {
+                    "backend": "rust_native", "operations": []}), 1, 1, mutation=True)
+                orchestrator.verify("step-1: fixture", True, "Observed")
+                orchestrator.update_step("step-1", "completed")
+            self.assertEqual(sync.call_count, 6)
+            self.assertEqual(len(snapshots), 6)
+            self.assertEqual(snapshots[3]["plan"][0]["phase"], "DELIVERED")
+            self.assertEqual(snapshots[3]["traces"][0]["execution_backend"], "rust_native")
+            self.assertEqual(snapshots[4]["plan"][0]["phase"], "VERIFIED")
+            self.assertEqual(snapshots[5]["plan"][0]["phase"], "COMPLETED")
+            restored = AutonomousTaskOrchestrator(tmp).restore(task.task_id)
+            self.assertEqual(restored.plan[0].phase, "COMPLETED")
+
+    def test_verification_does_not_match_a_step_id_prefix(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            orchestrator.begin("Two fixture steps")
+            orchestrator.set_plan([{"id": key, "description": key} for key in ("step-1", "step-10")])
+            orchestrator.verify("step-10: fixture", True, "Observed")
+            self.assertEqual(orchestrator.current.plan[0].phase, "QUEUED")
+            self.assertEqual(orchestrator.current.plan[1].phase, "VERIFIED")
+
     def test_override_contract_accepts_every_base_record_tool_parameter(self) -> None:
         from core.orchestrator import TaskOrchestrator
 
