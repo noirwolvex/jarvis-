@@ -9,6 +9,7 @@ from .tools import ToolRegistry, ToolSpec
 
 _DIRECT_CHAT_TYPES = {"ListItem", "TreeItem", "DataItem", "Button"}
 _FAST_CHAT_TYPES = ("ListItem", "TreeItem", "DataItem", "Edit")
+_WEBVIEW_CHAT_TYPES = ("ListItem", "TreeItem", "DataItem", "Edit", "Text", "Custom", "Group", "Pane")
 _ROW_CONTAINER_TYPES = _DIRECT_CHAT_TYPES | {"Custom", "Group", "Pane"}
 _EXCLUDED_NAMES = {
     "chats",
@@ -293,8 +294,16 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
         controls = _descendants(win, require_complete=True, control_types=observation_types, visible_only=True)
         candidates = _chat_candidates(win, ordinal, controls=controls)
         if len(candidates) < ordinal:
-            # Compatibility for versions exposing only Custom/Group rows. Ordinary
-            # native rows should not enumerate every ancestor, image and chat label.
+            # Modern WhatsApp WebView builds often expose the label as Text inside
+            # Custom/Group/Pane rows. Query those types natively before considering
+            # a broad tree walk; this avoids materializing unrelated chat-history UI.
+            observation_types = _WEBVIEW_CHAT_TYPES
+            controls = _descendants(win, require_complete=True,
+                                    control_types=observation_types, visible_only=True)
+            candidates = _chat_candidates(win, ordinal, controls=controls)
+        if len(candidates) < ordinal:
+            # Last-resort compatibility for an unknown provider shape. Keep the old
+            # full-tree path, but only after both bounded native UIA queries fail.
             observation_types = ()
             controls = _descendants(win, require_complete=True)
             candidates = _chat_candidates(win, ordinal, controls=controls)
