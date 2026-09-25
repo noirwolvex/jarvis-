@@ -148,11 +148,10 @@ class UniversalInteractionTests(unittest.TestCase):
     def test_restricted_mode_allows_inspection_but_blocks_universal_mutations(self):
         tools = registry()
         tools.permissions.set_access_mode("restricted")
-        self.assertIn("Approval required", tools.execute("interaction_click", {"surface": "desktop", "target": "Save"}, approved=False)
-                      if False else "Approval required")
         denied = tools.execute("interaction_click", {"surface": "desktop", "target": "Save"}, approved=True)
         self.assertIn("Desktop interaction is disabled", denied)
-        self.assertIn("interaction_inspect", tools._tools)
+        allowed, reason = tools.permissions.check("interaction_inspect", Risk.LOW, approved=True)
+        self.assertTrue(allowed, reason)
 
 
 if __name__ == "__main__":
