@@ -349,7 +349,7 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
 
     # Reuse the same observation for candidate discovery and the before-state.
     # Do not enumerate the entire chat history a second time before clicking.
-    binding = _target_binding(win, control)
+    binding = _target_binding(win, control, before)
     rect = binding["control"]["rect"]
     if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
         raise InputDeliveryError("WhatsApp chat row geometry is unavailable; no input delivered")
