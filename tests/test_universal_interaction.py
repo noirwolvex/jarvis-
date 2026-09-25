@@ -12,6 +12,8 @@ from core.native_ui_input import register_native_ui_input_tools
 from core.universal_interaction import (
     interaction_click,
     interaction_hotkey,
+    interaction_inspect,
+    interaction_scroll,
     interaction_type,
     register_universal_interaction_tools,
 )
@@ -135,6 +137,36 @@ class UniversalInteractionTests(unittest.TestCase):
             frame_selector="",
         )
         desktop.assert_not_called()
+
+    def test_browser_scroll_routes_to_guarded_dom_scroll(self):
+        tools = registry()
+        with patch("core.universal_interaction._browser_active", return_value=True), \
+             patch("core.browser_semantic.browser_semantic_scroll", return_value='VERIFIED: {"verified":true}') as scroll:
+            result = interaction_scroll(420, registry=tools, delta_x=10)
+        self.assertTrue(result.startswith("VERIFIED:"))
+        scroll.assert_called_once_with(delta_y=420, delta_x=10, frame_selector="")
+
+    def test_desktop_scroll_normalizes_positive_y_to_wheel_down(self):
+        tools = registry()
+        wheel = Mock(return_value="RUST_EXECUTED: scrolled")
+        tools.register(ToolSpec(
+            "desktop_scroll", "fixture wheel", Risk.MEDIUM,
+            {"type": "object", "properties": {"clicks": {"type": "integer", "minimum": -1000, "maximum": 1000}}, "required": ["clicks"]},
+            wheel,
+        ))
+        with patch("core.universal_interaction._browser_active", return_value=False):
+            result = interaction_scroll(5, registry=tools)
+        self.assertEqual(result, "RUST_EXECUTED: scrolled")
+        wheel.assert_called_once_with(clicks=-5)
+
+    def test_inspect_honors_underlying_read_deny(self):
+        tools = registry()
+        tools.permissions.deny_tools.add("browser_semantic_snapshot")
+        with patch("core.universal_interaction._browser_active", return_value=True), \
+             patch("core.browser_semantic.browser_semantic_snapshot") as snapshot:
+            with self.assertRaisesRegex(PermissionError, "explicitly denied"):
+                interaction_inspect(registry=tools)
+        snapshot.assert_not_called()
 
     def test_underlying_browser_deny_is_honored_by_universal_router(self):
         tools = registry()
