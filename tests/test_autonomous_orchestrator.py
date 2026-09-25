@@ -161,7 +161,7 @@ class AutonomousTaskOrchestratorTests(unittest.TestCase):
                 self.assertIn("task_graph", summary)
                 self.assertEqual(
                     summary["execution_priority"],
-                    ["DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                    ["DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
                 )
 
     def test_recovery_history_is_persistent(self) -> None:
