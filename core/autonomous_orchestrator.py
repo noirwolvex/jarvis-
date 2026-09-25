@@ -487,7 +487,13 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         inherited_dependencies = list(failed.depends_on)
 
         for offset, raw in enumerate(recovery_steps, start=1):
-            step = self._rich_step(raw, failed_index + offset + 1)
+            generated_id = f"recovery-{failed_step_id}-{offset}"
+            prepared: PlanStep | dict[str, Any] | str = raw
+            if isinstance(raw, str):
+                prepared = {"id": generated_id, "description": raw}
+            elif isinstance(raw, dict) and not raw.get("id"):
+                prepared = {**raw, "id": generated_id}
+            step = self._rich_step(prepared, failed_index + offset + 1)
             if step.id in existing_ids or any(item.id == step.id for item in inserted):
                 raise ValueError(f"Recovery step id already exists: {step.id}")
             step.depends_on = [previous_id] if previous_id else inherited_dependencies
@@ -527,6 +533,20 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         self.current.metrics["graph_rewrites"] = self.current.metrics.get("graph_rewrites", 0) + 1
         self._persist(self.current)
         return inserted
+
+    def step_is_resolved(self, step: PlanStep) -> bool:
+        """Return true when a required node completed directly or via its recovery tail."""
+        if step.status == "completed":
+            return True
+        if not isinstance(self.current, AutonomousTaskRun):
+            return False
+        for rewrite in reversed(self.current.graph_rewrites):
+            if rewrite.failed_step_id != step.id or not rewrite.inserted_step_ids:
+                continue
+            tail_id = rewrite.inserted_step_ids[-1]
+            tail = next((item for item in self.current.plan if item.id == tail_id), None)
+            return bool(tail and tail.status == "completed")
+        return False
 
     def live_task_graph(self) -> list[dict[str, Any]]:
         if not self.current:
@@ -578,6 +598,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             })
         data.update({
             "task_graph": self.live_task_graph(),
+            "plan_resolved": sum(self.step_is_resolved(step) for step in self.current.plan),
             "engine_visibility": traces,
             "execution_priority": list(EXECUTION_PRIORITY),
             "recovery_history": [
