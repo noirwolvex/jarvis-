@@ -4,14 +4,17 @@ import argparse
 import json
 import os
 import queue
+import secrets
 import shutil
 import socket
 import subprocess
 import sys
 import threading
 import time
+import urllib.parse
 import urllib.request
 import uuid
+import webbrowser
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
@@ -358,6 +361,9 @@ def _runtime_env(session_dir: Path, observe: dict[str, str], input_caps: dict[st
         {
             "JARVIS_REPO_ROOT": str(ROOT),
             "JARVIS_CONTROL_MODE": "hybrid",
+            # Fresh on every managed runtime start. It is consumed only by the Node
+            # control plane to authenticate a browser session and is never written to disk.
+            "JARVIS_CONTROL_PAIRING_TOKEN": secrets.token_urlsafe(32),
             "JARVIS_NATIVE_ENGINE": "rust",
             "JARVIS_DAEMON_HOST": "127.0.0.1",
             "JARVIS_DAEMON_PORT": "7443",
@@ -497,6 +503,18 @@ def _wait_dashboard(process: subprocess.Popen[Any]) -> None:
     raise RuntimeError(f"Dashboard did not become reachable: {last_error}")
 
 
+def _open_paired_dashboard(env: dict[str, str]) -> None:
+    token = env.get("JARVIS_CONTROL_PAIRING_TOKEN", "").strip()
+    if len(token) < 32:
+        raise RuntimeError("Managed Control Center pairing token is unavailable")
+    pair_url = DASHBOARD_URL + "api/pair?token=" + urllib.parse.quote(token, safe="")
+    # The secret is sent directly to the local browser but never printed to stdout/stderr.
+    # /api/pair immediately redirects to / and stores only a signed HttpOnly session cookie.
+    if not webbrowser.open(pair_url, new=2):
+        raise RuntimeError("Could not open the authenticated Control Center in the default browser")
+    print("JARVIS_CONTROL_SESSION_OPENED Authenticated local browser session requested.", flush=True)
+
+
 def run_dashboard(kind: str) -> int:
     _require_windows()
     command = _dashboard_command(kind)
@@ -514,6 +532,7 @@ def _run_dashboard(command: list[str]) -> int:
         dashboard = subprocess.Popen(command, cwd=ROOT / "apps" / "control-center", env=env,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         _wait_dashboard(dashboard)
+        _open_paired_dashboard(env)
         print("JARVIS_RUNTIME_RUST_ACTIVE Python worker missions are configured fail-closed through Rust.", flush=True)
         return dashboard.wait()
     except KeyboardInterrupt:

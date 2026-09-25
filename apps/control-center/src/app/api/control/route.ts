@@ -1,3 +1,4 @@
+import { assertControlSession } from "@/lib/control-session";
 import {
   assertLocalRequest,
   controlMode,
@@ -37,6 +38,7 @@ export async function POST(request: Request) {
   try {
     if (hybridModeEnabled()) {
       assertLocalRequest(request);
+      assertControlSession(request);
       assertHybridMutation(request);
       const input = await parseControlBody(request, 8000);
       if (input.action === "stop" || input.action === "reset") {

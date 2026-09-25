@@ -10,6 +10,7 @@ import {
   type DaemonStatus,
 } from "./daemon-client";
 import type { EventView, Snapshot } from "./view-types";
+import { assertControlSession } from "./control-session";
 
 export type ControlMode = "simulation" | "native";
 export type ControlInput =
@@ -189,6 +190,7 @@ export function assertLocalRequest(request: Request, mutation = false, expectedC
   if (origin && origin !== authority.origin) throw new Error("Cross-origin access denied");
   if (request.headers.get("sec-fetch-site") === "cross-site") throw new Error("Cross-site access denied");
   if (mutation) {
+    assertControlSession(request);
     const expected = expectedControl ?? controlMode();
     if (request.headers.get("x-jarvis-control") !== expected) throw new Error(`${expected} control header required`);
   }

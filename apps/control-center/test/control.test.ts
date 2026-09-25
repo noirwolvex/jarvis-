@@ -2,6 +2,8 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { createRuntime } from "@jarvis/runtime";
 import { assertLocalRequest, controlMode, parseControlBody, snapshotForView } from "../src/lib/control-service.ts";
+import { assertControlSession, CONTROL_SESSION_COOKIE } from "../src/lib/control-session.ts";
+import { GET as pairGet } from "../src/app/api/pair/route.ts";
 import { assertHybridMutation, hybridModeEnabled } from "../src/lib/hybrid-control.ts";
 import { parseLegacyLaunchMission, supportedLegacyApplications } from "../src/lib/legacy-bridge.ts";
 import { daemonConfigFromEnv } from "../src/lib/daemon-client.ts";
@@ -20,6 +22,53 @@ test("local control boundary rejects hostile host origin and wrong mode header",
   assert.doesNotThrow(() => assertHybridMutation(request("{}", { "x-jarvis-control": "hybrid" })));
   assert.doesNotThrow(() => assertHybridMutation(request("{}", { "x-jarvis-control": "simulation" })));
   assert.throws(() => assertHybridMutation(request("{}", { "x-jarvis-control": "native" })));
+});
+
+
+test("managed runtime pairing issues an HttpOnly signed session and rejects forgery", async () => {
+  const oldToken = process.env.JARVIS_CONTROL_PAIRING_TOKEN;
+  const oldMode = process.env.JARVIS_CONTROL_MODE;
+  const token = "pairing-token-0123456789-abcdefghijklmnopqrstuvwxyz";
+  process.env.JARVIS_CONTROL_PAIRING_TOKEN = token;
+  process.env.JARVIS_CONTROL_MODE = "hybrid";
+  try {
+    const paired = await pairGet(new Request(`http://127.0.0.1:3000/api/pair?token=${encodeURIComponent(token)}`, {
+      headers: { host: "127.0.0.1:3000" },
+    }));
+    assert.equal(paired.status, 303);
+    const setCookie = paired.headers.get("set-cookie") || "";
+    assert.match(setCookie, new RegExp(`^${CONTROL_SESSION_COOKIE}=[^;]+; Path=/; HttpOnly; SameSite=Strict`));
+    const cookie = setCookie.split(";")[0]!;
+    const authenticated = request("{}", { cookie, "x-jarvis-control": "hybrid" });
+    assert.doesNotThrow(() => assertControlSession(authenticated));
+    assert.throws(() => assertControlSession(request("{}", { cookie: `${CONTROL_SESSION_COOKIE}=forged.value` })));
+    const denied = await pairGet(new Request("http://127.0.0.1:3000/api/pair?token=wrong", {
+      headers: { host: "127.0.0.1:3000" },
+    }));
+    assert.equal(denied.status, 403);
+  } finally {
+    if (oldToken === undefined) delete process.env.JARVIS_CONTROL_PAIRING_TOKEN;
+    else process.env.JARVIS_CONTROL_PAIRING_TOKEN = oldToken;
+    if (oldMode === undefined) delete process.env.JARVIS_CONTROL_MODE;
+    else process.env.JARVIS_CONTROL_MODE = oldMode;
+  }
+});
+
+test("hybrid and native mutations fail closed without an authenticated runtime session", () => {
+  const oldToken = process.env.JARVIS_CONTROL_PAIRING_TOKEN;
+  const oldMode = process.env.JARVIS_CONTROL_MODE;
+  process.env.JARVIS_CONTROL_PAIRING_TOKEN = "runtime-secret-0123456789-abcdefghijklmnopqrstuvwxyz";
+  try {
+    for (const mode of ["hybrid", "native"] as const) {
+      process.env.JARVIS_CONTROL_MODE = mode;
+      assert.throws(() => assertControlSession(request("{}", { "x-jarvis-control": mode })), /session required/);
+    }
+  } finally {
+    if (oldToken === undefined) delete process.env.JARVIS_CONTROL_PAIRING_TOKEN;
+    else process.env.JARVIS_CONTROL_PAIRING_TOKEN = oldToken;
+    if (oldMode === undefined) delete process.env.JARVIS_CONTROL_MODE;
+    else process.env.JARVIS_CONTROL_MODE = oldMode;
+  }
 });
 
 test("control parser validates simulation and typed native actions", async () => {
