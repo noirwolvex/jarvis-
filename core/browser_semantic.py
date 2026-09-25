@@ -295,6 +295,25 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
     selected = _frame(page, str(args.get("frame_selector", "")))
     if selected is not page:
         require_clear_page(selected)
+    if operation == "semantic_scroll":
+        dx = max(-5000, min(int(args.get("delta_x", 0)), 5000))
+        dy = max(-5000, min(int(args.get("delta_y", 0)), 5000))
+        if dx == 0 and dy == 0:
+            raise ValueError("Semantic scroll requires a non-zero delta")
+        check()
+        result = selected.evaluate("""({dx,dy}) => {
+          const before = {x:scrollX,y:scrollY}; scrollBy(dx,dy);
+          const after = {x:scrollX,y:scrollY};
+          return {before,after,max_x:Math.max(0,document.documentElement.scrollWidth-innerWidth),
+            max_y:Math.max(0,document.documentElement.scrollHeight-innerHeight)};
+        }""", {"dx": dx, "dy": dy})
+        check()
+        require_clear_page(page)
+        if selected is not page:
+            require_clear_page(selected)
+        changed = result.get("before") != result.get("after")
+        return {**result, "delta_x": dx, "delta_y": dy, "executed": True,
+                "verified": changed, "at_boundary_or_not_scrollable": not changed}
     if operation == "semantic_snapshot":
         result = selected.evaluate(_SNAPSHOT_JS, {"force": bool(args.get("force", False)), "max_nodes": max(1, min(int(args.get("max_nodes", 160)), 250))})
         result["frame_selector"] = args.get("frame_selector", "")
@@ -415,6 +434,12 @@ def browser_semantic_action(action: str, target: dict[str, Any], value: str = ""
     return ("VERIFIED: " if result.get("verified") else "ACTION_EXECUTED: ") + json.dumps(result, ensure_ascii=False)
 
 
+def browser_semantic_scroll(delta_y: int, delta_x: int = 0, frame_selector: str = "") -> str:
+    from .chrome_cdp import chrome_page_operation
+    result = chrome_page_operation("semantic_scroll", delta_y=int(delta_y), delta_x=int(delta_x), frame_selector=frame_selector)
+    return ("VERIFIED: " if result.get("verified") else "ACTION_EXECUTED: ") + json.dumps(result, ensure_ascii=False)
+
+
 def browser_wait_state(target: dict[str, Any], state: str = "visible", timeout_ms: int = 5000, text: str = "", frame_selector: str = "") -> str:
     from .chrome_cdp import chrome_page_operation
     result = chrome_page_operation("wait_state", target=target, state=state, timeout_ms=timeout_ms, text=text, frame_selector=frame_selector)
@@ -433,5 +458,7 @@ def register_browser_semantic_tools(registry: Any) -> None:
         {"type": "object", "properties": {"force": {"type": "boolean"}, "max_nodes": {"type": "integer", "minimum": 1, "maximum": 250}, "frame_selector": frame}, "additionalProperties": False}, browser_semantic_snapshot))
     registry.register(ToolSpec("browser_semantic_action", "Execute one exact semantic action, refusing ambiguous or stale targets. Use snapshot node_id plus expected_version, or exact role/name. Fill/append/select/check/focus verify locally; click/press require important result verification. Append preserves the existing field value without exposing it. Never blindly repeat an uncertain click.", Risk.MEDIUM,
         {"type": "object", "properties": {"action": {"enum": ["click", "fill", "append", "press", "select", "check", "uncheck", "focus"]}, "target": target, "value": {"type": "string", "maxLength": 4096}, "expected_version": {"type": "string", "maxLength": 100}, "frame_selector": frame}, "required": ["action", "target"], "additionalProperties": False}, browser_semantic_action))
+    registry.register(ToolSpec("browser_semantic_scroll", "Scroll the selected page/frame viewport by a bounded delta through the managed browser. Human-verification guards run before and after; reports whether the viewport actually moved.", Risk.MEDIUM,
+        {"type": "object", "properties": {"delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000}, "delta_x": {"type": "integer", "minimum": -5000, "maximum": 5000}, "frame_selector": frame}, "required": ["delta_y"], "additionalProperties": False}, browser_semantic_scroll))
     registry.register(ToolSpec("browser_wait_state", "Wait for an exact unique DOM target state with bounded 50ms polling and cancellation. Returns immediately when true; no fixed loading delay or action retries.", Risk.LOW,
         {"type": "object", "properties": {"target": target, "state": {"enum": ["visible", "hidden", "enabled", "text"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 1000}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))
