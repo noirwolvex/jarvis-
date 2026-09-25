@@ -164,6 +164,18 @@ class AutonomousTaskOrchestratorTests(unittest.TestCase):
                     ["DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
                 )
 
+    def test_task_verify_precondition_hint_requires_real_evidence_before_retry(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            orchestrator.begin("Open Discord")
+            orchestrator.set_plan([{"id": "open", "description": "Open Discord"}])
+            hint = orchestrator.recovery_hint(
+                "ERROR executing task_verify: ValueError: Verification requires successful execution or observation evidence; no non-task action has succeeded yet. Execute or observe the pending plan step before task_verify",
+                "task_verify",
+            )
+            self.assertIn("Do not call task_verify again yet", hint)
+            self.assertIn("pending mission step", hint)
+
     def test_recovery_history_is_persistent(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict("os.environ", {"JARVIS_WORKSPACE": tmp}, clear=False):
