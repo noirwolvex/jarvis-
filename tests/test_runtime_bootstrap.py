@@ -73,6 +73,98 @@ class RuntimeBootstrapTests(unittest.TestCase):
                     child.kill()
                 child.communicate(timeout=5)
 
+    def test_orphaned_npm_parent_retires_owned_runtime_and_releases_lock(self):
+        dashboard, daemon, log = Mock(pid=41), Mock(), Mock()
+        dashboard.wait.side_effect = subprocess.TimeoutExpired(["next"], 0.25)
+        with patch.object(runtime, "_launcher_parent_identity", return_value=(900, 1.0)), \
+             patch.object(runtime, "_launcher_parent_alive", return_value=False), \
+             patch.object(runtime, "bootstrap", return_value=(daemon, log, Path("session"), {}, {})), \
+             patch.object(runtime.subprocess, "Popen", return_value=dashboard), \
+             patch.object(runtime, "_wait_dashboard"), \
+             patch.object(runtime, "_open_paired_dashboard"), \
+             patch.object(runtime, "_stop_dashboard") as stop_dashboard, \
+             patch.object(runtime, "_stop_process") as stop_process, redirect_stdout(io.StringIO()):
+            self.assertEqual(runtime._run_dashboard(["node", "next", "dev"]), 130)
+        stop_dashboard.assert_called_once_with(dashboard)
+        stop_process.assert_called_once_with(daemon)
+        log.close.assert_called_once_with()
+
+    def test_virtual_key_qualification_pumps_target_event_loop_between_probes(self):
+        class FakeTk:
+            SEL_FIRST = "sel.first"
+            SEL_LAST = "sel.last"
+            INSERT = "insert"
+
+        class FakeEntry:
+            def __init__(self, value):
+                self.value = value
+                self.selection = None
+                self.insert = len(value)
+            def get(self):
+                return self.value
+            def selection_present(self):
+                return self.selection is not None
+            def index(self, marker):
+                if marker == FakeTk.SEL_FIRST:
+                    if self.selection is None:
+                        raise RuntimeError("no selection")
+                    return self.selection[0]
+                if marker == FakeTk.SEL_LAST:
+                    if self.selection is None:
+                        raise RuntimeError("no selection")
+                    return self.selection[1]
+                if marker == FakeTk.INSERT:
+                    return self.insert
+                raise AssertionError(marker)
+
+        class FakeRoot:
+            def __init__(self):
+                self.queue = []
+                self.updates = 0
+            def update_idletasks(self):
+                pass
+            def update(self):
+                self.updates += 1
+                queued, self.queue = self.queue, []
+                for action in queued:
+                    action()
+
+        token = "RUST-LIVE-65537-fixture"
+        entry, root = FakeEntry(token), FakeRoot()
+        def probe(_worker, _reader, payload):
+            kind = payload["kind"]
+            if kind == "hotkey":
+                root.queue.append(lambda: setattr(entry, "selection", (0, len(entry.value))))
+            elif kind == "press_key":
+                def home():
+                    entry.selection = None
+                    entry.insert = 0
+                root.queue.append(home)
+            elif kind == "type_text":
+                text = payload["text"]
+                def type_text():
+                    if entry.selection is not None:
+                        start, end = entry.selection
+                        entry.value = entry.value[:start] + text + entry.value[end:]
+                        entry.insert = start + len(text)
+                        entry.selection = None
+                    else:
+                        entry.value = entry.value[:entry.insert] + text + entry.value[entry.insert:]
+                        entry.insert += len(text)
+                root.queue.append(type_text)
+            else:
+                raise AssertionError(payload)
+            return {}
+
+        with patch.object(runtime, "_worker_probe", side_effect=probe), \
+             patch.object(runtime.uuid, "uuid4", return_value=SimpleNamespace(hex="12345678abcdef")):
+            replacement = runtime._qualify_virtual_key_delivery(
+                root, entry, FakeTk, Mock(), Mock(), 65537, token
+            )
+        self.assertEqual(replacement, "HOTKEY-65537-12345678")
+        self.assertEqual(entry.get(), "VK-HOTKEY-65537-12345678")
+        self.assertGreaterEqual(root.updates, 4)
+
     def test_dashboard_command_handles_spaces_without_batch_shell(self):
         with tempfile.TemporaryDirectory(prefix="Jarvis project with spaces ") as directory:
             root = Path(directory)
