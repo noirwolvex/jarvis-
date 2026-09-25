@@ -47,6 +47,14 @@ class UiaProviderQueryTests(unittest.TestCase):
         self.provider.FindAllBuildCache.assert_called_once_with(4, "union condition", self.automation.iuia.CreateCacheRequest.return_value)
         self.assertEqual(self.window.reads, 0)
 
+    def test_provider_cached_identity_avoids_redundant_live_identity_reads(self):
+        with patch.object(ui, "_process_id", side_effect=AssertionError("live PID read not needed")), \
+             patch.object(ui, "_node_identity", side_effect=AssertionError("live RuntimeId read not needed")):
+            rows = ui._descendants(self.window, control_types=("Edit", "Document"), visible_only=True)
+        self.assertEqual(rows, [self.editor, self.root])
+        self.assertEqual(getattr(self.editor, "_jarvis_provider_identity"), (42, ("uia", 42, 0)))
+        self.assertEqual(getattr(self.root, "_jarvis_provider_identity"), (42, ("uia", 42, 1)))
+
     def test_provider_error_does_not_retry_broad_enumeration(self):
         self.provider.FindAllBuildCache.side_effect = RuntimeError("provider disconnected")
         with self.assertRaisesRegex(RuntimeError, "provider disconnected"):

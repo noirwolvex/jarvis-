@@ -28,9 +28,22 @@ def _dm_route(value: str | None) -> str | None:
     return url.path
 
 
+_DISCOVERY_TYPES = ("List", "TreeItem", "Document", "Edit", "Hyperlink")
+_VERIFICATION_TYPES = ("Document", "Edit")
+
+
 def _snapshot(win: Any) -> list[Any]:
+    # One provider traversal resolves the DM scope, visible conversation links,
+    # current route and composer. This avoids a second scoped Hyperlink traversal.
     return ui._descendants(win, require_complete=True,
-                           control_types=("List", "TreeItem", "Document", "Edit"), visible_only=True)
+                           control_types=_DISCOVERY_TYPES, visible_only=True)
+
+
+def _verification_snapshot(win: Any) -> list[Any]:
+    # After a delivered navigation only route + composer can prove completion.
+    # Do not re-enumerate the sidebar while waiting for that postcondition.
+    return ui._descendants(win, require_complete=True,
+                           control_types=_VERIFICATION_TYPES, visible_only=True)
 
 
 def _dm_scope(controls: list[Any]):
@@ -39,10 +52,16 @@ def _dm_scope(controls: list[Any]):
                            "Direct Messages list", missing_ok=True)
 
 
-def _conversation_links(win: Any, scope: Any) -> list[tuple[Any, str]]:
-    bounds = ui._rect(win)
+def _conversation_links(win: Any, scope: Any, controls: list[Any] | None = None) -> list[tuple[Any, str]]:
+    bounds = ui._rect(scope)
+    if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+        raise InputNotDispatchedError("Discord Direct Messages scope geometry is unavailable")
     links = []
-    for control in ui._descendants(scope, require_complete=True, control_types=("Hyperlink",), visible_only=True):
+    source = controls if controls is not None else ui._descendants(
+        scope, require_complete=True, control_types=("Hyperlink",), visible_only=True)
+    for control in source:
+        if ui._control_type(control) != "Hyperlink":
+            continue
         route = _dm_route(ui._control_value(control))
         if not route or not discord._visible(control):
             continue
@@ -50,7 +69,7 @@ def _conversation_links(win: Any, scope: Any) -> list[tuple[Any, str]]:
         if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
             raise InputNotDispatchedError("Discord chat geometry is unavailable; no chat input delivered")
         x, y = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
-        if len(bounds) != 4 or not (bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]):
+        if not (bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]):
             continue
         links.append((control, route))
     links.sort(key=lambda row: (ui._rect(row[0])[1], ui._rect(row[0])[0]))
@@ -134,7 +153,7 @@ def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | No
             return _dm_scope(controls)
         scope = wait_until(list_ready, timeout=3, description="Discord Direct Messages list")
     guard()
-    links = _conversation_links(win, scope)
+    links = _conversation_links(win, scope, controls)
     if len(links) < position:
         raise RuntimeError(f"Discord exposes {len(links)} visible conversation links; cannot select chat {position}")
     control, route = links[position - 1]
@@ -149,7 +168,7 @@ def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | No
         def opened():
             guard()
             record_backend("windows_uia", phase="verify", detail="Exact Discord document route and matching composer")
-            return _opened(_snapshot(win), route, destination)
+            return _opened(_verification_snapshot(win), route, destination)
         try:
             wait_until(opened, timeout=3, description="exact Discord conversation route and composer")
         except TimeoutError as exc:
