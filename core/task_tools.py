@@ -108,7 +108,14 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                     if trace.success and not trace.name.startswith(("task_", "workflow_"))
                     and (index > current.last_mutation_index
                          or index == current.last_mutation_index and trace.result.startswith("VERIFIED:") and not trace.name.startswith("desktop_"))]
-        if not observed or not evidence.strip():
+        if not observed:
+            if current.last_mutation_index < 0:
+                raise ValueError(
+                    "Verification requires successful execution or observation evidence; "
+                    "no non-task action has succeeded yet. Execute or observe the pending plan step before task_verify"
+                )
+            raise ValueError("Verification requires successful observation after the action and nonempty evidence")
+        if not evidence.strip():
             raise ValueError("Verification requires successful observation after the action and nonempty evidence")
         ok = orchestrator.verify(claim, bool(verified), evidence)
         return json.dumps({"verified": ok, "claim": claim, "evidence": evidence[:12000]}, ensure_ascii=False)
