@@ -60,6 +60,7 @@ class DiscordNavigationTests(unittest.TestCase):
             (nav, "wait_until", {"side_effect": once}),
         ):
             self.stack.enter_context(patch.object(owner, name, **options))
+        self.descendants = nav.ui._descendants
         self.invoke = self.stack.enter_context(patch.object(nav.ui, "_invoke", side_effect=self.navigate))
 
     def navigate(self, control, hwnd=None):
@@ -76,12 +77,17 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertTrue(result["route_verified"] and result["composer_verified"])
         self.assertEqual(result["method"], "uia_invoke")
         self.invoke.assert_called_once_with(self.first, 42)
+        self.assertEqual(self.descendants.call_count, 2)
+        self.assertEqual(self.descendants.call_args_list[0].kwargs["control_types"], nav._DISCOVERY_TYPES)
+        self.assertEqual(self.descendants.call_args_list[1].kwargs["control_types"], nav._VERIFICATION_TYPES)
 
     def test_already_open_is_verified_without_repeating_input(self):
         self.navigate(self.first)
         result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
         self.assertTrue(result["already_open"])
         self.invoke.assert_not_called()
+        self.assertEqual(self.descendants.call_count, 1)
+        self.assertEqual(self.descendants.call_args.kwargs["control_types"], nav._DISCOVERY_TYPES)
 
     def test_server_view_opens_dm_list_then_exact_chat(self):
         self.window.children.remove(self.scope)
