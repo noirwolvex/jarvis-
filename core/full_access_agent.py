@@ -37,6 +37,11 @@ _DESKTOP_BROWSER_INPUT_TOOLS = {
     "desktop_mouse_up",
     "desktop_key_down",
     "desktop_key_up",
+    "interaction_click",
+    "interaction_focus",
+    "interaction_type",
+    "interaction_hotkey",
+    "interaction_scroll",
 }
 _DESKTOP_OBSERVATION_REQUIRED_TOOLS = {
     "desktop_click",
@@ -50,12 +55,17 @@ _FOCUSED_NATIVE_BURST_TOOLS = {
     "desktop_press",
     "desktop_hotkey",
     "desktop_scroll",
+    "interaction_type",
+    "interaction_hotkey",
+    "interaction_scroll",
 }
 _DESKTOP_SCENE_MUTATION_TOOLS = {
     "desktop_click",
     "desktop_click_button",
     "desktop_double_click",
     "desktop_drag",
+    "interaction_click",
+    "interaction_focus",
 }
 _DESKTOP_REFRESH_ERRORS = (
     "ERROR: Fresh screen_observe required",
@@ -94,7 +104,7 @@ _BROWSER_PROFILE_EXPLICIT = {
     "open_application",
     "open_url",
 }
-_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "discord_", "whatsapp_", "youtube_", "workflow_")
+_BROWSER_PROFILE_PREFIXES = ("browser_", "chrome_", "task_", "dialog_", "desktop_", "ui_", "interaction_", "discord_", "whatsapp_", "youtube_", "workflow_")
 
 
 def _chrome_tab_rows() -> list[dict]:
@@ -271,6 +281,8 @@ Full Access execution profile:
 - For browser, tab, Google, or web-search requests, do not launch Chrome through launch_installed_app or open_application. Use the guarded managed Chrome/CDP tools so JARVIS controls the exact selected tab.
 - If the user explicitly says "new tab" or "another tab", that is a structural requirement: use chrome_new_tab or google_search(new_tab=true) for that step. browser_navigate/open_url on the current tab does NOT satisfy a new-tab request.
 - Preserve earlier result tabs when the user asks for a later search in a new tab. Complete every clause in order before returning a final answer.
+- For unfamiliar apps or sites, prefer interaction_inspect then interaction_click/interaction_focus/interaction_type/interaction_hotkey/interaction_scroll. These universal tools auto-route managed Chrome to exact DOM/CDP and other foreground apps to Windows UIA/Rust. Do not manually choose a lower-level backend unless the universal semantic route cannot represent the target.
+- interaction_type never submits unless submit=true. For custom/canvas desktop editors with no usable UIA node, focused_fallback=true is allowed only after the intended control is already focused and Chrome is not the foreground surface; otherwise use screen_observe + a guarded click first.
 - For desktop applications, prefer semantic Windows UI Automation (inspect_window/dialog tools) when controls are labeled. Use screen_observe when the task genuinely depends on visual layout, canvas content, unlabeled controls, or coordinates that semantic inspection cannot resolve. A screen_observe result is supplied to you as an actual image on the next turn with virtual-desktop coordinate mapping.
 - Do not take repeated screenshots when the visible state has not materially changed. After a visual action, verify the resulting state with semantic inspection or a fresh visual observation when needed.
 - General desktop mouse/keyboard tools are also protected by the browser challenge guard whenever Chrome is the foreground window. Never use desktop input as an alternate path around a CAPTCHA or human-verification checkpoint.

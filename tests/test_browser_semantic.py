@@ -212,6 +212,21 @@ class BrowserSemanticFixtureTests(unittest.TestCase):
         self.assertTrue(result["verified"])
         self.assertEqual(self.page.locator("input").input_value(), "typed once")
 
+    def test_semantic_scroll_verifies_actual_viewport_motion(self):
+        self.page.set_viewport_size({"width": 800, "height": 600})
+        self.page.set_content('<div style="height:3000px">Tall page</div>')
+        result = self.run_op("semantic_scroll", delta_y=400, delta_x=0)
+        self.assertTrue(result["verified"])
+        self.assertGreater(result["after"]["y"], result["before"]["y"])
+        self.assertEqual(result["delta_y"], 400)
+
+    def test_append_preserves_existing_text_and_verifies_without_exposing_value(self):
+        self.page.set_content('<label>Draft<input value="private-prefix"></label>')
+        result = self.run_op("semantic_action", action="append", target={"role": "textbox", "name": "Draft"}, value=" + new")
+        self.assertTrue(result["verified"])
+        self.assertEqual(self.page.locator("input").input_value(), "private-prefix + new")
+        self.assertNotIn("private-prefix", str(result))
+
     def test_focus_change_invalidates_snapshot_node(self):
         self.page.set_content('<input aria-label="Draft"><button>Send</button>')
         first = self.run_op("semantic_snapshot")

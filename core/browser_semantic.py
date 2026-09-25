@@ -132,7 +132,7 @@ _VERSION_JS = r"""() => {
 
 _ACTION_READBACK_JS = r"""(el, {action, value}) => {
   if (!el.isConnected) return false;
-  if (action === 'fill' || action === 'select')
+  if (action === 'fill' || action === 'append' || action === 'select')
     return ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null)) === value;
   if (action === 'check' || action === 'uncheck') return el.checked === (action === 'check');
   if (action === 'focus') return el === el.getRootNode().activeElement;
@@ -295,13 +295,32 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
     selected = _frame(page, str(args.get("frame_selector", "")))
     if selected is not page:
         require_clear_page(selected)
+    if operation == "semantic_scroll":
+        dx = max(-5000, min(int(args.get("delta_x", 0)), 5000))
+        dy = max(-5000, min(int(args.get("delta_y", 0)), 5000))
+        if dx == 0 and dy == 0:
+            raise ValueError("Semantic scroll requires a non-zero delta")
+        check()
+        result = selected.evaluate("""({dx,dy}) => {
+          const before = {x:scrollX,y:scrollY}; scrollBy(dx,dy);
+          const after = {x:scrollX,y:scrollY};
+          return {before,after,max_x:Math.max(0,document.documentElement.scrollWidth-innerWidth),
+            max_y:Math.max(0,document.documentElement.scrollHeight-innerHeight)};
+        }""", {"dx": dx, "dy": dy})
+        check()
+        require_clear_page(page)
+        if selected is not page:
+            require_clear_page(selected)
+        changed = result.get("before") != result.get("after")
+        return {**result, "delta_x": dx, "delta_y": dy, "executed": True,
+                "verified": changed, "at_boundary_or_not_scrollable": not changed}
     if operation == "semantic_snapshot":
         result = selected.evaluate(_SNAPSHOT_JS, {"force": bool(args.get("force", False)), "max_nodes": max(1, min(int(args.get("max_nodes", 160)), 250))})
         result["frame_selector"] = args.get("frame_selector", "")
         return result
     if operation == "semantic_action":
         action = args["action"]
-        if action not in {"click", "fill", "press", "select", "check", "uncheck", "focus"}:
+        if action not in {"click", "fill", "append", "press", "select", "check", "uncheck", "focus"}:
             raise ValueError("Unsupported semantic action")
         target = _target(selected, args["target"], str(args.get("expected_version", "")))
         try:
@@ -319,8 +338,18 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
                 raise ValueError("Semantic action value must be at most 4096 characters without NUL")
             check()
             # A single bounded action attempt. Timeouts may have side effects: never replay here.
+            readback_value = value
             if action == "fill":
                 target.fill(value, timeout=1500)
+            elif action == "append":
+                # Read the live field value only inside the trusted local action. Never
+                # expose it in the semantic snapshot or result. Re-fill exact old+new
+                # content so append is deterministic regardless of caret position.
+                before = target.evaluate("""el => ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null))""")
+                if not isinstance(before, str):
+                    raise RuntimeError("Target does not expose an appendable text value")
+                readback_value = before + value
+                target.fill(readback_value, timeout=1500)
             elif action == "select":
                 target.select_option(value=value, timeout=1500)
             elif action in {"check", "uncheck"}:
@@ -332,13 +361,13 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
             else:
                 target.click(timeout=1500)
             check()
-            verified = action in {"fill", "select", "check", "uncheck", "focus"} and bool(
-                target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": value}))
+            verified = action in {"fill", "append", "select", "check", "uncheck", "focus"} and bool(
+                target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": readback_value}))
             require_clear_page(page)
             if selected is not page:
                 require_clear_page(selected)
             check()
-            if action in {"fill", "select", "check", "uncheck", "focus"} and not verified:
+            if action in {"fill", "append", "select", "check", "uncheck", "focus"} and not verified:
                 raise RuntimeError("Semantic action readback did not match; observe before any retry")
             return {"action": action, "executed": True, "verified": verified,
                     "requires_result_verification": not verified, "url": page.url}
@@ -405,6 +434,12 @@ def browser_semantic_action(action: str, target: dict[str, Any], value: str = ""
     return ("VERIFIED: " if result.get("verified") else "ACTION_EXECUTED: ") + json.dumps(result, ensure_ascii=False)
 
 
+def browser_semantic_scroll(delta_y: int, delta_x: int = 0, frame_selector: str = "") -> str:
+    from .chrome_cdp import chrome_page_operation
+    result = chrome_page_operation("semantic_scroll", delta_y=int(delta_y), delta_x=int(delta_x), frame_selector=frame_selector)
+    return ("VERIFIED: " if result.get("verified") else "ACTION_EXECUTED: ") + json.dumps(result, ensure_ascii=False)
+
+
 def browser_wait_state(target: dict[str, Any], state: str = "visible", timeout_ms: int = 5000, text: str = "", frame_selector: str = "") -> str:
     from .chrome_cdp import chrome_page_operation
     result = chrome_page_operation("wait_state", target=target, state=state, timeout_ms=timeout_ms, text=text, frame_selector=frame_selector)
@@ -421,7 +456,9 @@ def register_browser_semantic_tools(registry: Any) -> None:
     frame = {"type": "string", "maxLength": 500}
     registry.register(ToolSpec("browser_semantic_snapshot", "Observe bounded visible DOM controls, parent hierarchy, focus, dialogs, page and tabs with a change version. Prefer these exact controls over coordinates; inspect an iframe explicitly when needed. Values are omitted.", Risk.LOW,
         {"type": "object", "properties": {"force": {"type": "boolean"}, "max_nodes": {"type": "integer", "minimum": 1, "maximum": 250}, "frame_selector": frame}, "additionalProperties": False}, browser_semantic_snapshot))
-    registry.register(ToolSpec("browser_semantic_action", "Execute one exact semantic action, refusing ambiguous or stale targets. Use snapshot node_id plus expected_version, or exact role/name. Fill/select/check/focus verify locally; click/press require important result verification. Never blindly repeat an uncertain click.", Risk.MEDIUM,
-        {"type": "object", "properties": {"action": {"enum": ["click", "fill", "press", "select", "check", "uncheck", "focus"]}, "target": target, "value": {"type": "string", "maxLength": 4096}, "expected_version": {"type": "string", "maxLength": 100}, "frame_selector": frame}, "required": ["action", "target"], "additionalProperties": False}, browser_semantic_action))
+    registry.register(ToolSpec("browser_semantic_action", "Execute one exact semantic action, refusing ambiguous or stale targets. Use snapshot node_id plus expected_version, or exact role/name. Fill/append/select/check/focus verify locally; click/press require important result verification. Append preserves the existing field value without exposing it. Never blindly repeat an uncertain click.", Risk.MEDIUM,
+        {"type": "object", "properties": {"action": {"enum": ["click", "fill", "append", "press", "select", "check", "uncheck", "focus"]}, "target": target, "value": {"type": "string", "maxLength": 4096}, "expected_version": {"type": "string", "maxLength": 100}, "frame_selector": frame}, "required": ["action", "target"], "additionalProperties": False}, browser_semantic_action))
+    registry.register(ToolSpec("browser_semantic_scroll", "Scroll the selected page/frame viewport by a bounded delta through the managed browser. Human-verification guards run before and after; reports whether the viewport actually moved.", Risk.MEDIUM,
+        {"type": "object", "properties": {"delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000}, "delta_x": {"type": "integer", "minimum": -5000, "maximum": 5000}, "frame_selector": frame}, "required": ["delta_y"], "additionalProperties": False}, browser_semantic_scroll))
     registry.register(ToolSpec("browser_wait_state", "Wait for an exact unique DOM target state with bounded 50ms polling and cancellation. Returns immediately when true; no fixed loading delay or action retries.", Risk.LOW,
         {"type": "object", "properties": {"target": target, "state": {"enum": ["visible", "hidden", "enabled", "text"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 1000}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))
