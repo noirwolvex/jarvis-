@@ -66,6 +66,15 @@ _MIXED_APP_CHAT = re.compile(
     r"\s+(?:chat|conversation)$",
     re.IGNORECASE,
 )
+_DISCORD_ORDINAL_WRITE_SEND = re.compile(
+    r"^\s*open\s+(?:the\s+)?discord(?:\s+(?:app|application))?\s+(?:and\s+then|and|then)\s+"
+    r"(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
+    r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
+    r"\s+(?:chat|conversation)\s+(?:(?:and\s+then|then|and|after(?:\s+that)?)\s+)"
+    r"(?:write|type)(?:\s+text)?\s+(?P<text>.+?)\s+"
+    r"(?:(?:and\s+then|then|and)\s+)?send\s+(?:it|that|the\s+message)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _MIXED_CHAT_ONLY = re.compile(
     r"^(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
     r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
@@ -369,6 +378,46 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
         return None
     if "\0" in text:
         return None
+
+    discord_send = _DISCORD_ORDINAL_WRITE_SEND.fullmatch(text)
+    if discord_send:
+        try:
+            position = _mixed_ordinal(discord_send.group("ordinal"))
+        except ValueError:
+            return None
+        message = discord_send.group("text").strip()
+        quoted = len(message) >= 2 and message[0] == message[-1] and message[0] in {'"', "'"}
+        if quoted:
+            message = message[1:-1]
+        if (
+            not message
+            or len(message) > 4000
+            or "\0" in message
+            or _EXTRA_ACTION.search(message)
+            or message[:1] in {'"', "'"}
+            or message[-1:] in {'"', "'"}
+        ):
+            return None
+        return [
+            FastStep(
+                "fast-1",
+                "Open and verify Discord",
+                "launch_installed_app",
+                {"query": "Discord", "timeout_seconds": 12},
+            ),
+            FastStep(
+                "fast-2",
+                f"Select and verify Discord chat position {position}",
+                "discord_select_chat",
+                {"position": position},
+            ),
+            FastStep(
+                "fast-3",
+                "Write and send the requested Discord message once, then verify delivery",
+                "discord_send_message",
+                {"text": message},
+            ),
+        ]
 
     mixed = _compile_explicit_sequence(text)
     if mixed:
