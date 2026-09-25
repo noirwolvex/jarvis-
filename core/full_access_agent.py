@@ -203,13 +203,13 @@ class FullAccessJarvisAgent(JarvisAgent):
                 error = typing_completion_error(self.orchestrator.current, str(arguments.get("step_id", "")))
                 if error:
                     return error
-            if name == "ui_type" and arguments.get("submit") is True:
+            if name in {"ui_type", "interaction_type"} and arguments.get("submit") is True:
                 # The fast compiler is a deterministic source of the requested
                 # write-only intent even when recovery later invokes the model.
                 from .whatsapp_fast_mission import compile_chat_typing_mission
                 current = self.orchestrator.current
                 program = compile_chat_typing_mission(current.goal) if current else None
-                if program and program[-1].tool == "ui_type_native":
+                if program and program[-1].tool in {"ui_type_native", "interaction_type"}:
                     return "PERMISSION_DENIED: This mission requests typing an unsent draft. Use submit=false; sending was not requested."
             raw_input = name.startswith("desktop_") and name != "desktop_cursor"
             mutation = self._is_mutation(name)
