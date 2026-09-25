@@ -1,3 +1,4 @@
+import { assertControlSession } from "@/lib/control-session";
 import { assertLocalRequest, readControlObject } from "@/lib/control-service";
 import {
   assertHybridMutation,
@@ -23,6 +24,7 @@ export async function GET(request: Request) {
 export async function POST(request: Request) {
   try {
     assertLocalRequest(request);
+    assertControlSession(request);
     assertHybridMutation(request);
     if (!hybridModeEnabled()) throw new Error("Full Access is available only in local hybrid mode");
     if (request.headers.get("content-type")?.split(";")[0]?.trim() !== "application/json") throw new Error("JSON content type required");
