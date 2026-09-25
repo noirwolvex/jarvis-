@@ -20,6 +20,7 @@ from .ui_state import wait_until
 _DISCORD_PROCESSES = {"discord.exe", "discordcanary.exe", "discordptb.exe"}
 _DESTINATION_TYPES = {"TreeItem", "ListItem", "TabItem", "Hyperlink"}
 _SERVER_TYPES = {"TreeItem", "ListItem", "TabItem", "Button"}
+_CONTEXT_TYPES = tuple(sorted(_DESTINATION_TYPES | _SERVER_TYPES | {"Edit", "Document"}))
 _QUICK_SEARCH_NAMES = {"quick switcher", "where would you like to go?", "find or start a conversation"}
 
 
@@ -68,10 +69,16 @@ def _selected(control: Any) -> bool:
             return False
 
 
-def _controls(win: Any) -> list[Any]:
-    controls = _descendants(win)
-    if len(controls) > 3000:
-        raise RuntimeError("Discord accessibility tree exceeds the safe search bound; inspect a narrower view")
+def _controls(win: Any, control_types: tuple[str, ...] = ()) -> list[Any]:
+    # Normal Discord state only needs a small union of semantic control types.
+    # Push that filter into UIA so Chromium does not materialize every decorative
+    # Text/Group node. Quick-Switcher child-label reads can still request a broad tree.
+    controls = _descendants(
+        win,
+        require_complete=bool(control_types),
+        control_types=control_types,
+        visible_only=bool(control_types),
+    )
     return [control for control in controls if _visible(control)]
 
 
@@ -172,9 +179,10 @@ class _Context:
     server_id: tuple = ()
 
 
-def _context(win: Any, identity: tuple[int, int, float], destination: str = "", server: str = "") -> _Context | None:
+def _context(win: Any, identity: tuple[int, int, float], destination: str = "", server: str = "",
+             *, controls: list[Any] | None = None) -> _Context | None:
     _window_guard(win, identity)
-    controls = _controls(win)
+    controls = _controls(win, _CONTEXT_TYPES) if controls is None else controls
     composer = _composer(controls, destination)
     if composer is None:
         return None
@@ -262,21 +270,23 @@ def _navigate(win: Any, identity: tuple[int, int, float], destination: str, serv
             policy_guard()
         _window_guard(win, identity)
     guard()
+    controls = _controls(win, _CONTEXT_TYPES)
     if server:
-        server_item = _unique(_named(_controls(win), server, _SERVER_TYPES), "server")
+        server_item = _unique(_named(controls, server, _SERVER_TYPES), "server")
         if not _selected(server_item):
             guard()
             _invoke(server_item)
             def selected_server():
                 guard()
-                current = _unique(_named(_controls(win), server, _SERVER_TYPES), "server", missing_ok=True)
+                current = _unique(_named(_controls(win, _CONTEXT_TYPES), server, _SERVER_TYPES), "server", missing_ok=True)
                 return current is not None and _selected(current)
             wait_until(selected_server, timeout=3,
                        description="Discord server selection")
-    ready = _context(win, identity, destination, server)
+            controls = _controls(win, _CONTEXT_TYPES)
+    ready = _context(win, identity, destination, server, controls=controls)
     if ready:
         return ready
-    target = _unique(_named(_controls(win), destination, _DESTINATION_TYPES, channel=True),
+    target = _unique(_named(controls, destination, _DESTINATION_TYPES, channel=True),
                      "destination", missing_ok=True)
     if target is not None:
         guard()
@@ -334,7 +344,7 @@ def _send(win: Any, context: _Context, message: str,
           policy_guard: Callable[[], None] | None = None) -> dict[str, Any]:
     guard = lambda: _context_guard(win, context, policy_guard)
     guard()
-    composer = _composer(_controls(win), context.destination)
+    composer = _composer(_controls(win, _CONTEXT_TYPES), context.destination)
     if composer is None or _control_value(composer) != "":
         raise RuntimeError("Discord composer is unreadable or contains a draft; inspect it before sending")
     # The guard runs before focus, writing, Enter, and delivery probes. Never retry a send.
