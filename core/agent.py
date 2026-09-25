@@ -200,6 +200,8 @@ class JarvisAgent:
             register_dev_tools(self.tools)
             from .advanced_tools import register_advanced_tools
             register_advanced_tools(self.tools)
+            from .wincom_tools import register_wincom_tools
+            register_wincom_tools(self.tools)
             register_skill_tools(self.tools)
             register_monitor_tools(self.tools)
             register_browser_guard_tools(self.tools)
