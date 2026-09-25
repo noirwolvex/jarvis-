@@ -106,9 +106,9 @@ class FastMissionCompilerTests(unittest.TestCase):
 
     def test_discord_ordered_draft_preserves_unicode_and_spacing(self):
         steps = compile_fast_mission('open Discord and select the 2 chat after write "hello  \u0639\u0627\u0644\u0645"')
-        self.assertEqual([s.tool for s in steps], ["launch_installed_app", "discord_select_chat", "ui_type_native"])
+        self.assertEqual([s.tool for s in steps], ["launch_installed_app", "discord_select_chat", "interaction_type"])
         self.assertEqual(steps[1].arguments, {"position": 2})
-        self.assertEqual(steps[-1].arguments, {"text": "hello  \u0639\u0627\u0644\u0645", "title": "Discord"})
+        self.assertEqual(steps[-1].arguments, {"text": "hello  \u0639\u0627\u0644\u0645", "title": "Discord", "surface": "desktop"})
 
     def test_discord_unknown_or_out_of_range_work_is_not_dropped(self):
         for tail in ("and send hi", "and delete it", "after write HI then send it"):
