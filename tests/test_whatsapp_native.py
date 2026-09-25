@@ -200,6 +200,23 @@ class WhatsAppNativeExecutionTests(unittest.TestCase):
                          [whatsapp._FAST_CHAT_TYPES, whatsapp._FAST_CHAT_TYPES])
         self.client.click.assert_called_once()
 
+    def test_modern_webview_discovery_uses_targeted_query_before_full_tree(self):
+        self.client.click.side_effect = lambda x, y, status, *, before_dispatch: (
+            before_dispatch(),
+            self.row.is_selected.return_value is not True and self.row.is_selected.return_value,
+            self.row.is_selected.configure_mock(return_value=True),
+            {"executed": True, "simulation": False},
+        )[-1]
+        with patch.object(self.ui, "_descendants", return_value=[self.row, self.composer]) as descendants, \
+             patch.object(whatsapp, "_chat_candidates", side_effect=[[], [self.row]]) as candidates:
+            result = whatsapp.whatsapp_select_chat_native(1)
+        self.assertTrue(result.startswith("VERIFIED:"))
+        self.assertEqual(descendants.call_count, 2)
+        self.assertEqual(descendants.call_args_list[0].kwargs["control_types"], whatsapp._FAST_CHAT_TYPES)
+        self.assertEqual(descendants.call_args_list[1].kwargs["control_types"], whatsapp._WEBVIEW_CHAT_TYPES)
+        self.assertTrue(all(call.kwargs.get("control_types") for call in descendants.call_args_list))
+        self.assertEqual(candidates.call_count, 2)
+
     def test_chat_row_moving_during_preflight_or_capture_never_receives_input(self):
         from core.desktop_input import InputDeliveryError
         for phase in ("preflight", "capture"):
