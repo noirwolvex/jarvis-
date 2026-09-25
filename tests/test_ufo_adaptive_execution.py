@@ -72,6 +72,11 @@ class DynamicDagRewriteTests(unittest.TestCase):
             orchestrator.update_step("recovery-select-target-2", "completed", "Alternate target selected")
             self.assertTrue(orchestrator.step_is_resolved(original))
             self.assertEqual([step.id for step in orchestrator.ready_steps()], ["type-text"])
+            recovered_node = next(node for node in orchestrator.live_task_graph() if node["id"] == "select-target")
+            self.assertEqual(recovered_node["status"], "COMPLETED")
+            self.assertTrue(recovered_node["recovered"])
+            self.assertEqual(recovered_node["original_status"], "RECOVERING")
+            self.assertEqual(recovered_node["verification_result"], "VERIFIED")
 
             summary = orchestrator.summary()
             self.assertEqual(summary["metrics"]["graph_rewrites"], 1)
