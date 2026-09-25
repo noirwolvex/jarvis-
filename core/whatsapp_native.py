@@ -161,6 +161,17 @@ def _chat_candidates(win: Any, position: int, *, controls: list[Any] | None = No
 
     preferred: list[Any] = []
     fallback: list[Any] = []
+    # Geometry is read-only discovery evidence here. Cache each rectangle for this
+    # one provider snapshot so duplicate WebView labels/ancestors do not trigger
+    # repeated cross-process COM reads during sorting and deduplication. A fresh
+    # binding is still read later immediately before any input is dispatched.
+    rect_cache: dict[int, list[int]] = {}
+    def cached_rect(control: Any) -> list[int]:
+        key = id(control)
+        if key not in rect_cache:
+            rect_cache[key] = _rect(control)
+        return rect_cache[key]
+
     for control in controls if controls is not None else _descendants(win):
         try:
             if not control.is_visible() or not control.is_enabled():
@@ -177,7 +188,7 @@ def _chat_candidates(win: Any, position: int, *, controls: list[Any] | None = No
             source_name=source_name,
             control_name=_control_name,
             control_type=_control_type,
-            rect_of=_rect,
+            rect_of=cached_rect,
             left=left,
             top=top,
             right=right,
@@ -197,15 +208,18 @@ def _chat_candidates(win: Any, position: int, *, controls: list[Any] | None = No
             # visible UIA descendant and is clicked through the guarded Rust input daemon.
             fallback.append(row)
 
-    sorter = lambda control: (_rect(control)[1], _rect(control)[0], -(_rect(control)[2] - _rect(control)[0]))
-    preferred = _dedupe_rows(sorted(preferred, key=sorter), _rect)
-    fallback = _dedupe_rows(sorted(fallback, key=sorter), _rect)
+    def sorter(control: Any) -> tuple[int, int, int]:
+        rect = cached_rect(control)
+        return rect[1], rect[0], -(rect[2] - rect[0])
+
+    preferred = _dedupe_rows(sorted(preferred, key=sorter), cached_rect)
+    fallback = _dedupe_rows(sorted(fallback, key=sorter), cached_rect)
 
     if len(preferred) >= position:
         return preferred
 
     combined = sorted([*preferred, *fallback], key=sorter)
-    return _dedupe_rows(combined, _rect)
+    return _dedupe_rows(combined, cached_rect)
 
 
 def _right_pane_signature(win: Any, *, controls: list[Any] | None = None,
