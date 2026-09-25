@@ -7,6 +7,7 @@ import { emergencyStopHybrid, resetHybridStop, hybridSnapshot, setHybridAccessMo
 import { parseControlBody, readControlObject } from "../src/lib/control-service.ts";
 import { FULL_ACCESS_WORKER_REVISION, validateMissionResult, validateTaskGraph, runFullAccessMission } from "../src/lib/full-access-bridge.ts";
 import { POST as accessPost } from "../src/app/api/full-access/route.ts";
+import { CONTROL_SESSION_COOKIE, issueControlSession } from "../src/lib/control-session.ts";
 
 test("emergency stop revokes access, cancels active worker and stays latched", { skip: process.platform !== "win32" }, async () => {
   const state = globalThis as any;
@@ -248,14 +249,18 @@ test("live execution graph updates before completion and rejects stale updates a
   }
 });
 
-test("access endpoint requires separate explicit confirmation for terminal authority", async () => {
+test("access endpoint requires an authenticated session and separate terminal confirmation", async () => {
   const oldMode = process.env.JARVIS_CONTROL_MODE;
+  const oldToken = process.env.JARVIS_CONTROL_PAIRING_TOKEN;
   process.env.JARVIS_CONTROL_MODE = "hybrid";
-  const request = (body: unknown, origin = "http://127.0.0.1:3000") => new Request("http://127.0.0.1:3000/api/full-access", {
-    method: "POST", headers: { host: "127.0.0.1:3000", origin, "Content-Type": "application/json", "X-Jarvis-Control": "hybrid" }, body: JSON.stringify(body),
+  process.env.JARVIS_CONTROL_PAIRING_TOKEN = "full-access-pairing-0123456789-abcdefghijklmnopqrstuvwxyz";
+  const cookie = `${CONTROL_SESSION_COOKIE}=${issueControlSession()}`;
+  const request = (body: unknown, origin = "http://127.0.0.1:3000", authenticated = true) => new Request("http://127.0.0.1:3000/api/full-access", {
+    method: "POST", headers: { host: "127.0.0.1:3000", origin, "Content-Type": "application/json", "X-Jarvis-Control": "hybrid", ...(authenticated ? { cookie } : {}) }, body: JSON.stringify(body),
   });
   try {
     resetHybridStop();
+    assert.equal((await accessPost(request({ mode: "full", confirmation: "ENABLE_FULL_ACCESS" }, undefined, false))).status, 400);
     assert.equal((await accessPost(request({ mode: "full" }))).status, 400);
     assert.equal((await accessPost(request({ mode: "full", allowShell: true, confirmation: "ENABLE_FULL_ACCESS" }))).status, 400);
     assert.equal((await accessPost(request({ mode: "full", confirmation: "ENABLE_FULL_ACCESS" }, "https://attacker.invalid"))).status, 400);
@@ -265,5 +270,7 @@ test("access endpoint requires separate explicit confirmation for terminal autho
     setHybridAccessMode("standard");
     if (oldMode === undefined) delete process.env.JARVIS_CONTROL_MODE;
     else process.env.JARVIS_CONTROL_MODE = oldMode;
+    if (oldToken === undefined) delete process.env.JARVIS_CONTROL_PAIRING_TOKEN;
+    else process.env.JARVIS_CONTROL_PAIRING_TOKEN = oldToken;
   }
 });
