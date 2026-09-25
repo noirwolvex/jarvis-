@@ -183,6 +183,8 @@ def interaction_type(
         _require_permission(registry, "browser_semantic_action")
         from .browser_semantic import browser_semantic_action
         browser = _browser_target(browser_target, target, control_type or "textbox")
+        if submit and browser.get("node_id"):
+            raise ValueError("Browser submit cannot reuse a node_id after typing invalidates its snapshot; use an exact role/name or selector target")
         action = "fill" if replace else "append"
         typed = browser_semantic_action(
             action,
