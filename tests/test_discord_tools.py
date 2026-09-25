@@ -20,8 +20,10 @@ class Control:
         self.value = value
         self.handle = 0
 
-    def descendants(self):
-        return [child for entry in self.children for child in (entry, *entry.descendants())]
+    def descendants(self, **kwargs):
+        rows = [child for entry in self.children for child in (entry, *entry.descendants())]
+        kind = kwargs.get("control_type")
+        return [row for row in rows if not kind or row.element_info.control_type == kind]
 
     def is_visible(self):
         return True
@@ -72,6 +74,25 @@ class DiscordToolsTests(unittest.TestCase):
         self.assertEqual(set(schema["required"]), {"destination", "text"})
         self.assertFalse(schema["additionalProperties"])
         self.assertIn("server", schema["properties"])
+
+    def test_context_pushes_relevant_types_into_one_uia_query(self):
+        win = Window(Control("general", selected=True), Control("Message #general", "Edit"),
+                     Control("decorative noise", "Text"))
+        with desktop_fixture(win), patch.object(discord, "_descendants", wraps=discord._descendants) as descendants:
+            context = discord._context(win, (42, 100, 1.0), "general")
+        self.assertEqual(context.destination, "general")
+        descendants.assert_called_once()
+        self.assertEqual(descendants.call_args.kwargs["control_types"], discord._CONTEXT_TYPES)
+        self.assertTrue(descendants.call_args.kwargs["visible_only"])
+        self.assertTrue(descendants.call_args.kwargs["require_complete"])
+
+    def test_already_selected_navigation_reuses_one_context_snapshot(self):
+        win = Window(Control("general", selected=True), Control("Message #general", "Edit"))
+        with desktop_fixture(win), patch.object(discord, "_controls", wraps=discord._controls) as controls:
+            result = discord.discord_go_to("general")
+        self.assertTrue(result.startswith("VERIFIED:"))
+        self.assertEqual(controls.call_count, 1)
+        self.assertEqual(controls.call_args.args[1], discord._CONTEXT_TYPES)
 
     def test_selected_channel_and_matching_composer_are_both_required(self):
         selected = Control("general", selected=False)

@@ -94,6 +94,24 @@ class WhatsAppNativeRowDiscoveryTests(unittest.TestCase):
 
         self.assertEqual(candidates, [first_row, second_row])
 
+    def test_chat_discovery_reads_each_rectangle_once_per_snapshot(self) -> None:
+        row = _Control("", "Custom", (70, 130, 545, 200))
+        title = _Control("Alice", "Text", (118, 145, 260, 168), parent=row)
+        preview = _Control("hello", "Text", (118, 171, 340, 190), parent=row)
+        win = _Window([title, preview, row])
+        reads: dict[int, int] = {}
+        def counted_rect(control):
+            reads[id(control)] = reads.get(id(control), 0) + 1
+            return list(control.rect)
+        with patch("core.semantic_ui_tools._descendants", return_value=win.controls), \
+             patch("core.semantic_ui_tools._control_name", side_effect=_name), \
+             patch("core.semantic_ui_tools._control_type", side_effect=_type), \
+             patch("core.semantic_ui_tools._rect", side_effect=counted_rect):
+            candidates = whatsapp._chat_candidates(win, 1)
+        self.assertEqual(candidates, [row])
+        self.assertTrue(reads)
+        self.assertLessEqual(max(reads.values()), 1)
+
     def test_duplicate_text_children_do_not_create_duplicate_chat_positions(self) -> None:
         row = _Control("", "Custom", (70, 130, 545, 200))
         title = _Control("Alice", "Text", (118, 145, 260, 168), parent=row)
