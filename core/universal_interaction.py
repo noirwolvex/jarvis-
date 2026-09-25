@@ -73,6 +73,8 @@ def _desktop_target(target: str, selector: dict[str, Any] | None) -> None:
 
 
 def interaction_inspect(
+    *,
+    registry: ToolRegistry,
     surface: str = "auto",
     title: str = "",
     query: str = "",
@@ -82,6 +84,7 @@ def interaction_inspect(
 ) -> str:
     route = _surface(surface)
     if route == "browser":
+        _require_permission(registry, "browser_semantic_snapshot")
         from .browser_semantic import browser_semantic_snapshot
         raw = browser_semantic_snapshot(
             force=bool(force_refresh),
@@ -90,6 +93,7 @@ def interaction_inspect(
         )
         return json.dumps({"surface": "browser", "snapshot": json.loads(raw)}, ensure_ascii=False)
 
+    _require_permission(registry, "ui_inspect")
     from .semantic_ui_tools import ui_inspect
     raw = ui_inspect(
         title=title,
@@ -327,7 +331,7 @@ def interaction_hotkey(
 def register_universal_interaction_tools(registry: ToolRegistry) -> None:
     common = {
         "surface": {"enum": ["auto", "browser", "desktop"]},
-        "target": {"type": "string", "maxLength": 500},
+        "target": {"type": "string", "minLength": 1, "maxLength": 500},
         "title": {"type": "string", "maxLength": 500},
         "control_type": {"type": "string", "maxLength": 80},
         "selector": SELECTOR_SCHEMA,
@@ -344,20 +348,20 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
             "max_controls": {"type": "integer", "minimum": 1, "maximum": 250},
             "frame_selector": common["frame_selector"], "force_refresh": {"type": "boolean"},
         }, "additionalProperties": False},
-        interaction_inspect,
+        lambda **kwargs: interaction_inspect(registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(
         "interaction_click",
         "Universal exact semantic click/activation. Auto-routes managed Chrome through DOM/CDP and desktop apps through Windows UIA. For unlabeled/canvas targets, use screen_observe + guarded desktop coordinates instead.",
         Risk.MEDIUM,
-        {"type": "object", "properties": common, "additionalProperties": False},
+        {"type": "object", "properties": common, "anyOf": [{"required": ["target"]}, {"required": ["selector"]}, {"required": ["browser_target"]}], "additionalProperties": False},
         lambda **kwargs: interaction_click(registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(
         "interaction_focus",
         "Universal exact semantic focus. Uses DOM focus for managed sites or Windows UIA focus for desktop controls.",
         Risk.MEDIUM,
-        {"type": "object", "properties": common, "additionalProperties": False},
+        {"type": "object", "properties": common, "anyOf": [{"required": ["target"]}, {"required": ["selector"]}, {"required": ["browser_target"]}], "additionalProperties": False},
         lambda **kwargs: interaction_focus(registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(
