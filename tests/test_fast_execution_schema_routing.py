@@ -7,6 +7,7 @@ from core.browser_fast_tools import register_browser_fast_tools
 from core.fast_execution_agent import FastExecutionFullAccessAgent
 from core.semantic_ui_tools import register_semantic_ui_tools
 from core.tools import ToolRegistry
+from core.universal_interaction import register_universal_interaction_tools
 from core.youtube_fast_tools import register_youtube_fast_tools
 from core.whatsapp_native import register_whatsapp_native_tools
 
@@ -20,6 +21,7 @@ class FastExecutionSchemaRoutingTests(unittest.TestCase):
         register_discord_tools(agent.tools)
         register_youtube_fast_tools(agent.tools)
         register_whatsapp_native_tools(agent.tools)
+        register_universal_interaction_tools(agent.tools)
         return agent
 
     def test_desktop_media_mission_gets_compact_semantic_profile(self) -> None:
@@ -31,6 +33,7 @@ class FastExecutionSchemaRoutingTests(unittest.TestCase):
         self.assertIn("discord_navigate_and_send", names)
         self.assertIn("youtube_search_open", names)
         self.assertIn("ui_batch", names)
+        self.assertIn("interaction_type", names)
         self.assertNotIn("run_powershell", names)
         self.assertNotIn("write_file", names)
 
