@@ -554,6 +554,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         graph: list[dict[str, Any]] = []
         for item in self.current.plan:
             if isinstance(item, ExecutionPlanStep):
+                recovered = item.status != "completed" and self.step_is_resolved(item)
                 graph.append({
                     "id": item.id,
                     "action": item.action or item.description,
@@ -565,11 +566,13 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                     "resolution_backend": item.resolution_backend,
                     "expected_result": item.expected_result,
                     "verification_method": item.verification_method,
-                    "verification_result": item.verification_result,
+                    "verification_result": "VERIFIED" if recovered else item.verification_result,
                     "fallback_strategy": list(item.fallback_strategy),
                     "retry_policy": dict(item.retry_policy),
-                    "status": item.phase,
+                    "status": "COMPLETED" if recovered else item.phase,
                     "result": item.result,
+                    "recovered": recovered,
+                    "original_status": item.phase if recovered else "",
                 })
             else:
                 graph.append({
