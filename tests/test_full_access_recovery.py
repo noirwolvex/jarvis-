@@ -169,7 +169,17 @@ class DesktopRecoveryTests(unittest.TestCase):
         denied = self.agent._execute_tool("ui_type", {"text": "H", "title": "Discord", "submit": True}, approved=True)
         self.assertTrue(denied.startswith("PERMISSION_DENIED:"))
         self.type_text.assert_not_called()
-        o.record_tool("ui_type_native", {"text": "H", "title": "Discord"}, "VERIFIED: exact text readback", 0, 1, mutation=True)
+        universal = Mock(return_value="VERIFIED: exact text readback")
+        self.agent.tools.register(ToolSpec("interaction_type", "type", Risk.MEDIUM, {"type": "object"}, universal))
+        denied_universal = self.agent._execute_tool(
+            "interaction_type",
+            {"text": "H", "title": "Discord", "surface": "desktop", "submit": True},
+            approved=True,
+        )
+        self.assertTrue(denied_universal.startswith("PERMISSION_DENIED:"))
+        universal.assert_not_called()
+        o.record_tool("interaction_type", {"text": "H", "title": "Discord", "surface": "desktop"},
+                      "VERIFIED: exact text readback", 0, 1, mutation=True)
         self.assertIsNone(typing_completion_error(task, "fast-3"))
 
     def test_native_stop_reports_required_restart_without_continuing_tool_batch(self):
@@ -221,6 +231,7 @@ class RecoveryGuidanceTests(unittest.TestCase):
                 ("ERROR: Fresh stable screen_observe required: the UI is still changing", "Call screen_observe"),
                 ("ERROR: Observe the last action and call task_verify", "verified=false"),
                 ("ERROR: Verification requires successful observation after the action and nonempty evidence", "do not repeat task_verify"),
+                ("ERROR executing ui_type_native: InputNotDispatchedError: Editor caret changed before input; no input delivered", "Do not call task_verify"),
                 ("ERROR: Target '' has 8 exact visible enabled matches", "unique selector or control identity"),
             ):
                 with self.subTest(error=error):
