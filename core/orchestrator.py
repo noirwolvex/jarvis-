@@ -292,7 +292,9 @@ class TaskOrchestrator:
             hints.append("The coordinate input was not executed. Call screen_observe, inspect the returned image and coordinate mapping, and resolve the target again before any coordinate input. Do not repeat the rejected coordinates without fresh evidence.")
         if result.startswith("ERROR: Observe the last"):
             hints.append("Inspect the previous action with ui_inspect or screen_observe, then call task_verify with observed evidence (verified=false if it failed) before another mutation. Do not retry the blocked click.")
-        if "verification requires successful observation" in low:
+        if "no non-task action has succeeded yet" in low:
+            hints.append("Do not call task_verify again yet. Execute or observe the next pending mission step with a non-task tool first; task_verify cannot create evidence.")
+        elif "verification requires successful observation" in low:
             hints.append("Call ui_inspect or screen_observe and obtain a successful fresh observation before task_verify. Rewording the claim or evidence does not create an observation; do not repeat task_verify until that read succeeds.")
         if (
             ("no input delivered" in low or "inputnotdispatchederror" in low)
