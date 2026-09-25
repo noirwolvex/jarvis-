@@ -435,9 +435,10 @@ Full Access execution profile:
 
                     result = (message.content or "Done.").strip()
                     if self.orchestrator.current and self.orchestrator.current.plan:
+                        resolver = getattr(self.orchestrator, "step_is_resolved", None)
                         pending = [
                             step for step in self.orchestrator.current.plan
-                            if step.status != "completed"
+                            if not (resolver(step) if resolver is not None else step.status == "completed")
                         ]
                         if pending:
                             self.messages.append({"role": "user", "content": "Required plan steps remain: " + ", ".join(step.id for step in pending) + ". Continue in order using observed evidence; do not silently skip these steps."})
