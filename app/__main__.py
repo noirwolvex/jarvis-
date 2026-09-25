@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import queue
 import sys
 import threading
@@ -24,6 +25,7 @@ from PySide6.QtWidgets import (
 load_dotenv(override=True)
 
 from core.agent import AgentEvent, JarvisAgent
+from core.full_access_bridge import build_full_access_agent, run_agent_mission
 
 # Keep the legacy desktop surface compatible while using robust Windows input.
 import core.tools as core_tools
@@ -61,14 +63,28 @@ class Worker(QObject):
     event = Signal(object)
     failed = Signal(str)
 
-    def __init__(self, agent: JarvisAgent, prompt: str) -> None:
+    def __init__(self, agent: JarvisAgent, prompt: str, full_access: bool = False) -> None:
         super().__init__()
         self.agent = agent
         self.prompt = prompt
+        self.full_access = full_access
 
     def run(self) -> None:
         try:
-            result = self.agent.run(self.prompt, self.event.emit)
+            if self.full_access:
+                payload = run_agent_mission(
+                    self.agent,
+                    self.prompt,
+                    emit=self.event.emit,
+                    allow_shell=False,
+                )
+                if not payload.get("ok"):
+                    raise RuntimeError(
+                        str(payload.get("result") or payload.get("error") or "Full Access mission did not complete")
+                    )
+                result = str(payload.get("result") or "")
+            else:
+                result = self.agent.run(self.prompt, self.event.emit)
             self.finished.emit(result)
         except Exception as exc:
             self.failed.emit(f"{type(exc).__name__}: {exc}")
@@ -156,6 +172,7 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self.process_approval_requests)
         self.timer.start(100)
 
+        self.full_access_session = False
         try:
             self.agent = JarvisAgent(approval=self.approvals.request)
             self.sync_access_mode()
@@ -192,8 +209,7 @@ class MainWindow(QMainWindow):
         if policy["mode"] == "restricted":
             detail = "Observe/read oriented · writes and network disabled"
         elif policy["mode"] == "full":
-            approval = "approval required" if policy["require_approval"] else "unattended approvals disabled"
-            detail = f"All capability categories enabled · {approval}"
+            detail = "Modern Rust Full Access pipeline · terminal disabled in this legacy window"
         else:
             detail = "Configured policy · scoped write permissions"
         self.access_detail.setText(detail)
@@ -210,12 +226,13 @@ class MainWindow(QMainWindow):
                 ("browser-write", "allow_browser_write"),
                 ("shell", "allow_shell"),
                 ("destructive", "allow_destructive"),
-            ] if policy[key]
+            ] if policy[key] and not (self.full_access_session and name == "shell")
         ]
+        terminal = " · terminal=disabled here" if self.full_access_session else ""
         self.write(
             f"<span style='color:#84c8ff'><b>Access:</b> {policy['mode']} · "
             f"enabled={', '.join(enabled) if enabled else 'read/observe only'} · "
-            f"approval={'on' if policy['require_approval'] else 'off'}</span>"
+            f"approval={'on' if policy['require_approval'] else 'off'}{terminal}</span>"
         )
 
     def change_access_mode(self, index: int) -> None:
@@ -231,10 +248,12 @@ class MainWindow(QMainWindow):
             response = QMessageBox.question(
                 self,
                 "Enable Full Access?",
-                "Full Access enables network, filesystem writes, Git writes, browser interaction, "
-                "PowerShell, and destructive-capability categories for this JARVIS session.\n\n"
-                "The deny-list, workspace path boundaries, browser challenge guard, and other hard "
-                "safety checks remain active. High-impact actions still require approval by default.\n\n"
+                "Full Access will switch this window to the same guarded Full Access agent used by "
+                "the modern Control Center: semantic UI/CDP routing, verification, recovery, and "
+                "strict Rust native input.\n\n"
+                "It will not fall back to the legacy PyAutoGUI execution path. The managed Rust "
+                "runtime must already be ready. Terminal commands remain disabled in this legacy "
+                "window; use the Control Center for separately authorized terminal access.\n\n"
                 "Enable Full Access?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
                 QMessageBox.StandardButton.No,
@@ -242,14 +261,39 @@ class MainWindow(QMainWindow):
             if response != QMessageBox.StandardButton.Yes:
                 self.sync_access_mode()
                 return
+            try:
+                candidate = build_full_access_agent()
+                from core.rust_engine import native_engine_status
+                status = json.loads(native_engine_status())
+                if status.get("backend") != "rust" or status.get("rust_input_ready") is not True:
+                    raise RuntimeError(
+                        "Full Access requires the managed Rust runtime. Start JARVIS with "
+                        "'npm run dev' or 'npm run start' and use the Control Center, or launch "
+                        "this UI from an environment provisioned by that runtime."
+                    )
+            except Exception as exc:
+                QMessageBox.critical(self, "JARVIS Full Access", str(exc))
+                self.sync_access_mode()
+                return
+            self.agent = candidate
+            self.full_access_session = True
+        else:
+            try:
+                if self.full_access_session:
+                    from core.process_control import set_cancellation
+                    candidate = JarvisAgent(approval=self.approvals.request)
+                    candidate.tools.permissions.set_access_mode(requested)
+                    set_cancellation(lambda: False)
+                    self.agent = candidate
+                    self.full_access_session = False
+                else:
+                    permissions.set_access_mode(requested)
+            except (RuntimeError, ValueError) as exc:
+                QMessageBox.critical(self, "JARVIS", str(exc))
+                self.sync_access_mode()
+                return
 
-        try:
-            permissions.set_access_mode(requested)
-        except ValueError as exc:
-            QMessageBox.critical(self, "JARVIS", str(exc))
-            self.sync_access_mode()
-            return
-        self.update_access_detail()
+        self.sync_access_mode()
         self.write_access_summary()
 
     def process_approval_requests(self) -> None:
@@ -273,7 +317,7 @@ class MainWindow(QMainWindow):
         self.send_button.setEnabled(False)
         self.access_mode.setEnabled(False)
         self.thread = QThread()
-        self.worker = Worker(self.agent, prompt)
+        self.worker = Worker(self.agent, prompt, full_access=self.full_access_session)
         self.worker.moveToThread(self.thread)
         self.thread.started.connect(self.worker.run)
         self.worker.event.connect(self.on_event)
