@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from core import semantic_ui_tools as ui
-from core.desktop_input import InputDeliveryError
+from core.desktop_input import InputDeliveryError, InputNotDispatchedError
 from core.native_ui_input import ui_type_native
 from core.orchestrator import TaskOrchestrator
 from core.task_tools import register_task_tools
@@ -39,16 +39,48 @@ class NativeSemanticBindingTests(unittest.TestCase):
             ui_type_native("fixture")
         self.client.type_text.assert_not_called()
 
-    def test_existing_draft_or_native_newline_requires_semantic_write(self):
-        for draft, text in [("draft", "fixture"), ("", "one\ntwo")]:
+    def test_existing_draft_or_native_newline_uses_semantic_write_without_resolving_again(self):
+        for draft, text in [("draft", "fixture"), ("\n", "CAT"), ("\r\n", "CAT"), ("", "one\ntwo")]:
             self.editor.value = draft
-            with patch("core.rust_engine._preflight", return_value=(self.client, self.status)), \
-                 self.assertRaisesRegex(InputDeliveryError, "Value pattern"):
-                ui_type_native(text)
+            with patch.object(ui, "_find_control", wraps=ui._find_control) as resolve:
+                result = ui_type_native(text)
+            self.assertTrue(result.startswith("VERIFIED:"), result)
+            self.assertIn("uia_value_pattern", result)
+            self.assertEqual(self.editor.value, draft + text)
+            resolve.assert_called_once()
+        self.client.type_text.assert_not_called()
+
+    def test_losing_foreground_during_resolution_is_rejected_before_text_dispatch(self):
+        for typing in (ui_type_native, ui.ui_type):
+            with self.subTest(typing=typing.__name__), \
+                 patch.object(ui, "_focus_control", side_effect=InputDeliveryError("Target window lost foreground")):
+                with self.assertRaises(InputNotDispatchedError):
+                    typing("fixture")
+        self.client.type_text.assert_not_called()
+        self.editor.iface_value.SetValue.assert_not_called()
+
+    def test_missing_click_or_typing_target_is_not_a_dispatched_action(self):
+        for action in (lambda: ui.ui_activate("unknown"),
+                       lambda: ui.ui_type("fixture", target="unknown"),
+                       lambda: ui_type_native("fixture", target="unknown")):
+            with self.subTest(action=action), self.assertRaises(InputNotDispatchedError):
+                action()
+        self.client.click.assert_not_called()
+        self.client.type_text.assert_not_called()
+        self.editor.iface_value.SetValue.assert_not_called()
+
+    def test_unsupported_draft_write_is_rejected_before_delivery(self):
+        from core.desktop_input import InputNotDispatchedError
+        self.editor.value = "draft"
+        del self.editor.iface_value
+        with self.assertRaises(InputNotDispatchedError):
+            ui_type_native("fixture")
         self.client.type_text.assert_not_called()
 
     def test_native_success_requires_exact_uia_readback(self):
-        def deliver(text, status):
+        def deliver(text, status, *, before_dispatch=None):
+            if before_dispatch:
+                before_dispatch()
             self.editor.value = text
             return {"executed": True, "simulation": False}
         self.client.type_text.side_effect = deliver

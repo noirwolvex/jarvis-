@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import copy
 import json
 import tempfile
 import threading
@@ -74,6 +75,37 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertNotIn("screen_observe", [trace.name for trace in self.agent.orchestrator.current.traces])
         self.assertEqual(self.agent.orchestrator.summary()["workflows"][0]["remaining"], [])
 
+    def test_pre_input_rejection_keeps_workflow_retryable_without_replaying_completed_steps(self):
+        from core.desktop_input import InputNotDispatchedError
+        reject = Mock(side_effect=InputNotDispatchedError("editor not writable"))
+        self.register("ui_type_native", Risk.MEDIUM, reject)
+        program = [step("launch"), step("type", "ui_type_native")]
+        first = self.execute(program)
+        self.assertTrue(first.startswith("ERROR:"), first)
+        self.assertEqual(self.agent.orchestrator.current.workflows[0]["steps"][1]["status"], "blocked")
+        self.assertFalse(self.agent.orchestrator.needs_action_review())
+        reject.side_effect = None
+        reject.return_value = "VERIFIED: exact text readback"
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.action.assert_called_once()
+        self.assertEqual(reject.call_count, 2)
+
+    def test_fast_paths_do_not_record_rejected_typing_as_delivered_mutation(self):
+        from core.desktop_input import InputNotDispatchedError
+        from core.fast_mission import execute_fast_mission
+        from core.whatsapp_fast_mission import execute_whatsapp_ordinal_mission
+        self.register("launch_installed_app", Risk.MEDIUM, self.action, {"type": "object"})
+        self.register("whatsapp_select_chat_native", Risk.MEDIUM, self.action, {"type": "object"})
+        reject = Mock(side_effect=InputNotDispatchedError("editor not writable"))
+        self.register("ui_type_native", Risk.MEDIUM, reject, {"type": "object"})
+        for run, mission in ((execute_fast_mission, "Open Notepad and write CAT"),
+                             (execute_whatsapp_ordinal_mission, "Open WhatsApp and select the first chat and write CAT")):
+            with self.subTest(mission=mission), patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+                result = run(self.agent, mission)
+            self.assertIn("InputNotDispatchedError", result)
+            self.assertFalse(self.agent.orchestrator.needs_action_review())
+            self.assertIsNone(self.agent.orchestrator.current.in_flight)
+
     def test_browser_guard_nested_read_does_not_deadlock_single_executor(self):
         self.agent._browser_action_guard = FullAccessJarvisAgent._browser_action_guard.__get__(self.agent)
         self.register("browser_check_challenge", Risk.LOW, Mock(return_value=json.dumps({"challenge_detected": False})))
@@ -99,6 +131,130 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertEqual(self.action.call_count, 1)
         self.assertEqual(waiter.call_count, 2)
         self.assertTrue(self.agent.orchestrator.summary()["verified"])
+
+    def test_transient_checkpoint_timeout_recovers_without_model_or_action_replay(self):
+        self.action.return_value = "DELIVERED: navigation requested"
+        waiter = Mock(side_effect=["ERROR: TimeoutError: page still loading", "VERIFIED: destination loaded"])
+        self.register("ui_wait_state", Risk.LOW, waiter)
+        program = [step(checkpoint={"tool": "ui_wait_state", "arguments": {}})]
+
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.action.assert_called_once()
+        self.assertEqual(waiter.call_count, 2)
+        current = self.agent.orchestrator.current
+        self.assertEqual(current.metrics["checkpoint_read_retries"], 1)
+        self.assertEqual(current.workflows[0]["steps"][0]["checkpoint_attempts"], 2)
+        self.agent.client.chat.completions.create.assert_not_called()
+
+    def test_persistent_timeout_is_bounded_and_resume_only_reads_checkpoint(self):
+        self.action.side_effect = ["DELIVERED: navigation requested", "VERIFIED: next action"]
+        waiter = Mock(side_effect=["ERROR: timed out waiting for destination"] * 2 + ["VERIFIED: destination loaded"])
+        self.register("ui_wait_state", Risk.LOW, waiter)
+        program = [step(checkpoint={"tool": "ui_wait_state", "arguments": {}}), step("two")]
+
+        self.assertTrue(self.execute(program).startswith("ERROR: Checkpoint pending"))
+        self.assertEqual(waiter.call_count, 2)
+        self.action.assert_called_once()
+        self.assertEqual([item["status"] for item in self.agent.orchestrator.current.workflows[0]["steps"]],
+                         ["checkpoint_pending", "pending"])
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.assertEqual(waiter.call_count, 3)
+        self.assertEqual(self.action.call_count, 2)
+
+    def test_non_timeout_checkpoints_never_retry_automatically(self):
+        self.action.return_value = "DELIVERED: requested action"
+        for result in ("ERROR: ambiguous destination", "BROWSER_ACTION_BLOCKED: challenge",
+                       "CANCELLED: Emergency stop is active"):
+            with self.subTest(result=result):
+                self.agent.orchestrator.begin("checkpoint fixture")
+                waiter = Mock(return_value=result)
+                self.register("ui_wait_state", Risk.LOW, waiter)
+                before = self.action.call_count
+                self.assertFalse(self.execute([
+                    step(checkpoint={"tool": "ui_wait_state", "arguments": {}}), step("two")
+                ]).startswith("VERIFIED:"))
+                waiter.assert_called_once()
+                self.assertEqual(self.action.call_count, before + 1)
+
+    def test_emergency_stop_between_timeout_reads_prevents_retry(self):
+        self.action.return_value = "DELIVERED: navigation requested"
+        def stop_during_read():
+            self.agent._stop.set()
+            return "ERROR: TimeoutError: loading"
+        waiter = Mock(side_effect=stop_during_read)
+        self.register("ui_wait_state", Risk.LOW, waiter)
+        result = self.execute([step(checkpoint={"tool": "ui_wait_state", "arguments": {}})])
+
+        self.assertTrue(result.startswith("CANCELLED:"), result)
+        self.action.assert_called_once()
+        waiter.assert_called_once()
+        self.assertEqual(self.agent.orchestrator.current.metrics.get("checkpoint_read_retries", 0), 0)
+
+    def test_completed_workflow_resume_does_not_reauthorize_completed_effects(self):
+        program = [step()]
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.agent.tools.permissions.deny_tools.add("verified_action")
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.action.assert_called_once()
+
+    def test_partial_resume_validates_only_remaining_actions(self):
+        def stop_after_first():
+            self.agent._stop.set()
+            return "VERIFIED: first action complete"
+        self.action.side_effect = stop_after_first
+        later = Mock(return_value="VERIFIED: remaining action complete")
+        self.register("remaining_action", Risk.MEDIUM, later)
+        program = [step(), step("two", "remaining_action")]
+        self.assertTrue(self.execute(program).startswith("CANCELLED:"))
+        self.agent._stop.clear()
+        self.agent.tools.permissions.deny_tools.add("verified_action")
+
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.action.assert_called_once()
+        later.assert_called_once()
+
+    def test_checkpoint_resume_does_not_reauthorize_delivered_mutation(self):
+        self.action.return_value = "DELIVERED: requested action"
+        waiter = Mock(side_effect=["ERROR: still loading", "VERIFIED: completed"])
+        self.register("ui_wait_state", Risk.LOW, waiter)
+        program = [step(checkpoint={"tool": "ui_wait_state", "arguments": {}})]
+        self.assertTrue(self.execute(program).startswith("ERROR: Checkpoint"))
+        self.agent.tools.permissions.deny_tools.add("verified_action")
+
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.action.assert_called_once()
+        self.assertEqual(waiter.call_count, 2)
+
+    def test_malformed_resume_journal_cannot_skip_or_reorder_steps(self):
+        program = [step(), step("two")]
+        self.action.return_value = "ERROR: uncertain"
+        self.execute(program)
+        original = copy.deepcopy(self.agent.orchestrator.current.workflows[0])
+        journals = [[], [{"id": "one", "status": "completed"}],
+                    [{"id": "two", "status": "pending"}, {"id": "one", "status": "pending"}],
+                    [{"id": "one", "status": "pending"}, {"id": "one", "status": "pending"}],
+                    [{"id": "one", "status": "pending"}, {"id": "two", "status": "completed"}],
+                    [{"id": "one", "status": "checkpoint_pending"}, {"id": "two", "status": "pending"}],
+                    [{"id": "one", "status": "skipped"}, {"id": "two", "status": "pending"}]]
+        for records in journals:
+            with self.subTest(records=records):
+                workflow = copy.deepcopy(original)
+                workflow["steps"] = records
+                self.agent.orchestrator.current.workflows = [workflow]
+                result = self.execute(program)
+                self.assertTrue(result.startswith("ERROR"), result)
+                self.assertIn("Workflow journal", result)
+                review = self.agent._execute_tool("workflow_review", {
+                    "workflow_id": "mission", "step_id": "one", "claim": "fixture claim"
+                }, True)
+                self.assertIn("Workflow journal", review)
+        self.action.assert_called_once()
+
+    def test_resume_cannot_change_bound_program(self):
+        self.assertTrue(self.execute([step()]).startswith("VERIFIED:"))
+        result = self.execute([step(), step("two")])
+        self.assertIn("immutable ordered program", result)
+        self.action.assert_called_once()
 
     def test_uncertain_send_requires_live_review_and_is_never_replayed(self):
         self.action.side_effect = ["ERROR: delivery uncertain", "VERIFIED: later action"]

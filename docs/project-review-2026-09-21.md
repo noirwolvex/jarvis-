@@ -119,7 +119,7 @@ The alternate portable-test target directory avoids replacing a binary potential
 
 ## Remaining qualification and known limitations
 
-1. **Emergency connection saturation:** the separate stop connection avoids the Python execution lock, but the daemon admits at most four connections. A stop connection can still be rejected when all slots are occupied. Dedicated stop capacity and measured end-to-end stop latency remain required before claiming a guaranteed immediate stop under resource saturation.
+1. **Emergency connection saturation (superseded):** this snapshot found that a stop connection could be rejected when all four normal slots were occupied. The [September 23 follow-up](control-execution-2026-09-23.md) verifies the subsequently added bounded emergency-only slot. Measured end-to-end stop latency under wider resource exhaustion still needs live qualification.
 2. **Live device qualification:** multi-monitor/DPI behavior, foreground races, drag cancellation, Unicode/IME behavior, sustained typing, UI changes and arbitrary application missions still need supervised native tests. Passing fixtures cannot guarantee zero errors in external applications.
 3. **Long-session production qualification:** durable local checkpoints are covered; deployed PostgreSQL reconciliation, sustained load, process crashes, memory/CPU budgets and multi-hour live workflows need dedicated integration/load runs.
 4. **Environment limits:** UAC/secure desktop, privileged applications and unsupported controls can legitimately refuse automation. Uncertain outcomes must remain unresolved until observation supplies evidence.

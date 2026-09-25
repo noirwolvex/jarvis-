@@ -288,6 +288,14 @@ class TaskOrchestrator:
         self.current.recoveries += 1
         low = result.lower()
         hints: list[str] = []
+        if "screen_observe required" in low:
+            hints.append("The coordinate input was not executed. Call screen_observe, inspect the returned image and coordinate mapping, and resolve the target again before any coordinate input. Do not repeat the rejected coordinates without fresh evidence.")
+        if result.startswith("ERROR: Observe the last"):
+            hints.append("Inspect the previous action with ui_inspect or screen_observe, then call task_verify with observed evidence (verified=false if it failed) before another mutation. Do not retry the blocked click.")
+        if "verification requires successful observation" in low:
+            hints.append("Call ui_inspect or screen_observe and obtain a successful fresh observation before task_verify. Rewording the claim or evidence does not create an observation; do not repeat task_verify until that read succeeds.")
+        if "exact visible enabled matches" in low:
+            hints.append("The semantic target is ambiguous. Use ui_inspect to identify the intended editable control, then retry semantic typing with its unique selector or control identity. Do not guess a coordinate to bypass target resolution.")
         if "foreground" in low or "focus" in low:
             hints.append("Re-check the active window and focus it before retrying.")
         if "dialog" in low or "save" in low or "open" in low:
@@ -304,12 +312,19 @@ class TaskOrchestrator:
         if not self.current:
             return False
         count = 0
+        bookkeeping = name.startswith("task_")
+        last_error = self.current.traces[-1].result if self.current.traces else None
         for trace in reversed(self.current.traces):
             if trace.name.startswith("task_"):
+                # A changed claim/evidence string is not progress when the same
+                # verification precondition still fails. These failures previously
+                # escaped the retry budget entirely and consumed model turns.
+                if bookkeeping and trace.name == name and not trace.success and trace.result == last_error:
+                    count += 1
                 continue
             if trace.success:
                 break
-            if trace.name == name and trace.arguments == arguments:
+            if not bookkeeping and trace.name == name and trace.arguments == arguments:
                 count += 1
         return count >= limit
 

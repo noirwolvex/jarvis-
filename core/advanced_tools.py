@@ -180,9 +180,13 @@ def browser_links() -> str:
 
 def browser_wait(selector: str, timeout_ms: int = 15000) -> str:
     from .tools import _PAGE
+    from .browser_semantic import run_browser_operation
+    from .process_control import check_cancelled
     if _PAGE is None:
         raise RuntimeError("No browser page is open")
-    _PAGE.locator(selector).first.wait_for(state="visible", timeout=max(500, min(timeout_ms, 60000)))
+    run_browser_operation(_PAGE, "wait_state", {
+        "target": {"selector": selector}, "state": "visible", "timeout_ms": timeout_ms,
+    }, check_cancelled, wait_timeout_limit_ms=60000)
     return f"VERIFIED: selector is visible: {selector}"
 
 

@@ -319,7 +319,7 @@ class _ChromeRuntime:
             return True
         if operation == "wait":
             from .browser_semantic import run_browser_operation
-            run_browser_operation(page, "wait_state", {"target": {"selector": args["selector"]}, "state": "visible", "timeout_ms": args.get("timeout_ms", 15000)}, self._check_cancelled)
+            run_browser_operation(page, "wait_state", {"target": {"selector": args["selector"]}, "state": "visible", "timeout_ms": args.get("timeout_ms", 15000)}, self._check_cancelled, wait_timeout_limit_ms=60000)
             return True
         if operation == "press":
             self._guard_page_input(page)

@@ -10,7 +10,7 @@ from typing import Any, Callable
 
 from jsonschema import Draft202012Validator
 
-from .desktop_input import InputDeliveryError, paste_text
+from .desktop_input import InputDeliveryError, InputNotDispatchedError, paste_text
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
 from .process_control import check_cancelled
@@ -207,17 +207,87 @@ def _invalidate_control(control: Any, hwnd: int | None = None) -> None:
     _SNAPSHOTS.invalidate(hwnd)
 
 
-def _descendants(win: Any, *, require_complete: bool = False) -> list[Any]:
-    check_cancelled()
-    try:
-        result = list(win.descendants())
-        if require_complete and len(result) > 700:
-            raise RuntimeError("UI tree exceeds 700 controls; narrow the window before ordinal/relational selection")
-        result = result[:700]
+def _query_descendants(win: Any, control_types: tuple[str, ...], *, visible_only: bool = False):
+    """One provider traversal for a union of control types, without caching input state."""
+    backend = getattr(win, "backend", None)
+    if control_types and getattr(backend, "name", None) == "uia":
+        from pywinauto.uia_defines import IUIA
+        automation = IUIA()
+        conditions = [automation.build_condition(control_type=kind) for kind in control_types]
+        condition = conditions[0] if len(conditions) == 1 else automation.iuia.CreateOrConditionFromArray(conditions)
+        if visible_only:
+            condition = automation.iuia.CreateAndCondition(condition, automation.iuia.CreatePropertyCondition(
+                automation.UIA_dll.UIA_IsOffscreenPropertyId, False))
+        # WhatsApp's provider can return thousands of aliases for a few dozen
+        # controls. Fetch identity alongside the query and dedupe BEFORE constructing
+        # wrappers (which otherwise perform several live COM reads per alias).
+        identity_property = automation.UIA_dll.UIA_RuntimeIdPropertyId
+        process_property = automation.UIA_dll.UIA_ProcessIdPropertyId
+        cache = automation.iuia.CreateCacheRequest()
+        cache.AddProperty(identity_property)
+        cache.AddProperty(process_property)
+        elements = win.element_info._element.FindAllBuildCache(automation.tree_scope["descendants"], condition, cache)
+        seen: set[tuple] = set()
+        for index in range(elements.Length):
+            check_cancelled()
+            element = elements.GetElement(index)
+            runtime_id = tuple(element.GetCachedPropertyValue(identity_property) or ())
+            pid = element.GetCachedPropertyValue(process_property)
+            if runtime_id and isinstance(pid, int):
+                identity = (pid, runtime_id)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+            # Only identity was cached; geometry, text, focus and all dispatch
+            # guards still read live properties from the returned provider.
+            yield backend.generic_wrapper_class(backend.element_info_class(element))
+        return
+    for kind in control_types or (None,):
         check_cancelled()
-        return result
-    except Exception as exc:
-        raise RuntimeError(f"UI Automation inspection failed: {type(exc).__name__}: {exc}") from exc
+        yield from win.descendants(control_type=kind) if kind else win.descendants()
+
+
+def _descendants(win: Any, *, require_complete: bool = False,
+                 control_types: tuple[str, ...] = (), visible_only: bool = False) -> list[Any]:
+    # WebView can invalidate a provider while a click opens a conversation. Retry
+    # this read once using a new provider query; never replay the delivered action
+    # or accept a partial result from the failed enumeration.
+    for attempt in range(2):
+        try:
+            return _read_descendants(win, require_complete=require_complete,
+                                     control_types=control_types, visible_only=visible_only)
+        except Exception as exc:
+            hresult = getattr(exc, "hresult", None)
+            if attempt == 0 and type(exc).__name__ == "COMError" and hresult == -2147220991:
+                record_backend("windows_uia", phase="observe", detail="Retry transient UIA provider observation")
+                cancellable_delay(0.04)
+                continue
+            raise RuntimeError(f"UI Automation inspection failed: {type(exc).__name__}: {exc}") from exc
+    raise AssertionError("UIA read retry must return or raise")
+
+
+def _read_descendants(win: Any, *, require_complete: bool = False,
+                      control_types: tuple[str, ...] = (), visible_only: bool = False) -> list[Any]:
+    check_cancelled()
+    result: list[Any] = []
+    seen: set[tuple] = set()
+    # Apply type conditions inside UIA. Materializing every chat/message/button
+    # and reading its properties across processes dominates editor resolution.
+    # Keep Document as well as Edit: WebView contenteditable uses either type.
+    for control in _query_descendants(win, control_types, visible_only=visible_only):
+        check_cancelled()
+        # Count native identities, not duplicate WebView wrapper instances.
+        identity = (_process_id(control), _node_identity(control))
+        if identity in seen:
+            continue
+        seen.add(identity)
+        if len(result) == 700:
+            if require_complete:
+                raise RuntimeError("UI tree exceeds 700 controls; narrow the window before ordinal/relational selection")
+            break
+        result.append(control)
+    check_cancelled()
+    return result
 
 
 def _score(control: Any, target: str, control_type: str = "") -> float:
@@ -247,9 +317,14 @@ def _score(control: Any, target: str, control_type: str = "") -> float:
     return -1.0
 
 
-def _candidate_controls(win: Any, target: str = "", control_type: str = "") -> list[tuple[float, int, Any]]:
+def _candidate_controls(win: Any, target: str = "", control_type: str = "", *,
+                        editable: bool = False) -> list[tuple[float, int, Any]]:
     rows: list[tuple[float, int, Any]] = []
-    for index, control in enumerate(_descendants(win)[:700]):
+    # Use canonical names for provider conditions while preserving case-insensitive
+    # public selectors. Unknown types retain the normal matching behavior.
+    known_type = next((kind for kind in _ACTIONABLE_TYPES if kind.casefold() == control_type.casefold()), None)
+    kinds = (known_type,) if known_type else (("Edit", "Document") if editable else ())
+    for index, control in enumerate(_descendants(win, require_complete=True, control_types=kinds, visible_only=True)):
         check_cancelled()
         try:
             if not control.is_visible() or not control.is_enabled():
@@ -298,18 +373,46 @@ def _selector_controls(win: Any) -> list[tuple[Any, dict]]:
     return rows
 
 
+def _editable_control(control: Any) -> bool:
+    kind = _control_type(control)
+    if kind not in _EDIT_TYPES:
+        return False
+    # A Chromium document root exposes page text, not an editor/composer. It can
+    # otherwise win omitted-target resolution when the actual editor is absent.
+    if kind == "Document" and _automation_id(control).casefold() == "rootwebarea":
+        return False
+    try:
+        readonly = control.iface_value.CurrentIsReadOnly
+    except Exception as exc:
+        if isinstance(exc, AttributeError) or type(exc).__name__ == "NoPatternInterfaceError":
+            return True  # Editors without ValuePattern can accept guarded input.
+        raise RuntimeError("Editor capability inspection failed; refresh its semantic target") from exc
+    return not (isinstance(readonly, (bool, int)) and bool(readonly))
+
+
+def _message_composer(control: Any) -> bool:
+    name = _control_name(control)
+    # "Search or start a new chat" / "Search messages" describes a search
+    # field, not a composer. A chat keyword alone must not make it a recipient.
+    return (not re.match(r"^(search|find|filter)\b", name, re.I)
+            and bool(re.search(r"\b(message|chat|reply)\b", name, re.I)))
+
+
 def _find_control(win: Any, target: str = "", control_type: str = "", editable: bool = False,
                   selector: dict[str, Any] | None = None):
     record_backend("windows_uia", phase="resolve", detail="Fresh semantic target resolution")
     if selector is not None:
         rows = _selector_controls(win)
+        if editable:
+            for control, row in rows:
+                row["editable"] = _editable_control(control)
         selected = select_target([row for _, row in rows], _text(target), _text(control_type), selector, editable=editable)
         return next(control for control, row in rows if row is selected)
-    candidates = _candidate_controls(win, target, control_type)
+    candidates = _candidate_controls(win, target, control_type, editable=editable)
     if editable:
-        candidates = [row for row in candidates if _control_type(row[2]) in _EDIT_TYPES]
+        candidates = [row for row in candidates if _editable_control(row[2])]
         if not target and len(candidates) > 1:
-            composers = [row for row in candidates if re.search(r"\b(message|chat|reply)\b", _control_name(row[2]), re.I)]
+            composers = [row for row in candidates if _message_composer(row[2])]
             if len(composers) == 1:
                 candidates = composers
     if not candidates:
@@ -319,8 +422,21 @@ def _find_control(win: Any, target: str = "", control_type: str = "", editable: 
     if target:
         candidates = [row for row in candidates if row[0] == 100.0]
     if len(candidates) != 1:
-        raise RuntimeError(f"Target {target!r} has {len(candidates)} exact visible enabled matches; inspect and specify an unambiguous name/automation ID and type")
+        choices = [{"name": _control_name(control)[:160], "type": _control_type(control),
+                    "automation_id": _automation_id(control)[:160]} for _, _, control in candidates[:6]]
+        raise RuntimeError(f"Target {target!r} has {len(candidates)} exact visible enabled matches; inspect and specify an unambiguous name/automation ID and type. Candidates: {json.dumps(choices, ensure_ascii=False)}")
     return candidates[0][2]
+
+
+def _resolve_input_control(win: Any, target: str = "", control_type: str = "", editable: bool = False,
+                           selector: dict[str, Any] | None = None):
+    """Resolve before input; a missing target is not a delivered click or text write."""
+    try:
+        return _find_control(win, target, control_type, editable=editable, selector=selector)
+    except BrowserBoundaryError:
+        raise
+    except (RuntimeError, ValueError) as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
 
 
 def _target_binding(win: Any, control: Any) -> dict[str, Any]:
@@ -508,10 +624,13 @@ def ui_focus(target: str = "", title: str = "", control_type: str = "", selector
 def ui_activate(target: str = "", title: str = "", control_type: str = "", selector: dict[str, Any] | None = None) -> str:
     win = _window(title)
     hwnd = _focus_window(win)
-    control = _find_control(win, target, control_type, selector=selector)
+    control = _resolve_input_control(win, target, control_type, selector=selector)
     binding = _target_binding(win, control)
     before = _meta(control)
-    _validate_target(win, control, binding)
+    try:
+        _validate_target(win, control, binding)
+    except InputDeliveryError as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     method = _activate_control(control, hwnd)
     if _foreground_hwnd() != hwnd:
         # Some controls intentionally open another foreground window; report this instead of
@@ -534,8 +653,8 @@ def _activate_control(control: Any, hwnd: int) -> str:
         if "no supported semantic activation pattern" not in str(exc).casefold():
             raise
 
-    rect = _rect(control)
     identity = _meta(control)
+    rect = identity["rect"]
     if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
         raise RuntimeError(
             "Exact UI control has no activation pattern and no usable screen rectangle"
@@ -547,10 +666,21 @@ def _activate_control(control: Any, hwnd: int) -> str:
 
     _guard_foreground(hwnd)
     _SNAPSHOTS.invalidate(hwnd)
+    generation = _SNAPSHOTS.generation
+
+    def click_guard() -> None:
+        _guard_foreground(hwnd)
+        if _SNAPSHOTS.generation != generation or _meta(control) != identity:
+            raise InputDeliveryError("Semantic click target changed before dispatch; resolve again")
+        try:
+            owner = int(control.top_level_parent().handle)
+        except Exception as exc:
+            raise InputDeliveryError("Semantic click window identity is unavailable") from exc
+        if owner != hwnd:
+            raise InputDeliveryError("Semantic click target belongs to another window; no input delivered")
+
     client, status = _preflight()
-    _guard_foreground(hwnd)
-    if _meta(control) != identity:
-        raise InputDeliveryError("Semantic click target changed during native preflight; resolve again")
+    click_guard()
     if client is not None:
         _guard_native_target(hwnd, status)
     if client is None:
@@ -568,13 +698,11 @@ def _activate_control(control: Any, hwnd: int) -> str:
         return "uia_resolved_click_input"
 
     try:
-        result = client.click(x, y, status)
+        result = client.click(x, y, status, before_dispatch=click_guard)
     except RustEngineUnavailable:
         if native_engine_mode() != "auto":
             raise
-        _guard_foreground(hwnd)
-        if _meta(control) != identity:
-            raise InputDeliveryError("Semantic target changed before compatibility input; resolve again")
+        click_guard()
         try:
             record_backend("python_native", detail="UIA-resolved physical click")
             control.click_input()
@@ -639,7 +767,7 @@ def _rust_type_or_python(text: str, *, hwnd: int | None = None,
             "Strict Rust mode requires the native daemon before semantic keyboard input"
         )
     try:
-        result = client.type_text(text, status)
+        result = client.type_text(text, status, before_dispatch=guard)
     except RustEngineUnavailable:
         if native_engine_mode() != "auto":
             raise
@@ -679,7 +807,7 @@ def _rust_hotkey_or_python(keys: list[str], *, hwnd: int | None = None,
             "Strict Rust mode requires the native daemon before semantic hotkeys"
         )
     try:
-        result = client.hotkey(keys, status)
+        result = client.hotkey(keys, status, before_dispatch=guard)
     except RustEngineUnavailable:
         if native_engine_mode() != "auto":
             raise
@@ -709,30 +837,37 @@ def ui_type(
     *,
     state_guard: Callable[[], None] | None = None,
     selector: dict[str, Any] | None = None,
+    _resolved_editor: tuple[Any, Any, dict[str, Any]] | None = None,
 ) -> str:
     if len(str(text)) > 4096 or "\0" in str(text):
         raise ValueError("Semantic UI text must contain at most 4096 characters and no NUL")
     check_cancelled()
     if state_guard:
         state_guard()
-    win = _window(title)
-    hwnd = _focus_window(win)
-    _guard_foreground(hwnd, state_guard)
-    control = _find_control(win, target, editable=True, selector=selector)
-    _focus_control(control, hwnd, state_guard)
-    binding = _target_binding(win, control)
+    win = _resolved_editor[0] if _resolved_editor is not None else _window(title)
+    try:
+        hwnd = _focus_window(win)
+        _guard_foreground(hwnd, state_guard)
+        control = _resolved_editor[1] if _resolved_editor is not None else _resolve_input_control(win, target, editable=True, selector=selector)
+        _focus_control(control, hwnd, state_guard)
+    except InputDeliveryError as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
+    binding = _resolved_editor[2] if _resolved_editor is not None else _target_binding(win, control)
     before_value = _control_value(control)
     if before_value is None:
-        raise InputDeliveryError("Editor value cannot be read semantically; use fresh observation and guarded desktop input")
+        raise InputNotDispatchedError("Editor value cannot be read semantically; use fresh observation and guarded desktop input")
     if submit and not replace and before_value:
-        raise InputDeliveryError("Composer already contains text; inspect before submitting an existing draft")
+        raise InputNotDispatchedError("Composer already contains text; inspect before submitting an existing draft")
     expected = str(text) if replace else before_value + str(text)
     wanted = _text(text)
     def echo_count():
         return sum(1 for candidate in _descendants(win) if candidate != control
                    and _control_type(candidate) not in _EDIT_TYPES and _control_name(candidate) == wanted)
     before_echoes = echo_count() if submit else 0
-    _guard_foreground(hwnd, state_guard)
+    try:
+        _guard_foreground(hwnd, state_guard)
+    except InputDeliveryError as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     # Prefer one Value-pattern write. If not supported, only an empty composer can use
     # focused Unicode delivery without relying on an unknown caret/selection position.
     try:
@@ -741,32 +876,59 @@ def ui_type(
         if not isinstance(exc, AttributeError) and type(exc).__name__ != "NoPatternInterfaceError":
             raise
         pattern = None
+    expected_values = {expected}
+    caret_guard = None
+    if (before_value in ("\n", "\r\n") and str(text) and not replace and not submit
+            and not any(char in str(text) for char in "\r\n")):
+        # Some WebView composers advertise SetValue but silently ignore it.
+        # Their independently readable empty TextPattern paragraph can instead
+        # be typed once through the guarded native path, without trying a write
+        # and replaying it after an uncertain result.
+        from .native_ui_input import _append_caret
+        append = _append_caret(control, before_value)
+        if append is not None:
+            prefix, suffix, caret_guard = append
+            expected_values = {prefix + str(text) + suffix, str(text)}
+            pattern = None
     wrote_with = "uia_value_pattern" if pattern is not None else "native_keyboard_input"
-    if pattern is None and (before_value or replace):
-        raise InputDeliveryError("Editor has no writable Value pattern; use guarded input to control selection explicitly")
+    if pattern is None and ((before_value and caret_guard is None) or replace):
+        raise InputNotDispatchedError("Editor has no writable Value pattern; use guarded input to control selection explicitly")
     if pattern is None and any(char in str(text) for char in "\r\n"):
-        raise InputDeliveryError("Multiline composer text requires a writable Value pattern; Unicode newlines could submit messages prematurely")
-    _validate_target(win, control, binding, state_guard)
+        raise InputNotDispatchedError("Multiline composer text requires a writable Value pattern; Unicode newlines could submit messages prematurely")
+    try:
+        _validate_target(win, control, binding, state_guard)
+    except InputDeliveryError as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     if _control_value(control) != before_value:
-        raise InputDeliveryError("Editor changed before input; inspect the current draft before retrying")
+        raise InputNotDispatchedError("Editor changed before input; inspect the current draft before retrying")
     _SNAPSHOTS.invalidate(hwnd)
+    # Preserve all target evidence while accounting for this action's own cache
+    # invalidation; concurrent invalidations must still fail the final guard.
+    binding["generation"] += 1
     try:
         if pattern is not None:
             record_backend("windows_uia", detail="Write editor Value pattern")
             pattern.SetValue(expected)
         else:
             def input_guard():
-                _guard_foreground(hwnd, state_guard)
+                try:
+                    _validate_target(win, control, binding, state_guard)
+                except InputDeliveryError as exc:
+                    raise InputNotDispatchedError(str(exc)) from exc
                 if not _has_focus(control) or _control_value(control) != before_value:
-                    raise InputDeliveryError("Editor focus or draft changed during input preparation")
+                    raise InputNotDispatchedError("Editor focus or draft changed during input preparation")
+                if caret_guard is not None:
+                    caret_guard()
             wrote_with = _rust_type_or_python(str(text), hwnd=hwnd, guard=input_guard)
+    except (BrowserBoundaryError, InputNotDispatchedError):
+        raise
     except Exception as exc:
         raise InputDeliveryError("Text delivery is uncertain; inspect the editor before retrying") from exc
 
     def value_matches():
         _guard_foreground(hwnd, state_guard)
         record_backend("windows_uia", phase="verify", detail="Exact editor value readback")
-        return _control_value(control) == expected
+        return _control_value(control) in expected_values
     try:
         wait_until(value_matches, description="exact editor value readback")
     except TimeoutError as exc:
@@ -782,10 +944,12 @@ def ui_type(
         raise InputDeliveryError("Editor lost keyboard focus before submit; text was not submitted")
     try:
         def submit_guard():
-            _guard_foreground(hwnd, state_guard)
+            _validate_target(win, control, binding, state_guard)
             if not _has_focus(control) or _control_value(control) != expected:
                 raise InputDeliveryError("Editor focus or draft changed during submit preparation")
         submit_method = _rust_hotkey_or_python(["enter"], hwnd=hwnd, guard=submit_guard)
+    except BrowserBoundaryError:
+        raise
     except Exception as exc:
         raise InputDeliveryError("Text was entered but Enter delivery failed; do not retry blindly") from exc
     state = {"cleared": False, "echoed": False}

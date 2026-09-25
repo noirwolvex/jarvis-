@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
@@ -71,12 +71,13 @@ type WorkerState = {
   stderr: string;
   pending: Map<string, PendingRequest>;
   stopping?: boolean;
+  retiring?: Promise<void>;
   onEmergency?: () => void;
 };
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-export const FULL_ACCESS_WORKER_REVISION = 8;
+export const FULL_ACCESS_WORKER_REVISION = 20;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
@@ -187,6 +188,43 @@ function stopWorker(state: WorkerState, reason: string) {
   // Stop is consumed on the worker's stdin thread, independently of the model/tool thread.
   try { state.child.stdin.write(JSON.stringify({ protocol: WORKER_PROTOCOL, action: "stop" }) + "\n", () => {}); }
   catch { /* The termination fallback still applies when stdin is already closed. */ }
+}
+
+function retireIdleWorker(state: WorkerState): Promise<void> {
+  if (state.pending.size) return Promise.reject(new Error("Cannot replace a worker with an active mission"));
+  if (state.child.exitCode !== null) return Promise.resolve();
+  if (state.retiring) return state.retiring;
+  // The stop protocol latches the Rust daemon until restart. Updating idle Python
+  // code must retire only its owned process tree, without emergency-stopping Rust.
+  state.retiring = new Promise<void>((resolveExit, rejectExit) => {
+    let finished = false;
+    const finish = (error?: Error) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timer);
+      state.child.removeListener("exit", exited);
+      if (error) rejectExit(error);
+      else resolveExit();
+    };
+    const exited = () => finish();
+    const timer = setTimeout(() => finish(new Error("Older Full Access worker did not exit")), 2000);
+    state.child.once("exit", exited);
+    try {
+      if (process.platform === "win32" && state.child.pid) {
+        // Windows venv Python can be a launcher parent. Retire its children too,
+        // otherwise the old model loop and hotkey watcher survive the upgrade.
+        execFile("taskkill.exe", ["/PID", String(state.child.pid), "/T", "/F"],
+          { windowsHide: true, timeout: 1500 }, error => {
+            if (error && state.child.exitCode === null) finish(new Error("Could not retire the idle Full Access worker"));
+          });
+      } else if (!state.child.kill() && state.child.exitCode === null) {
+        finish(new Error("Could not retire the idle Full Access worker"));
+      }
+    } catch (error) {
+      finish(error instanceof Error ? error : new Error("Could not retire the idle Full Access worker"));
+    }
+  });
+  return state.retiring;
 }
 
 export function stopFullAccessWorker() {
@@ -303,13 +341,7 @@ async function runPersistent(title: string, signal?: AbortSignal, onProgress?: (
   if (previous && previous.revision !== FULL_ACCESS_WORKER_REVISION && previous.child.exitCode === null) {
     if (previous.pending.size) throw new Error("An older worker still has an active mission; stop it before upgrading");
     previous.onEmergency = undefined;
-    await new Promise<void>((resolveExit, rejectExit) => {
-      const expired = () => { previous.child.removeListener("exit", exited); rejectExit(new Error("Older Full Access worker did not stop")); };
-      const timeout = setTimeout(expired, 2000);
-      const exited = () => { clearTimeout(timeout); resolveExit(); };
-      previous.child.once("exit", exited);
-      stopWorker(previous, "Replacing outdated Full Access worker");
-    });
+    await retireIdleWorker(previous);
     if (signal?.aborted) throw new Error("Full Access mission aborted during worker replacement");
   }
   const state = startWorker();

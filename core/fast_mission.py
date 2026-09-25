@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .execution_telemetry import input_not_dispatched
+
 import os
 import re
 import time
@@ -36,9 +38,14 @@ _TRAILING_TYPE = re.compile(
     r"\s+(?:(?:and\s+then|then|and)\s+)(?:write|type)(?:\s+text)?\s+(?P<text>.+?)\s*$",
     re.IGNORECASE | re.DOTALL,
 )
+_TRAILING_TYPE_AFTER = re.compile(
+    r"\s+(?:(?:and\s+then|then|and|(?:and\s+)?after(?:\s+that)?)\s+)"
+    r"(?:write|type)(?:\s+text)?\s+(?P<text>.+?)\s*$",
+    re.IGNORECASE | re.DOTALL,
+)
 _NEW_TAB_SIGNAL = re.compile(r"\b(?:new|another)\s+(?:browser\s+)?tab\b", re.IGNORECASE)
 _EXTRA_ACTION = re.compile(
-    r"(?:\b(?:and(?:\s+then)?|then)\s+|[;→]|->)\s*"
+    r"(?:\b(?:and(?:\s+then)?|then|after(?:\s+that)?)\s+|[;→]|->)\s*"
     r"(?:open|navigate|go|send|write|type|play|pause|select|switch|join|save|delete|search|click|press|close|read|find|download|upload)\b",
     re.IGNORECASE,
 )
@@ -53,7 +60,7 @@ _MIXED_GOOGLE_SEARCH = re.compile(
     re.IGNORECASE,
 )
 _MIXED_APP_CHAT = re.compile(
-    r"^open\s+(?:the\s+)?(?:whatsapp)(?:\s+(?:app|application))?\s+and\s+"
+    r"^open\s+(?:the\s+)?(?P<app>whatsapp|discord)(?:\s+(?:app|application))?\s+(?:and\s+then|and|then)\s+"
     r"(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
     r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
     r"\s+(?:chat|conversation)$",
@@ -142,7 +149,7 @@ def _mixed_ordinal(value: str) -> int:
     normalized = str(value).strip().casefold()
     if normalized in _MIXED_ORDINALS:
         return _MIXED_ORDINALS[normalized]
-    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)", normalized)
+    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", normalized)
     if not match:
         raise ValueError("Unsupported chat ordinal")
     position = int(match.group(1))
@@ -154,7 +161,7 @@ def _mixed_ordinal(value: str) -> int:
 def _compile_explicit_sequence(text: str) -> list[FastStep] | None:
     """Compile explicit English then-chains without model calls.
 
-    This grammar is deliberately narrow: app launches, WhatsApp ordinal selection and
+    This grammar is deliberately narrow: app launches, WhatsApp/Discord ordinal selection and
     Google search. Any unknown or side-effectful clause falls back to the intelligent
     planner intact rather than being guessed.
     """
@@ -189,11 +196,12 @@ def _compile_explicit_sequence(text: str) -> list[FastStep] | None:
 
         app_chat = _MIXED_APP_CHAT.fullmatch(clause)
         if app_chat:
+            app = app_chat.group("app").casefold()
             steps.append(FastStep(
                 id=f"fast-{len(steps) + 1}",
-                description="Open and verify WhatsApp",
+                description=f"Open and verify {app.title()}",
                 tool="launch_installed_app",
-                arguments={"query": "WhatsApp", "timeout_seconds": 12},
+                arguments={"query": "WhatsApp" if app == "whatsapp" else "Discord", "timeout_seconds": 12},
             ))
             try:
                 position = _mixed_ordinal(app_chat.group("ordinal"))
@@ -201,16 +209,16 @@ def _compile_explicit_sequence(text: str) -> list[FastStep] | None:
                 return None
             steps.append(FastStep(
                 id=f"fast-{len(steps) + 1}",
-                description=f"Select and verify WhatsApp chat position {position}",
-                tool="whatsapp_select_chat_native",
+                description=f"Select and verify {app.title()} chat position {position}",
+                tool="whatsapp_select_chat_native" if app == "whatsapp" else "discord_select_chat",
                 arguments={"position": position},
             ))
-            last_app = "whatsapp"
+            last_app = app
             continue
 
         chat = _MIXED_CHAT_ONLY.fullmatch(clause)
         if chat:
-            if last_app != "whatsapp":
+            if last_app not in {"whatsapp", "discord"}:
                 return None
             try:
                 position = _mixed_ordinal(chat.group("ordinal"))
@@ -218,8 +226,8 @@ def _compile_explicit_sequence(text: str) -> list[FastStep] | None:
                 return None
             steps.append(FastStep(
                 id=f"fast-{len(steps) + 1}",
-                description=f"Select and verify WhatsApp chat position {position}",
-                tool="whatsapp_select_chat_native",
+                description=f"Select and verify {last_app.title()} chat position {position}",
+                tool="whatsapp_select_chat_native" if last_app == "whatsapp" else "discord_select_chat",
                 arguments={"position": position},
             ))
             continue
@@ -268,9 +276,9 @@ def _clean_app_name(value: str) -> str:
     return text
 
 
-def _split_trailing_type(text: str) -> tuple[str, str | None]:
+def _split_trailing_type(text: str, *, allow_after: bool = False) -> tuple[str, str | None]:
     """Detach one final explicit write/type clause without swallowing later actions."""
-    match = _TRAILING_TYPE.search(text)
+    match = (_TRAILING_TYPE_AFTER if allow_after else _TRAILING_TYPE).search(text)
     if not match:
         return text, None
 
@@ -305,7 +313,7 @@ def _append_native_type(steps: list[FastStep], text: str | None) -> list[FastSte
         *steps,
         FastStep(
             id=f"fast-{len(steps) + 1}",
-            description="Type the requested text into the active verified editor through Rust",
+            description="Enter and verify the requested text in the active editor",
             tool="ui_type_native",
             arguments={"text": text},
         ),
@@ -356,7 +364,7 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     """Compile only fully understood low-ambiguity missions; return None for intelligent fallback."""
     if not _enabled():
         return None
-    text = re.sub(r"\s+", " ", str(goal or "")).strip()
+    text = str(goal or "").strip()
     if not text or len(text) > 8000:
         return None
     if "\0" in text:
@@ -367,9 +375,24 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
         return mixed
 
     try:
-        base_text, trailing_type = _split_trailing_type(text)
+        base_text, trailing_type = _split_trailing_type(text, allow_after=True)
     except ValueError:
         return None
+
+    chat = _MIXED_APP_CHAT.fullmatch(base_text)
+    if chat and chat.group("app").casefold() == "discord":
+        try:
+            position = _mixed_ordinal(chat.group("ordinal"))
+            steps = [FastStep("fast-1", "Open and verify Discord", "launch_installed_app",
+                              {"query": "Discord", "timeout_seconds": 12}),
+                     FastStep("fast-2", f"Select and verify Discord chat position {position}",
+                              "discord_select_chat", {"position": position})]
+            if trailing_type is not None:
+                steps.append(FastStep("fast-3", "Enter and verify the requested Discord draft", "ui_type_native",
+                                      {"text": trailing_type, "title": "Discord"}))
+            return steps
+        except ValueError:
+            return None
 
     simple = _simple_semantic_steps(base_text)
     if simple:
@@ -486,7 +509,7 @@ def execute_fast_mission(
         duration_ms = (time.perf_counter() - started) * 1000.0
         mutation = mutation and not str(result).startswith(
             ("PERMISSION_DENIED", "ERROR: Observe the last")
-        )
+        ) and not input_not_dispatched(result)
         agent.orchestrator.record_tool(
             step.tool,
             dict(step.arguments),

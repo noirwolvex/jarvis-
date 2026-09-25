@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import unittest
 import json
-from unittest.mock import Mock, patch
+from unittest.mock import ANY, Mock, patch
 
 from core.semantic_ui_tools import _find_control, _score, register_semantic_ui_tools
 from core.tools import ToolRegistry
@@ -54,9 +54,10 @@ class _Window:
         for control in controls:
             control._owner = self
 
-    def descendants(self):
+    def descendants(self, **kwargs):
         self.reads += 1
-        return list(self._controls)
+        return [control for control in self._controls
+                if not kwargs.get("control_type") or control.element_info.control_type == kwargs["control_type"]]
 
     def window_text(self):
         return "Demo"
@@ -163,7 +164,7 @@ class SemanticUiToolsTests(unittest.TestCase):
         self.assertTrue(result.startswith("DELIVERED:"))
         data = json.loads(result.split(": ", 1)[1])
         self.assertEqual(data["method"], "rust_uia_center_click")
-        client.click.assert_called_once_with(250, 50, {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}})
+        client.click.assert_called_once_with(250, 50, {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}}, before_dispatch=ANY)
 
     def test_uncertain_invoke_never_retries_select_or_physical_click(self):
         button = _Control("Open", "Button")
@@ -282,7 +283,7 @@ class SemanticUiToolsTests(unittest.TestCase):
              patch("core.tools._desktop_hotkey") as python_hotkey:
             result = ui.ui_hotkey(["ctrl", "l"])
         self.assertTrue(result.startswith("DELIVERED:"))
-        client.hotkey.assert_called_once_with(["ctrl", "l"], status)
+        client.hotkey.assert_called_once_with(["ctrl", "l"], status, before_dispatch=ANY)
         python_hotkey.assert_not_called()
         self.assertEqual(json.loads(result.split(": ", 1)[1])["method"], "rust_native_hotkey")
 
@@ -291,7 +292,9 @@ class SemanticUiToolsTests(unittest.TestCase):
         del editor.iface_value
         client = Mock()
         status = {"native_input": True, "foreground": {"hwnd": 123, "process_id": 42, "title": "Demo"}}
-        def deliver(text, status):
+        def deliver(text, status, *, before_dispatch=None):
+            if before_dispatch:
+                before_dispatch()
             editor.value += text
             return {"executed": True, "simulation": False}
         client.type_text.side_effect = deliver
@@ -303,7 +306,7 @@ class SemanticUiToolsTests(unittest.TestCase):
              patch.object(ui, "paste_text") as python_type:
             result = ui.ui_type("hello", target="Message")
         self.assertTrue(result.startswith("VERIFIED:"))
-        client.type_text.assert_called_once_with("hello", status)
+        client.type_text.assert_called_once_with("hello", status, before_dispatch=ANY)
         python_type.assert_not_called()
         self.assertEqual(json.loads(result.split(": ", 1)[1])["method"], "rust_native_input")
 

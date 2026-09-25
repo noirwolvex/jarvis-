@@ -4,7 +4,11 @@ A Windows-first desktop AI agent powered by Claude.
 
 ## Autonomous desktop upgrade
 
-See the [September 21 execution review](docs/project-review-2026-09-21.md) for the latest fixes, measured checkpoint improvement, branch inventory, regression results and remaining live qualification requirements.
+See the [September 25 Discord navigation repair](docs/discord-navigation-2026-09-25.md) for the first-chat command completed live in 4.157 seconds with no model calls, using scoped conversation links and semantic verification.
+
+See the [September 25 end-to-end typing repair](docs/typing-mission-2026-09-25.md) for the verified dashboard → Python → Rust WhatsApp draft test, caret-provider fix, read-only recovery, and exact completion checks.
+
+See the [September 24 device-control repair](docs/device-control-2026-09-24.md) for the WhatsApp search/composer collision, faster semantic resolution, native click guards, bounded recovery and current validation. The [earlier typing repair](docs/typing-fix-2026-09-23.md) covers duplicate UIA identities and worker replacement. The [September 23 control execution report](docs/control-execution-2026-09-23.md) covers native input and workflow recovery; the [September 21 execution review](docs/project-review-2026-09-21.md) records the earlier checkpoint improvement and branch review.
 
 The [mouse and keyboard performance follow-up](docs/input-performance-2026-09-21.md) adds guarded click delivery, physical-window hit checks, fewer redundant movements and UIA reads, with isolated benchmark results and activation notes.
 
@@ -27,6 +31,8 @@ rtk proxy npm.cmd run dev
 ```
 
 Open [Mission Control](http://127.0.0.1:3000). Use **Run simulation** to follow four verified actions through the task graph, timeline and memory. Ctrl+K opens the command palette. The UI includes pause/resume, a simulation stop latch, JSON event export, dark/light themes and responsive monitoring. Node 22.12+ is required; use `npm` in non-Windows shells.
+
+Run one managed instance at a time. Stop the terminal's existing `npm run dev` or `npm start` with **Ctrl+C** before switching modes. The launcher checks for an occupied port before changing Rust and blocks duplicate launches, including `verify:rust-live`. It starts Next.js directly through Node, so executable paths with spaces do not pass through a batch shell. See the [startup repair and validation](docs/runtime-startup-2026-09-25.md).
 
 - [Complete 28-section engineering architecture](docs/architecture.md): topology, trust boundaries, all matrices, resource budgets, security and deployment decisions.
 - [Implementation map and limitations](docs/requirements-traceability.md).

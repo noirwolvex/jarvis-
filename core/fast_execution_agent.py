@@ -72,6 +72,7 @@ High-speed autonomous execution rules:
 - If several already-known Windows UI actions are in the same application, combine them with ui_batch so focus/click/type/hotkey actions do not require a model turn between each one.
 - For WhatsApp ordinal requests such as "press the second chat", prefer whatsapp_select_chat_native. It resolves the visible chat row semantically, dispatches the click through Rust in strict mode, and verifies selection or conversation-view change before continuing.
 - For Discord, prefer discord_go_to, discord_send_message, or discord_navigate_and_send over screenshots, server-icon coordinates, or manual mouse navigation. Never resend an uncertain message automatically.
+- For Discord ordinal chat requests, use discord_select_chat(position). It scopes the Direct Messages list, excludes navigation links, preserves decorated names, and verifies the exact conversation route. Do not search for the literal phrase "first chat" or treat "Direct Messages" as a conversation name.
 - For a requested YouTube song/video search, prefer youtube_search_open so search + result selection + watch-page verification happen in one CDP call rather than visual browser navigation.
 - After a tool returns VERIFIED evidence, continue to the next already-determined semantic action without taking a redundant screenshot or asking the model to reconsider the same step.
 - Use fresh vision/UI inspection only when the next action genuinely depends on visual state, unlabeled controls, or a changed/uncertain scene.
@@ -102,12 +103,20 @@ High-speed autonomous execution rules:
         whatsapp_fast = execute_whatsapp_ordinal_mission(self, user_text, emit=emit)
         if whatsapp_fast is not None:
             if self.orchestrator.current and self.orchestrator.current.status == "incomplete" and not self._is_stopped():
+                traces = self.orchestrator.current.traces
+                native_pause = self._pause_for_native_stop(traces[-1].result if traces else "", emit)
+                if native_pause:
+                    return native_pause
                 return super().run(user_text, emit=emit, resume_current=True)
             return whatsapp_fast
 
         fast = execute_fast_mission(self, user_text, emit=emit)
         if fast is not None:
             if self.orchestrator.current and self.orchestrator.current.status == "incomplete" and not self._is_stopped():
+                traces = self.orchestrator.current.traces
+                native_pause = self._pause_for_native_stop(traces[-1].result if traces else "", emit)
+                if native_pause:
+                    return native_pause
                 return super().run(user_text, emit=emit, resume_current=True)
             return fast
         return super().run(user_text, emit=emit)

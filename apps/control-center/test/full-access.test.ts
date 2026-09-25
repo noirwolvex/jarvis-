@@ -1,6 +1,8 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
+import childProcess from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 import { emergencyStopHybrid, resetHybridStop, hybridSnapshot, setHybridAccessMode, submitHybridMission } from "../src/lib/hybrid-control.ts";
 import { parseControlBody, readControlObject } from "../src/lib/control-service.ts";
 import { FULL_ACCESS_WORKER_REVISION, validateMissionResult, validateTaskGraph, runFullAccessMission } from "../src/lib/full-access-bridge.ts";
@@ -99,7 +101,7 @@ test("cancellation during old-worker replacement cannot start a new worker", { s
   const abort = new AbortController();
   child.exitCode = null;
   child.killed = false;
-  child.kill = () => { child.exitCode = 1; child.emit("exit", 1); };
+  child.kill = () => { abort.abort(); child.exitCode = 1; child.emit("exit", 1); return true; };
   const writes: string[] = [];
   child.stdin = { write: (data: string) => {
     writes.push(data);
@@ -110,7 +112,52 @@ test("cancellation during old-worker replacement cannot start a new worker", { s
   globals.jarvisFullAccessWorkerV1 = { revision: 1, child, pending: new Map(), buffer: "", stderr: "" };
   try {
     await assert.rejects(runFullAccessMission("fixture", abort.signal), /aborted during worker replacement/);
-    assert.deepEqual(writes.map(line => JSON.parse(line).action), ["stop"]);
+    assert.deepEqual(writes, [], "Idle replacement must not send stop and latch the shared Rust daemon");
+  } finally {
+    delete globals.jarvisFullAccessWorkerV1;
+  }
+});
+
+test("idle Windows worker replacement retires its launcher tree without stopping Rust", { skip: process.platform !== "win32" }, async t => {
+  const globals = globalThis as any;
+  const abort = new AbortController();
+  const child = new EventEmitter() as any;
+  child.pid = 12345; // Process execution is completely mocked below.
+  child.exitCode = null;
+  const writes: string[] = [];
+  child.stdin = { write: (value: string) => writes.push(value) };
+  const invocations: unknown[][] = [];
+  const mocked = t.mock.method(childProcess, "execFile", ((...args: any[]) => {
+    invocations.push(args.slice(0, 3));
+    abort.abort();
+    child.exitCode = 1;
+    child.emit("exit", 1);
+    args[3](null);
+    return child;
+  }) as typeof childProcess.execFile);
+  syncBuiltinESMExports();
+  globals.jarvisFullAccessWorkerV1 = { revision: 1, child, pending: new Map(), buffer: "", stderr: "" };
+  try {
+    await assert.rejects(runFullAccessMission("fixture", abort.signal), /aborted during worker replacement/);
+    assert.deepEqual(writes, []);
+    assert.deepEqual(invocations, [["taskkill.exe", ["/PID", "12345", "/T", "/F"], { windowsHide: true, timeout: 1500 }]]);
+  } finally {
+    mocked.mock.restore();
+    syncBuiltinESMExports();
+    delete globals.jarvisFullAccessWorkerV1;
+  }
+});
+
+test("worker upgrade cannot terminate or replace an active mission", { skip: process.platform !== "win32" }, async () => {
+  const globals = globalThis as any;
+  const child = new EventEmitter() as any;
+  child.exitCode = null;
+  child.kill = () => { throw new Error("active worker must not be killed"); };
+  child.stdin = { write: () => { throw new Error("active worker must not be stopped"); } };
+  globals.jarvisFullAccessWorkerV1 = { revision: 1, child, pending: new Map([["mission", {}]]), buffer: "", stderr: "" };
+  try {
+    await assert.rejects(runFullAccessMission("fixture"), /older worker still has an active mission/);
+    assert.equal(child.exitCode, null);
   } finally {
     delete globals.jarvisFullAccessWorkerV1;
   }
@@ -146,6 +193,8 @@ test("completion rejects missing evidence and retains actionable failure checkpo
     task_graph: [{ ...graph[0], verification_result: "VERIFIED" }] }).mission_completed, true);
   assert.throws(() => validateMissionResult({ ...result, task_graph: [{ id: 1 }] }), /task graph/);
   assert.throws(() => validateMissionResult({ ...result, execution_metrics: { model_calls: -1 } }), /metrics/);
+  assert.throws(() => validateMissionResult({ ...result, execution_metrics: { whatsapp_ordinal_fast_path: true } }), /metrics/);
+  assert.equal(validateMissionResult({ ...result, execution_metrics: { whatsapp_ordinal_fast_path: 1 } }).execution_metrics?.whatsapp_ordinal_fast_path, 1);
   assert.throws(() => validateMissionResult({ ok: false, result: "Provider timeout", task_id: "task-1-01234567" }), /Provider timeout.*checkpoint/);
 });
 

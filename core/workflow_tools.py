@@ -5,6 +5,8 @@ replays an uncertain mutation; durable step journals survive model context trimm
 """
 from __future__ import annotations
 
+from .execution_telemetry import input_not_dispatched
+
 import copy
 import json
 import time
@@ -36,6 +38,43 @@ class WorkflowExecutor:
     def _save(self) -> None:
         self.agent.orchestrator._persist(self.agent.orchestrator.current)
 
+    @staticmethod
+    def _validate_journal(workflow: dict, program: list[dict]) -> None:
+        records = workflow.get("steps")
+        if (not isinstance(records, list) or len(records) != len(program)
+                or any(not isinstance(record, dict) or record.get("id") != call["id"]
+                       for call, record in zip(program, records))):
+            raise ValueError("Workflow journal does not match its complete ordered program; no steps executed")
+        unfinished = False
+        states = {"pending", "running", "uncertain", "checkpoint_pending", "blocked", "completed"}
+        for call, record in zip(program, records):
+            state = record.get("status")
+            if state not in states or (state == "checkpoint_pending" and not call.get("checkpoint")):
+                raise ValueError("Workflow journal contains an invalid step state; no steps executed")
+            if unfinished and state != "pending":
+                raise ValueError("Workflow journal violates strict execution order; no steps executed")
+            unfinished = unfinished or state != "completed"
+
+    def _checkpoint(self, call: dict, record: dict, emit=None) -> str:
+        """Recover one transient read timeout without repeating the action it verifies."""
+        for attempt in range(2):
+            if self.agent._is_stopped():
+                return "CANCELLED: Emergency stop is active"
+            if attempt:
+                metrics = self.agent.orchestrator.current.metrics
+                metrics["checkpoint_read_retries"] = metrics.get("checkpoint_read_retries", 0) + 1
+            result = self._dispatch(call, emit)
+            record["checkpoint_attempts"] = record.get("checkpoint_attempts", 0) + 1
+            timed_out = result.startswith("ERROR") and any(
+                marker in result.casefold() for marker in ("timeouterror", "timed out waiting")
+            )
+            if not timed_out or attempt == 1:
+                return result
+            record["result"] = result[:4000]
+            record["recovery"] = "Retrying read-only checkpoint after timeout; delivered action is not repeated"
+            self._save()
+        raise AssertionError("Checkpoint retry loop must return")
+
     def _validate_call(self, call: dict, checkpoint: bool = False) -> None:
         name, args = call["tool"], call["arguments"]
         spec = self.agent.tools._tools.get(name)
@@ -54,7 +93,7 @@ class WorkflowExecutor:
         emit and emit(AgentEvent("tool", f"Workflow action: {name}", name))
         start = time.perf_counter()
         result = agent._execute_tool(name, copy.deepcopy(args), approved=agent.approval(name, args))
-        mutation = agent._is_mutation(name) and not result.startswith(("PERMISSION_DENIED", "ERROR: Observe the last"))
+        mutation = agent._is_mutation(name) and not result.startswith(("PERMISSION_DENIED", "ERROR: Observe the last")) and not input_not_dispatched(result)
         agent.orchestrator.record_tool(name, args, result, (time.perf_counter() - start) * 1000,
                                        agent.orchestrator.current.current_turn, mutation=mutation)
         if mutation and result.startswith("VERIFIED:"):
@@ -71,16 +110,24 @@ class WorkflowExecutor:
         ids = [step["id"] for step in steps]
         if len(ids) != len(set(ids)):
             raise ValueError("Workflow step IDs must be unique")
-        for step in steps:
-            self._validate_call(step)
-            if step.get("checkpoint"):
-                self._validate_call(step["checkpoint"], checkpoint=True)
         workflow = next((item for item in current.workflows if item["id"] == workflow_id), None)
         program = copy.deepcopy(steps)
         if workflow:
             if workflow["program"] != program:
                 raise ValueError("A workflow ID binds an immutable ordered program; use its original steps to resume")
-        else:
+            self._validate_journal(workflow, program)
+        # Completed effects and effects awaiting a readback will not be dispatched
+        # again. Validate only remaining calls, while still preflighting the whole
+        # remaining program before its first side effect.
+        for index, step in enumerate(program):
+            state = workflow["steps"][index]["status"] if workflow else "pending"
+            if state == "completed":
+                continue
+            if state != "checkpoint_pending":
+                self._validate_call(step)
+            if step.get("checkpoint"):
+                self._validate_call(step["checkpoint"], checkpoint=True)
+        if workflow is None:
             if len(current.workflows) >= 20 or sum(len(item["steps"]) for item in current.workflows) + len(steps) > 100:
                 raise ValueError("Mission workflow budget exceeded (20 workflows / 100 steps)")
             if len(json.dumps([item["program"] for item in current.workflows] + [program], ensure_ascii=False).encode("utf-8")) > 262144:
@@ -117,7 +164,7 @@ class WorkflowExecutor:
                 if not tool_succeeded(result):
                     # Even a handler exception may follow a delivered send/click.
                     # Only explicit policy rejection or a pure read is safe to retry.
-                    record["status"] = "blocked" if result.startswith("PERMISSION_DENIED") or not agent._is_mutation(call["tool"]) else "uncertain"
+                    record["status"] = "blocked" if result.startswith("PERMISSION_DENIED") or input_not_dispatched(result) or not agent._is_mutation(call["tool"]) else "uncertain"
                     workflow["status"] = "blocked"
                     self._save()
                     prefix = "BROWSER_ACTION_BLOCKED: " if result.startswith("BROWSER_ACTION_BLOCKED:") else "CANCELLED: " if result.startswith("CANCELLED") else "ERROR: "
@@ -133,7 +180,7 @@ class WorkflowExecutor:
                     record["status"] = "completed"
                 self._save()
             if record["status"] == "checkpoint_pending":
-                result = self._dispatch(call["checkpoint"], emit)
+                result = self._checkpoint(call["checkpoint"], record, emit)
                 record["result"] = result[:4000]
                 if not result.startswith("VERIFIED:"):
                     workflow["status"] = "blocked"
@@ -161,6 +208,7 @@ class WorkflowExecutor:
         workflow = next((item for item in current.workflows if item["id"] == workflow_id), None) if current else None
         if not workflow:
             raise ValueError("Unknown workflow")
+        self._validate_journal(workflow, workflow["program"])
         record = next((item for item in workflow["steps"] if item["id"] == step_id), None)
         if not record or record["status"] not in {"uncertain", "checkpoint_pending", "running"}:
             raise ValueError("Only an attempted uncertain step can be reviewed")

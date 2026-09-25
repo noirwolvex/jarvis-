@@ -68,6 +68,19 @@ class ChromeCdpTests(unittest.TestCase):
         })
         page.evaluate.assert_not_called()
 
+    def test_snapshot_metadata_is_owned_by_exact_page_and_bounds_tab_reads(self):
+        runtime, page = self.page_fixture()
+        other_pages = [MagicMock(url=f"https://example.com/{index}") for index in range(50)]
+        runtime._browser = SimpleNamespace(contexts=[SimpleNamespace(pages=[page, *other_pages])])
+        with patch("core.browser_semantic.run_browser_operation", return_value={"title": "Snapshot title"}):
+            result = runtime._cmd_page("semantic_snapshot")
+        self.assertEqual(result["tab"], {
+            "session_type": "real", "url": page.url, "title": "Snapshot title",
+        })
+        self.assertEqual(len(result["tabs"]), 40)
+        for omitted in other_pages[39:]:
+            omitted.title.assert_not_called()
+
     def test_legacy_input_fails_closed_on_challenge_or_unavailable_inspection(self):
         from core.browser_semantic import BrowserChallengeBlocked
         operations = [("click", {"selector": "Send"}),

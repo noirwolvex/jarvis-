@@ -1,6 +1,6 @@
 # Validation evidence — 2026-09-12
 
-This is the historical September 12 snapshot. See the [September 21 project review](project-review-2026-09-21.md) for current hybrid Python/Rust integration coverage, performance changes, regression results and remaining limitations.
+This is the historical September 12 snapshot. See the [September 24 device-control report](device-control-2026-09-24.md) for current typing repairs, Python/Rust integration coverage, performance changes, regression results and remaining limitations.
 
 Environment: Windows, Node.js 22.23.2, TypeScript 5.9.3, Next.js 16.3.5, Rust/Cargo 1.97.1, Python 3.14. These results cover the committed/reference source plus the current working-tree changes. They are not production certification or benchmark results.
 

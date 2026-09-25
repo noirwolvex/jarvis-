@@ -383,6 +383,8 @@ def discord_navigate_and_send(destination: str, text: str, server: str = "", *,
 
 
 def register_discord_tools(registry: ToolRegistry) -> None:
+    from .discord_navigation import register_discord_navigation_tools
+    register_discord_navigation_tools(registry)
     destination = {"type": "string", "minLength": 1, "maxLength": 200}
     server = {"type": "string", "maxLength": 200}
     message = {"type": "string", "minLength": 1, "maxLength": 4000}

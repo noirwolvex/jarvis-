@@ -10,6 +10,10 @@ class InputDeliveryError(RuntimeError):
     """Some input may have reached the application; retrying could duplicate it."""
 
 
+class InputNotDispatchedError(InputDeliveryError):
+    """The requested text/input was rejected before delivery; no write needs review."""
+
+
 # INPUT's union must include MOUSEINPUT even for keyboard events. A keyboard-only
 # union gives SendInput the wrong cbSize on 64-bit Windows (32 instead of 40).
 class _KEYBDINPUT(ctypes.Structure):

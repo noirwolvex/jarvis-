@@ -70,12 +70,72 @@ class BrowserRuntimeTests(unittest.TestCase):
         page = MagicMock()
         page.evaluate.return_value = {"inspection_available": True, "challenge_detected": False}
         locator = page.locator.return_value
-        locator.count.return_value = 1
-        locator.is_visible.return_value = locator.is_enabled.return_value = True
-        locator.click.side_effect = TimeoutError("delivery uncertain")
+        target = MagicMock()
+        locator.element_handles.return_value = [target]
+        target.is_visible.return_value = target.is_enabled.return_value = True
+        target.click.side_effect = TimeoutError("delivery uncertain")
         with self.assertRaisesRegex(TimeoutError, "uncertain"):
             run_browser_operation(page, "semantic_action", {"action": "click", "target": {"selector": "button"}}, lambda: None)
-        locator.click.assert_called_once()
+        target.click.assert_called_once()
+        target.dispose.assert_called_once()
+        locator.click.assert_not_called()
+
+    def test_wait_cancellation_during_successful_probe_is_not_reported_verified(self):
+        page = MagicMock()
+        page.evaluate.return_value = {"inspection_available": True, "challenge_detected": False}
+        locator = page.locator.return_value
+        locator.count.return_value = 1
+        locator.is_visible.return_value = True
+        cancelled = threading.Event()
+        locator.is_visible.side_effect = lambda: cancelled.set() or True
+        def check():
+            if cancelled.is_set():
+                raise RuntimeError("stopped during observation")
+        with self.assertRaisesRegex(RuntimeError, "stopped during observation"):
+            run_browser_operation(page, "wait_state", {"target": {"selector": "button"}}, check)
+
+    def test_stop_during_semantic_preflight_prevents_dispatch_and_disposes_handle(self):
+        page = MagicMock()
+        target = MagicMock()
+        page.locator.return_value.element_handles.return_value = [target]
+        target.is_visible.return_value = target.is_enabled.return_value = True
+        cancelled = threading.Event()
+        inspections = 0
+        def inspect(_script):
+            nonlocal inspections
+            inspections += 1
+            if inspections == 2:
+                cancelled.set()
+            return {"inspection_available": True, "challenge_detected": False}
+        page.evaluate.side_effect = inspect
+        def check():
+            if cancelled.is_set():
+                raise RuntimeError("stopped during preflight")
+        with self.assertRaisesRegex(RuntimeError, "stopped during preflight"):
+            run_browser_operation(page, "semantic_action", {"action": "click", "target": {"selector": "button"}}, check)
+        target.click.assert_not_called()
+        target.dispose.assert_called_once()
+
+    def test_snapshot_public_tool_dispatches_exactly_one_runtime_command(self):
+        from core.browser_semantic import browser_semantic_snapshot
+        with patch("core.chrome_cdp.chrome_page_operation", return_value={"title": "Fixture", "tab": {}, "tabs": []}) as operation, \
+                patch("core.chrome_cdp.chrome_current_tab") as current, patch("core.chrome_cdp.chrome_tabs") as tabs:
+            browser_semantic_snapshot()
+        operation.assert_called_once_with("semantic_snapshot", force=False, max_nodes=160, frame_selector="")
+        current.assert_not_called()
+        tabs.assert_not_called()
+
+    def test_legacy_wait_preserves_sixty_second_bound_without_real_sleep(self):
+        from core.advanced_tools import browser_wait
+        page = MagicMock()
+        page.evaluate.return_value = {"inspection_available": True, "challenge_detected": False}
+        page.locator.return_value.count.side_effect = [0, 1]
+        page.locator.return_value.is_visible.return_value = True
+        with patch("core.tools._PAGE", page), patch("core.browser_semantic.time.monotonic", side_effect=[0, 31, 31]), \
+                patch("core.browser_semantic.time.sleep") as sleep:
+            result = browser_wait("button", 60000)
+        self.assertTrue(result.startswith("VERIFIED:"))
+        sleep.assert_called_once_with(0.05)
 
 
 class BrowserSemanticFixtureTests(unittest.TestCase):
@@ -177,6 +237,56 @@ class BrowserSemanticFixtureTests(unittest.TestCase):
         self.assertEqual(self.page.locator("input").input_value(), "hello")
         with self.assertRaisesRegex(RuntimeError, "2 matches"):
             self.run_op("semantic_action", action="click", target={"role": "button", "name": "Send"})
+
+    def test_replaced_button_never_receives_input_from_previously_resolved_target(self):
+        from core.browser_semantic import require_clear_page
+        self.page.set_content('<button onclick="window.clicks=(window.clicks||0)+1">Send</button>')
+        inspections = 0
+        def inspect(page):
+            nonlocal inspections
+            inspections += 1
+            result = require_clear_page(page)
+            if inspections == 2:
+                page.evaluate("document.querySelector('button').outerHTML='<button onclick=\"window.clicks=99\">Send</button>'")
+            return result
+        with patch("core.browser_semantic.require_clear_page", side_effect=inspect):
+            with self.assertRaisesRegex(RuntimeError, "visible and enabled"):
+                self.run_op("semantic_action", action="click", target={"role": "button", "name": "Send"})
+        self.assertIsNone(self.page.evaluate("window.clicks"))
+
+    def test_replaced_input_does_not_supply_successful_readback(self):
+        self.page.set_content('<input aria-label="Draft" oninput="this.outerHTML=\'<input aria-label=&quot;Draft&quot; value=&quot;hello&quot;>\'">')
+        with self.assertRaisesRegex(RuntimeError, "readback did not match"):
+            self.run_op("semantic_action", action="fill", target={"role": "textbox", "name": "Draft"}, value="hello")
+        self.assertEqual(self.page.locator("input").input_value(), "hello")
+
+    def test_contenteditable_fill_uses_exact_connected_target_readback(self):
+        self.page.set_content('<div contenteditable="true" role="textbox" aria-label="Draft"></div>')
+        result = self.run_op("semantic_action", action="fill", target={"role": "textbox", "name": "Draft"}, value="hello مرحبا 😀")
+        self.assertTrue(result["verified"])
+        self.assertEqual(self.page.locator("div").inner_text(), "hello مرحبا 😀")
+
+    def test_iframe_wait_stops_when_parent_develops_human_challenge(self):
+        self.page.set_content('<iframe srcdoc="<body><button hidden>Ready</button></body>"></iframe>')
+        def load(_seconds):
+            self.page.evaluate("document.body.insertAdjacentHTML('beforeend', '<h1>Human verification</h1>')")
+            self.page.frames[1].locator("button").evaluate("el => el.hidden=false")
+        with patch("core.browser_semantic.time.sleep", side_effect=load):
+            with self.assertRaises(BrowserChallengeBlocked):
+                self.run_op("wait_state", target={"role": "button", "name": "Ready"}, frame_selector="iframe", timeout_ms=1000)
+
+    def test_ready_wait_only_inspects_challenge_once_and_legacy_wait_is_verified(self):
+        from core.advanced_tools import browser_wait
+        from core.browser_semantic import require_clear_page
+        self.page.set_content('<button>Ready</button>')
+        with patch("core.browser_semantic.require_clear_page", wraps=require_clear_page) as guard, \
+                patch("core.tools._PAGE", self.page):
+            self.assertTrue(browser_wait("button", 0).startswith("VERIFIED:"))
+        self.assertEqual(guard.call_count, 1)
+        self.page.set_content('<button>Ready</button><button>Ready</button>')
+        with patch("core.tools._PAGE", self.page):
+            with self.assertRaisesRegex(RuntimeError, "ambiguous"):
+                browser_wait("button", 0)
 
     def test_state_wait_returns_without_sleep_when_ready_and_recovers_loading(self):
         self.page.set_content('<button>Ready</button>')

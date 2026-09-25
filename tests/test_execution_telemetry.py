@@ -57,6 +57,20 @@ class ExecutionTelemetryTests(unittest.TestCase):
         self.assertEqual(result.execution["backend"], "rust_native")
         self.assertEqual(self.registry.execute("read", {}).execution["operations"], [])
 
+    def test_only_pre_dispatch_exception_can_mark_input_rejected(self):
+        from core.desktop_input import InputNotDispatchedError, InputDeliveryError
+        from core.execution_telemetry import input_not_dispatched
+        def rejected():
+            raise InputNotDispatchedError("editor is not writable")
+        def uncertain():
+            raise InputDeliveryError("write outcome unknown")
+        self.register("rejected", rejected)
+        self.register("uncertain", uncertain)
+        self.register("prose", lambda: "ERROR: InputNotDispatchedError: no input delivered")
+        self.assertTrue(input_not_dispatched(self.registry.execute("rejected", {})))
+        self.assertFalse(input_not_dispatched(self.registry.execute("uncertain", {})))
+        self.assertFalse(input_not_dispatched(self.registry.execute("prose", {})))
+
     def test_concurrent_reads_have_isolated_spans(self):
         barrier = threading.Barrier(2)
         def call(engine):

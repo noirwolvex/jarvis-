@@ -8,6 +8,7 @@ from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
 
 _DIRECT_CHAT_TYPES = {"ListItem", "TreeItem", "DataItem", "Button"}
+_FAST_CHAT_TYPES = ("ListItem", "TreeItem", "DataItem", "Edit")
 _ROW_CONTAINER_TYPES = _DIRECT_CHAT_TYPES | {"Custom", "Group", "Pane"}
 _EXCLUDED_NAMES = {
     "chats",
@@ -146,7 +147,7 @@ def _chat_row_from_control(
     return None
 
 
-def _chat_candidates(win: Any, position: int) -> list[Any]:
+def _chat_candidates(win: Any, position: int, *, controls: list[Any] | None = None) -> list[Any]:
     from .semantic_ui_tools import _control_name, _control_type, _descendants, _rect
 
     window_rect = win.rectangle()
@@ -159,7 +160,7 @@ def _chat_candidates(win: Any, position: int) -> list[Any]:
 
     preferred: list[Any] = []
     fallback: list[Any] = []
-    for control in _descendants(win):
+    for control in controls if controls is not None else _descendants(win):
         try:
             if not control.is_visible() or not control.is_enabled():
                 continue
@@ -206,7 +207,8 @@ def _chat_candidates(win: Any, position: int) -> list[Any]:
     return _dedupe_rows(combined, _rect)
 
 
-def _right_pane_signature(win: Any) -> tuple[tuple[str, str, tuple[int, int, int, int]], ...]:
+def _right_pane_signature(win: Any, *, controls: list[Any] | None = None,
+                          control_types: tuple[str, ...] = ()) -> tuple[tuple[str, str, tuple[int, int, int, int]], ...]:
     from .semantic_ui_tools import _control_name, _control_type, _descendants, _rect
 
     window_rect = win.rectangle()
@@ -214,7 +216,7 @@ def _right_pane_signature(win: Any) -> tuple[tuple[str, str, tuple[int, int, int
     right = int(window_rect.right)
     split = left + int(max(1, right - left) * 0.48)
     rows: list[tuple[str, str, tuple[int, int, int, int]]] = []
-    for control in _descendants(win):
+    for control in controls if controls is not None else _descendants(win, control_types=control_types, visible_only=True):
         try:
             if not control.is_visible():
                 continue
@@ -263,10 +265,13 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
     from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
     from .semantic_ui_tools import (
         _SNAPSHOTS,
+        _descendants,
         _focus_window,
         _guard_foreground,
+        _guard_native_target,
         _meta,
-        _rect,
+        _target_binding,
+        _validate_target,
         _window,
     )
     from .ui_state import wait_until
@@ -277,12 +282,22 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
     _guard_foreground(hwnd)
 
     candidates: list[Any] = []
+    controls: list[Any] = []
+    observation_types: tuple[str, ...] = _FAST_CHAT_TYPES
 
     def chats_ready() -> bool:
-        nonlocal candidates
+        nonlocal candidates, controls, observation_types
         check_cancelled()
         _guard_foreground(hwnd)
-        candidates = _chat_candidates(win, ordinal)
+        observation_types = _FAST_CHAT_TYPES
+        controls = _descendants(win, require_complete=True, control_types=observation_types, visible_only=True)
+        candidates = _chat_candidates(win, ordinal, controls=controls)
+        if len(candidates) < ordinal:
+            # Compatibility for versions exposing only Custom/Group rows. Ordinary
+            # native rows should not enumerate every ancestor, image and chat label.
+            observation_types = ()
+            controls = _descendants(win, require_complete=True)
+            candidates = _chat_candidates(win, ordinal, controls=controls)
         return len(candidates) >= ordinal
 
     try:
@@ -299,10 +314,6 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
 
     control = candidates[ordinal - 1]
     before = _meta(control)
-    rect = _rect(control)
-    x = (int(rect[0]) + int(rect[2])) // 2
-    y = (int(rect[1]) + int(rect[3])) // 2
-    before_signature = _right_pane_signature(win)
 
     # If WhatsApp already opened with the requested row selected, the requested postcondition
     # already holds. Avoid a redundant click and report that state explicitly.
@@ -327,7 +338,17 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
             ensure_ascii=False,
         )
 
+    # Reuse the same observation for candidate discovery and the before-state.
+    # Do not enumerate the entire chat history a second time before clicking.
+    binding = _target_binding(win, control)
+    rect = binding["control"]["rect"]
+    if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
+        raise InputDeliveryError("WhatsApp chat row geometry is unavailable; no input delivered")
+    x = (int(rect[0]) + int(rect[2])) // 2
+    y = (int(rect[1]) + int(rect[3])) // 2
+    before_signature = _right_pane_signature(win, controls=controls)
     client, status = _preflight()
+    _validate_target(win, control, binding)
     method = "semantic_ui"
     rust_result: dict[str, Any] | None = None
     if client is None:
@@ -338,10 +359,13 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
         method = _auto_mode_activate(control, hwnd)
     else:
         _guard_foreground(hwnd)
+        _guard_native_target(hwnd, status)
         try:
-            rust_result = client.click(x, y, status)
+            rust_result = client.click(x, y, status,
+                                       before_dispatch=lambda: _validate_target(win, control, binding))
         except RustEngineUnavailable:
             if native_engine_mode() == "auto":
+                _validate_target(win, control, binding)
                 method = _auto_mode_activate(control, hwnd)
             else:
                 raise
@@ -365,8 +389,12 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
         after = _meta(control)
         evidence["selected"] = after.get("selected") is True
         evidence["focused"] = after.get("focused") is True
-        evidence["view_changed"] = _right_pane_signature(win) != before_signature
-        return bool(evidence["selected"] or evidence["focused"] or evidence["view_changed"])
+        if evidence["selected"]:
+            return True
+        # Focus alone can mean only that the row received keyboard focus. When
+        # selection is unavailable, independently inspect the conversation view.
+        evidence["view_changed"] = _right_pane_signature(win, control_types=observation_types) != before_signature
+        return bool(evidence["view_changed"])
 
     try:
         wait_until(
@@ -376,7 +404,7 @@ def whatsapp_select_chat_native(position: int, title: str = "WhatsApp") -> str:
         )
     except TimeoutError as exc:
         raise InputDeliveryError(
-            "WhatsApp chat activation was dispatched but no independent selection/focus/conversation-view evidence appeared; "
+            "WhatsApp chat activation was dispatched but no independent selection/conversation-view evidence appeared; "
             "inspect the current WhatsApp state before retrying and do not replay the click blindly."
         ) from exc
 
@@ -408,7 +436,7 @@ def register_whatsapp_native_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "whatsapp_select_chat_native",
-            "Select the Nth visible WhatsApp chat from the left chat list. Waits for the chat list to become ready, resolves classic ListItem rows plus modern Custom/Group UIA rows from named descendants, dispatches the click through the Rust native-input daemon in strict Rust mode, and independently verifies selection/focus or conversation-view change before returning VERIFIED.",
+            "Select the Nth visible WhatsApp chat from the left chat list. Waits for the chat list to become ready, resolves classic ListItem rows plus modern Custom/Group UIA rows from named descendants, dispatches the click through the Rust native-input daemon in strict Rust mode, and independently verifies selection or conversation-view change before returning VERIFIED. Keyboard focus alone does not prove chat selection.",
             Risk.MEDIUM,
             {
                 "type": "object",

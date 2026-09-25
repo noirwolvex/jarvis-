@@ -5,12 +5,14 @@ import json
 import os
 import queue
 import shutil
+import socket
 import subprocess
 import sys
 import threading
 import time
 import urllib.request
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +20,8 @@ ROOT = Path(__file__).resolve().parents[1]
 RUST_MANIFEST = ROOT / "daemon" / "rust" / "Cargo.toml"
 RUNTIME_ROOT = ROOT / ".jarvis" / "rust-runtime"
 DASHBOARD_URL = "http://127.0.0.1:3000/"
+DASHBOARD_HOST = "127.0.0.1"
+DASHBOARD_PORT = 3000
 
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
@@ -33,6 +37,113 @@ def _tool(name: str) -> str:
     if not value:
         raise RuntimeError(f"Required executable is not on PATH: {name}")
     return value
+
+
+@contextmanager
+def _runtime_lock():
+    """Serialize launch and shutdown, including verify-live, across processes."""
+    RUNTIME_ROOT.parent.mkdir(parents=True, exist_ok=True)
+    # Never unlink this file: another process may already hold its open inode.
+    with (RUNTIME_ROOT.parent / "runtime.lock").open("a+b") as handle:
+        if handle.tell() == 0:
+            handle.write(b"\0")
+            handle.flush()
+        handle.seek(0)
+        try:
+            if os.name == "nt":
+                import msvcrt
+                msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            else:
+                import fcntl
+                fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError as exc:
+            raise RuntimeError(
+                "Another JARVIS runtime is already starting or running. "
+                "Use its dashboard, or stop it with Ctrl+C before starting another instance. "
+                "The existing Rust daemon was not changed."
+            ) from exc
+        try:
+            yield
+        finally:
+            handle.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+def _assert_dashboard_port_available() -> None:
+    """Fail before provisioning or replacing Rust when an older server is listening."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if os.name == "nt":
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            probe.bind((DASHBOARD_HOST, DASHBOARD_PORT))
+    except OSError as exc:
+        raise RuntimeError(
+            f"Dashboard address {DASHBOARD_HOST}:{DASHBOARD_PORT} is unavailable or already in use. "
+            f"Check the existing server at {DASHBOARD_URL} and stop it before restarting. "
+            "The existing Rust daemon was not changed."
+        ) from exc
+
+
+def _dashboard_command(kind: str) -> list[str]:
+    if kind not in {"dev", "start"}:
+        raise ValueError("Dashboard mode must be dev or start")
+    node = _tool("node")
+    candidates = (ROOT / "node_modules" / "next" / "dist" / "bin" / "next",
+                  ROOT / "apps" / "control-center" / "node_modules" / "next" / "dist" / "bin" / "next")
+    cli = next((path for path in candidates if path.is_file()), None)
+    if cli is None:
+        raise RuntimeError("Next.js is not installed; run npm ci from the JARVIS repository first")
+    # Pass argv directly to Node. No cmd.exe/npm.cmd shell or unquoted executable path.
+    return [node, str(cli), kind, "--hostname", DASHBOARD_HOST, "--port", str(DASHBOARD_PORT)]
+
+
+def _dashboard_owns_port(process: subprocess.Popen[Any]) -> bool:
+    import psutil
+    try:
+        parent = psutil.Process(process.pid)
+        owned = {parent.pid, *(child.pid for child in parent.children(recursive=True))}
+        return any(connection.pid in owned and connection.status == psutil.CONN_LISTEN
+                   and connection.laddr.port == DASHBOARD_PORT
+                   and connection.laddr.ip in {DASHBOARD_HOST, "0.0.0.0"}
+                   for connection in psutil.net_connections(kind="tcp"))
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return False
+    except psutil.AccessDenied as exc:
+        raise RuntimeError("Cannot verify ownership of the dashboard listener") from exc
+
+
+def _stop_dashboard(process: subprocess.Popen[Any] | None) -> None:
+    """Retire only the owned Next.js tree, including dev-server and Python children."""
+    if process is None:
+        return
+    import psutil
+    try:
+        parent = psutil.Process(process.pid)
+        # Avoid a recycled PID if the original child has already exited.
+        if process.poll() is not None:
+            return
+        owned = list(reversed(parent.children(recursive=True))) + [parent]
+    except (psutil.NoSuchProcess, psutil.ZombieProcess):
+        return
+    for child in owned:
+        try:
+            child.terminate()
+        except psutil.NoSuchProcess:
+            pass
+    _, alive = psutil.wait_procs(owned, timeout=3)
+    for child in alive:
+        try:
+            child.kill()
+        except psutil.NoSuchProcess:
+            pass
+    if alive:
+        _, alive = psutil.wait_procs(alive, timeout=3)
+        if alive:
+            raise RuntimeError("Could not stop the owned dashboard process tree")
+    process.wait(timeout=3)
 
 
 def _run_checked(command: list[str], env: dict[str, str] | None = None) -> None:
@@ -375,35 +486,45 @@ def _wait_dashboard(process: subprocess.Popen[Any]) -> None:
         if process.poll() is not None:
             raise RuntimeError(f"Dashboard exited during startup with code {process.returncode}")
         try:
-            with urllib.request.urlopen(DASHBOARD_URL, timeout=1.0) as response:
-                if 200 <= response.status < 500:
-                    print(f"JARVIS_DASHBOARD_READY {DASHBOARD_URL} status={response.status}", flush=True)
-                    return
-        except Exception as exc:
+            if _dashboard_owns_port(process):
+                with urllib.request.urlopen(DASHBOARD_URL, timeout=1.0) as response:
+                    if response.status == 200 and process.poll() is None and _dashboard_owns_port(process):
+                        print(f"JARVIS_DASHBOARD_READY {DASHBOARD_URL} status={response.status}", flush=True)
+                        return
+        except OSError as exc:
             last_error = exc
-            time.sleep(0.2)
+        time.sleep(0.2)
     raise RuntimeError(f"Dashboard did not become reachable: {last_error}")
 
 
 def run_dashboard(kind: str) -> int:
+    _require_windows()
+    command = _dashboard_command(kind)
+    with _runtime_lock():
+        _assert_dashboard_port_available()
+        return _run_dashboard(command)
+
+
+def _run_dashboard(command: list[str]) -> int:
     daemon: subprocess.Popen[Any] | None = None
     dashboard: subprocess.Popen[Any] | None = None
     daemon_log = None
     try:
         daemon, daemon_log, _session, env, _engine = bootstrap()
-        npm = _tool("npm.cmd" if os.name == "nt" else "npm")
-        script = "dev:dashboard" if kind == "dev" else "start:dashboard"
-        dashboard = subprocess.Popen([npm, "run", script], cwd=ROOT, env=env)
+        dashboard = subprocess.Popen(command, cwd=ROOT / "apps" / "control-center", env=env,
+                                     creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         _wait_dashboard(dashboard)
         print("JARVIS_RUNTIME_RUST_ACTIVE Python worker missions are configured fail-closed through Rust.", flush=True)
         return dashboard.wait()
     except KeyboardInterrupt:
         return 130
     finally:
-        _stop_process(dashboard)
-        _stop_process(daemon)
-        if daemon_log is not None:
-            daemon_log.close()
+        try:
+            _stop_dashboard(dashboard)
+        finally:
+            _stop_process(daemon)
+            if daemon_log is not None:
+                daemon_log.close()
 
 
 class _WorkerProtocolReader:
@@ -534,6 +655,12 @@ def _worker_probe(process: subprocess.Popen[str], reader: _WorkerProtocolReader,
 
 def live_qualify() -> int:
     _require_windows()
+    with _runtime_lock():
+        _assert_dashboard_port_available()
+        return _live_qualify()
+
+
+def _live_qualify() -> int:
     daemon: subprocess.Popen[Any] | None = None
     worker: subprocess.Popen[str] | None = None
     worker_reader: _WorkerProtocolReader | None = None
@@ -734,9 +861,13 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Start JARVIS X with strict Rust native execution")
     parser.add_argument("command", choices=("dev", "start", "verify-live"))
     args = parser.parse_args()
-    if args.command == "verify-live":
-        return live_qualify()
-    return run_dashboard(args.command)
+    try:
+        if args.command == "verify-live":
+            return live_qualify()
+        return run_dashboard(args.command)
+    except (RuntimeError, ValueError, OSError) as exc:
+        print(f"JARVIS_STARTUP_ERROR: {exc}", file=sys.stderr, flush=True)
+        return 1
 
 
 if __name__ == "__main__":

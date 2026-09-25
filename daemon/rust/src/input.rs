@@ -157,6 +157,28 @@ fn click_sequence(
     Ok(())
 }
 
+#[cfg(any(all(feature = "native", target_os = "windows"), test))]
+fn scroll_sequence(
+    frame: &Frame,
+    clicks: i32,
+    emergency: &EmergencyLatch,
+    mut locate: impl FnMut() -> Result<(i32, i32)>,
+    mut deliver: impl FnMut(i32) -> Result<()>,
+) -> Result<()> {
+    let mut remaining = clicks;
+    while remaining != 0 {
+        emergency.check()?;
+        let (x, y) = locate()?;
+        // The foreground window may span multiple displays. Wheel input belongs
+        // to the pointer's display, and cannot borrow another display's grant.
+        validate_frame(frame, x, y, emergency)?;
+        let chunk = scroll_chunk(remaining);
+        deliver(chunk)?;
+        remaining -= chunk;
+    }
+    Ok(())
+}
+
 fn validate_key_name(key: &str) -> Result<()> {
     let value = key.trim();
     if value.is_empty() || value.len() > 32 || value.contains('\0') {
@@ -273,7 +295,75 @@ mod unicode_tests {
 #[cfg(test)]
 mod pointer_target_tests {
     use super::*;
+    use crate::capture::Display;
     use std::cell::Cell;
+
+    fn scroll_frame() -> Frame {
+        Frame::new(
+            Display {
+                id: 7,
+                x: -10,
+                y: 0,
+                width: 10,
+                height: 10,
+                scale: 1.0,
+            },
+            vec![0; 400],
+            false,
+            400,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn scroll_outside_authorized_display_never_dispatches() {
+        let result = scroll_sequence(
+            &scroll_frame(),
+            64,
+            &EmergencyLatch::default(),
+            || Ok((0, 5)),
+            |_| panic!("wheel input must not cross the authorized display boundary"),
+        );
+        assert!(matches!(result, Err(Error::Denied(_))));
+    }
+
+    #[test]
+    fn scroll_crossing_display_boundary_stops_before_next_batch() {
+        let pointer = Cell::new((-1, 5));
+        let delivered = Cell::new(0);
+        let result = scroll_sequence(
+            &scroll_frame(),
+            64,
+            &EmergencyLatch::default(),
+            || Ok(pointer.get()),
+            |amount| {
+                delivered.set(delivered.get() + amount);
+                pointer.set((0, 5));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Denied(_))));
+        assert_eq!(delivered.get(), SCROLL_CHUNK_STEPS);
+    }
+
+    #[test]
+    fn scroll_emergency_stops_without_dispatching_remaining_batches() {
+        let emergency = EmergencyLatch::default();
+        let delivered = Cell::new(0);
+        let result = scroll_sequence(
+            &scroll_frame(),
+            64,
+            &emergency,
+            || Ok((-5, 5)),
+            |amount| {
+                delivered.set(delivered.get() + amount);
+                emergency.stop();
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Emergency)));
+        assert_eq!(delivered.get(), SCROLL_CHUNK_STEPS);
+    }
 
     #[test]
     fn pointer_drift_between_clicks_stops_without_repositioning_or_replaying() {
@@ -1090,17 +1180,16 @@ impl InputController for NativeInput {
         }
         verify_foreground(foreground)?;
         let (x, y) = windows_input::position()?;
-        let mut remaining = clicks;
-        while remaining != 0 {
-            emergency.check()?;
-            windows_input::verify_pointer_at(x, y, foreground)?;
-            let chunk = scroll_chunk(remaining);
-            // Keep emergency/foreground checks between bounded batches while reducing
-            // Win32 SendInput overhead for long scrolls. Positive means scroll up.
-            windows_input::scroll(chunk)?;
-            remaining -= chunk;
-        }
-        Ok(())
+        scroll_sequence(
+            frame,
+            clicks,
+            emergency,
+            || {
+                windows_input::verify_pointer_at(x, y, foreground)?;
+                Ok((x, y))
+            },
+            windows_input::scroll,
+        )
     }
 
     fn press_key(

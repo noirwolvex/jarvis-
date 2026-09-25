@@ -86,12 +86,35 @@ class FastMissionCompilerTests(unittest.TestCase):
         self.assertEqual(steps[3].arguments["query"], "Instagram")
         self.assertEqual(steps[4].arguments, {"query": "cats", "new_tab": False})
 
-    def test_mixed_chat_clause_requires_whatsapp_context(self) -> None:
+    def test_mixed_chat_clause_supports_discord_context(self) -> None:
+        steps = compile_fast_mission("open Discord, then press the first chat, then open Instagram")
+        self.assertEqual([s.tool for s in steps], ["launch_installed_app", "discord_select_chat", "launch_installed_app"])
+        self.assertEqual(steps[1].arguments, {"position": 1})
+
+    def test_mixed_chat_clause_requires_supported_chat_app(self) -> None:
         self.assertIsNone(
             compile_fast_mission(
-                "open Discord, then press the first chat, then open Instagram"
+                "open Calculator, then press the first chat, then open Instagram"
             )
         )
+
+    def test_reported_discord_mission_compiles_without_a_model(self):
+        for verb in ("PRESS", "CLICK", "OPEN", "SELECT"):
+            steps = compile_fast_mission(f"OPEN DISCORD AND {verb} THE FIRST CHAT")
+            self.assertEqual([s.tool for s in steps], ["launch_installed_app", "discord_select_chat"])
+            self.assertEqual(steps[1].arguments, {"position": 1})
+
+    def test_discord_ordered_draft_preserves_unicode_and_spacing(self):
+        steps = compile_fast_mission('open Discord and select the 2 chat after write "hello  \u0639\u0627\u0644\u0645"')
+        self.assertEqual([s.tool for s in steps], ["launch_installed_app", "discord_select_chat", "ui_type_native"])
+        self.assertEqual(steps[1].arguments, {"position": 2})
+        self.assertEqual(steps[-1].arguments, {"text": "hello  \u0639\u0627\u0644\u0645", "title": "Discord"})
+
+    def test_discord_unknown_or_out_of_range_work_is_not_dropped(self):
+        for tail in ("and send hi", "and delete it", "after write HI then send it"):
+            self.assertIsNone(compile_fast_mission("open Discord and press the first chat " + tail))
+        for ordinal in ("0", "21", "100"):
+            self.assertIsNone(compile_fast_mission(f"open Discord and press the {ordinal} chat"))
 
     def test_unknown_mixed_side_effect_falls_back_to_model(self) -> None:
         self.assertIsNone(

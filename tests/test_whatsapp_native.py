@@ -1,7 +1,8 @@
 from __future__ import annotations
 
+import json
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 import core.whatsapp_native as whatsapp
 
@@ -106,6 +107,121 @@ class WhatsAppNativeRowDiscoveryTests(unittest.TestCase):
             candidates = whatsapp._chat_candidates(win, 1)
 
         self.assertEqual(candidates, [row])
+
+
+class WhatsAppNativeExecutionTests(unittest.TestCase):
+    def setUp(self):
+        from core import semantic_ui_tools as ui
+        from test_semantic_ui_tools import _Control as Control, _Window as Window, _Info
+        self.ui = ui
+        self.row = Control("Fixture chat", "ListItem", top=130, bottom=200)
+        self.row.is_selected = Mock(return_value=False)
+        self.row.has_keyboard_focus = Mock(return_value=False)
+        self.row.iface_selection_item = Mock()
+        self.composer = Control("Type a message", "Edit", top=700, bottom=740)
+        self.composer._rect.left, self.composer._rect.right = 650, 1100
+        self.win = Window([self.row, self.composer])
+        self.win.element_info = _Info("WhatsApp", "Window")
+        self.win.rectangle = lambda: _Rect(0, 0, 1200, 800)
+        for index, control in enumerate([self.win, self.row, self.composer]):
+            control.element_info.runtime_id = [42, index]
+            control.element_info.process_id = 42
+        self.client = Mock()
+        self.status = {"foreground": {"hwnd": 123, "process_id": 42, "title": "WhatsApp"}}
+        self.dispatches = []
+        query_patch = patch.object(ui, "_descendants", wraps=ui._descendants)
+        self.query = query_patch.start()
+        self.addCleanup(query_patch.stop)
+
+        def click(x, y, status, *, before_dispatch):
+            before_dispatch()
+            self.dispatches.append((x, y))
+            self.row.is_selected.return_value = True
+            return {"executed": True, "simulation": False}
+        self.client.click.side_effect = click
+        ui._SNAPSHOTS.invalidate()
+        self.addCleanup(ui._SNAPSHOTS.invalidate)
+        for mocked in (
+            patch.object(ui, "_window", return_value=self.win),
+            patch.object(ui, "_foreground_hwnd", return_value=123),
+            patch("core.semantic_ui_guard._browser_block", return_value=None),
+            patch("core.rust_engine._preflight", return_value=(self.client, self.status)),
+            patch("core.rust_engine.native_engine_mode", return_value="rust"),
+        ):
+            mocked.start()
+            self.addCleanup(mocked.stop)
+
+    def test_selected_row_verifies_with_one_tree_scan_and_one_guarded_click(self):
+        result = whatsapp.whatsapp_select_chat_native(1)
+        data = json.loads(result.split(": ", 1)[1])
+        self.assertTrue(result.startswith("VERIFIED:"))
+        self.assertEqual(self.dispatches, [(250, 165)])
+        self.assertEqual(self.query.call_count, 1)
+        self.assertTrue(data["evidence"]["selected"])
+        self.assertFalse(data["evidence"]["view_changed"])
+
+    def test_already_selected_row_skips_click_and_conversation_scan(self):
+        self.row.is_selected.return_value = True
+        with patch.object(whatsapp, "_right_pane_signature") as signature:
+            result = whatsapp.whatsapp_select_chat_native(1)
+        self.assertIn("already_selected", result)
+        self.assertEqual(self.query.call_count, 1)
+        self.client.click.assert_not_called()
+        signature.assert_not_called()
+
+    def test_focus_alone_cannot_verify_conversation_selection_or_replay_click(self):
+        from core.desktop_input import InputDeliveryError
+        def click(x, y, status, *, before_dispatch):
+            before_dispatch()
+            self.row.has_keyboard_focus.return_value = True
+            return {"executed": True, "simulation": False}
+        self.client.click.side_effect = click
+        def bounded_wait(probe, **kwargs):
+            if not probe():
+                raise TimeoutError("fixture state did not change")
+        with patch("core.ui_state.wait_until", side_effect=bounded_wait):
+            with self.assertRaisesRegex(InputDeliveryError, "no independent"):
+                whatsapp.whatsapp_select_chat_native(1)
+        self.client.click.assert_called_once()
+        self.assertEqual(self.query.call_count, 2)
+
+    def test_missing_selection_pattern_uses_independent_conversation_change(self):
+        def click(x, y, status, *, before_dispatch):
+            before_dispatch()
+            self.composer.element_info.name = "Type a message to Fixture chat"
+            return {"executed": True, "simulation": False}
+        self.client.click.side_effect = click
+        result = whatsapp.whatsapp_select_chat_native(1)
+        data = json.loads(result.split(": ", 1)[1])
+        self.assertTrue(data["evidence"]["view_changed"])
+        self.assertFalse(data["evidence"]["selected"])
+        self.assertEqual(self.query.call_count, 2)
+        self.assertEqual([call.kwargs["control_types"] for call in self.query.call_args_list],
+                         [whatsapp._FAST_CHAT_TYPES, whatsapp._FAST_CHAT_TYPES])
+        self.client.click.assert_called_once()
+
+    def test_chat_row_moving_during_preflight_or_capture_never_receives_input(self):
+        from core.desktop_input import InputDeliveryError
+        for phase in ("preflight", "capture"):
+            with self.subTest(phase=phase):
+                self.client.reset_mock()
+                def move():
+                    self.row._rect.left += 10
+                def preflight():
+                    if phase == "preflight":
+                        move()
+                    return self.client, self.status
+                def click(x, y, status, *, before_dispatch):
+                    move()
+                    before_dispatch()
+                    self.dispatches.append((x, y))
+                self.client.click.side_effect = click
+                with patch("core.rust_engine._preflight", side_effect=preflight):
+                    with self.assertRaisesRegex(InputDeliveryError, "target changed"):
+                        whatsapp.whatsapp_select_chat_native(1)
+                self.assertEqual(self.dispatches, [])
+                if phase == "preflight":
+                    self.client.click.assert_not_called()
 
 
 if __name__ == "__main__":

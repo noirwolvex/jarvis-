@@ -17,6 +17,7 @@ from .browser_mission_contract import (
 )
 from .vision_tools import is_internal_vision_message, vision_followup_message
 from .desktop_observation import DesktopObservationGate
+from .execution_telemetry import input_not_dispatched
 from .orchestrator import tool_succeeded
 from .permissions import Risk
 
@@ -56,6 +57,18 @@ _DESKTOP_SCENE_MUTATION_TOOLS = {
     "desktop_double_click",
     "desktop_drag",
 }
+_DESKTOP_REFRESH_ERRORS = (
+    "ERROR: Fresh screen_observe required",
+    "ERROR: Fresh stable screen_observe required",
+    "ERROR: Foreground changed since observation",
+)
+_REJECTED_ACTION_ERRORS = (
+    "PERMISSION_DENIED",
+    "ERROR: Observe the last",
+    "ERROR: Foreground",
+    "ERROR: Desktop coordinate",
+    *_DESKTOP_REFRESH_ERRORS,
+)
 
 _BROWSER_SIGNALS = (
     "browser", "chrome", "google", "website", "web page", "http://", "https://", "new tab", "another tab", "search for",
@@ -175,6 +188,19 @@ class FullAccessJarvisAgent(JarvisAgent):
         def dispatch():
             if self._is_stopped():
                 return "CANCELLED: Emergency stop is active"
+            if name == "task_update_step" and arguments.get("status") == "completed" and self.orchestrator.current:
+                from .whatsapp_fast_mission import typing_completion_error
+                error = typing_completion_error(self.orchestrator.current, str(arguments.get("step_id", "")))
+                if error:
+                    return error
+            if name == "ui_type" and arguments.get("submit") is True:
+                # The fast compiler is a deterministic source of the requested
+                # write-only intent even when recovery later invokes the model.
+                from .whatsapp_fast_mission import compile_chat_typing_mission
+                current = self.orchestrator.current
+                program = compile_chat_typing_mission(current.goal) if current else None
+                if program and program[-1].tool == "ui_type_native":
+                    return "PERMISSION_DENIED: This mission requests typing an unsent draft. Use submit=false; sending was not requested."
             raw_input = name.startswith("desktop_") and name != "desktop_cursor"
             mutation = self._is_mutation(name)
             if mutation and name not in {"desktop_mouse_up", "desktop_key_up"} and self.orchestrator.needs_action_review():
@@ -235,6 +261,7 @@ class FullAccessJarvisAgent(JarvisAgent):
         return base + """
 
 Full Access execution profile:
+- A request to write or type text does not authorize sending it. Keep messages as unsent drafts unless the user explicitly requests submission; use submit=false and never add Enter or a Send click to a typing-only mission.
 - Create a task_plan before multi-step work, honor its dependencies, and update each step using observed evidence. Use task_status for progress. After any uncertain mutation, observe before retrying: never blindly repeat writes, clicks, sends, or commands.
 - When the user asks to continue or resume, use task_recall to recover the previous checkpoint, then inspect the live state and plan only remaining work. The current screen and file contents take precedence over saved evidence.
 - After an action without a VERIFIED result, inspect the resulting state and call task_verify with a specific claim and observed evidence before another mutation. For a failed outcome, record verified=false, recover, then re-verify the SAME claim to resolve it. Verification cannot be invented from intended actions.
@@ -296,6 +323,17 @@ Full Access execution profile:
         else:
             self.messages = [item for item in self.messages if not (is_internal_vision_message(item)
                 and "Live preview observed" in str(item["content"][0].get("text", "")))]
+
+    def _pause_for_native_stop(self, result: str, emit=None) -> str | None:
+        if not (str(result).startswith("ERROR") and
+                "RustEngineUnavailable: Rust daemon emergency stop is latched" in str(result)):
+            return None
+        message = ("Rust native input is emergency-stopped. Restart JARVIS to restore the native engine, "
+                   "then continue the mission. No further clicks or typing were attempted.")
+        self.orchestrator.finish("waiting_user", message)
+        self.memory.add("assistant", message)
+        emit and emit(AgentEvent("status", message))
+        return message
 
     def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None, *, resume_current: bool = False) -> str:
         self._active_emit = emit
@@ -419,7 +457,7 @@ Full Access execution profile:
                     duration_ms = (time.perf_counter() - started) * 1000.0
                     mutation = self._is_mutation(name)
                     # Rejected dispatches do not constitute a new action to review.
-                    mutation = mutation and not str(result).startswith(("PERMISSION_DENIED", "ERROR: Observe the last", "ERROR: Fresh screen", "ERROR: Foreground", "ERROR: Desktop coordinate"))
+                    mutation = mutation and not str(result).startswith(_REJECTED_ACTION_ERRORS) and not input_not_dispatched(result)
                     deferred_native_review = (
                         mutation
                         and name in _FOCUSED_NATIVE_BURST_TOOLS
@@ -443,6 +481,13 @@ Full Access execution profile:
                         self.orchestrator.verify(f"{name} reported its postcondition", True, result)
                     emit and emit(AgentEvent("tool_result", result, name))
                     self.messages.append({"role": "tool", "tool_call_id": call.id, "content": result})
+
+                    native_pause = self._pause_for_native_stop(result, emit)
+                    if native_pause:
+                        for remaining in tool_calls[tool_calls.index(call) + 1:]:
+                            self.messages.append({"role": "tool", "tool_call_id": remaining.id,
+                                                  "content": "CANCELLED: Rust native input is emergency-stopped; this action was not executed."})
+                        return native_pause
 
                     if name == "screen_observe":
                         followup = vision_followup_message(result)
@@ -496,8 +541,40 @@ Full Access execution profile:
                     hint = self.orchestrator.recovery_hint(result, name)
                     if hint:
                         emit and emit(AgentEvent("status", hint, name))
+                        if (
+                            name in _DESKTOP_OBSERVATION_REQUIRED_TOOLS
+                            and str(result).startswith(_DESKTOP_REFRESH_ERRORS)
+                            and not self._is_stopped()
+                        ):
+                            # The coordinate action was rejected before dispatch. Supply
+                            # fresh read-only evidence to the next decision, never replay
+                            # coordinates from the rejected call against a different scene.
+                            observed_started = time.perf_counter()
+                            observed = self._execute_tool("screen_observe", {}, approved=True)
+                            self.orchestrator.record_tool(
+                                "screen_observe", {}, observed,
+                                (time.perf_counter() - observed_started) * 1000.0,
+                                turn + 1,
+                            )
+                            emit and emit(AgentEvent("tool_result", observed, "screen_observe"))
+                            followup = vision_followup_message(observed)
+                            if followup is not None:
+                                vision_followups.append(followup)
+                            hint += (
+                                " JARVIS attempted a read-only screen refresh; the rejected input was not executed. "
+                                "Resolve the intended control from the refreshed state before choosing the next action. "
+                                "screen_observe result: " + observed
+                            )
+                            self.orchestrator.current.metrics["desktop_recovery_observations"] = (
+                                self.orchestrator.current.metrics.get("desktop_recovery_observations", 0) + 1
+                            )
                         if self.orchestrator.repeated_failure(name, arguments):
-                            result = f"Stopped after three failed {name} attempts without new successful observation. Inspect the saved checkpoint before continuing."
+                            result = f"Stopped after three failed {name} attempts without new successful observation. Last error: {result[:1200]} Inspect the saved checkpoint before continuing."
+                            for remaining in tool_calls[tool_calls.index(call) + 1:]:
+                                self.messages.append({"role": "tool", "tool_call_id": remaining.id,
+                                                      "content": "CANCELLED: Earlier ordered action exhausted recovery attempts; this action was not executed."})
+                            self.memory.add("assistant", result)
+                            emit and emit(AgentEvent("status", result, name))
                             self.orchestrator.finish("incomplete", result)
                             return result
                         # A later action may depend on the failed action even if it

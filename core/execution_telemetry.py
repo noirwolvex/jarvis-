@@ -26,6 +26,11 @@ class ToolResult(str):
         return str(self), self.execution
 
 
+def input_not_dispatched(result: str) -> bool:
+    """Only adapter exception metadata can certify a pre-input rejection, not prose."""
+    return isinstance(result, ToolResult) and result.execution.get("input_delivery") == "not_dispatched"
+
+
 def record_backend(engine: str, phase: str = "execute", detail: str = "") -> None:
     """Call at the actual adapter boundary, never infer a route from the tool name."""
     span = _SPAN.get()

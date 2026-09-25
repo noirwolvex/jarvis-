@@ -18,6 +18,28 @@ class WhatsAppOrdinalFastMissionTests(unittest.TestCase):
         )
         self.assertEqual(steps[1].arguments, {"position": 1})
 
+    def test_reported_after_write_phrase_compiles_unsent_without_model(self):
+        for connector in ("AFTER", "AFTER THAT", "AND AFTER THAT", "THEN", "AND THEN"):
+            with self.subTest(connector=connector):
+                steps = compile_whatsapp_ordinal_mission(
+                    f"OPEN WHATSAPP AND PRESS THE FIRST CHAT {connector} WRITE HI")
+                self.assertIsNotNone(steps)
+                self.assertEqual([step.tool for step in steps],
+                                 ["launch_installed_app", "whatsapp_select_chat_native", "ui_type_native"])
+                self.assertEqual(steps[-1].arguments, {"text": "HI", "title": "WhatsApp"})
+
+    def test_typing_payload_preserves_internal_spacing(self):
+        steps = compile_whatsapp_ordinal_mission('open WhatsApp and select the 1 chat after write "hello  world"')
+        self.assertIsNotNone(steps)
+        self.assertEqual(steps[1].arguments, {"position": 1})
+        self.assertEqual(steps[-1].arguments["text"], "hello  world")
+
+    def test_after_clause_does_not_swallow_send_or_other_requested_actions(self):
+        for tail in ("HI after send it", "HI and send it", "HI then open Discord"):
+            with self.subTest(tail=tail):
+                self.assertIsNone(compile_whatsapp_ordinal_mission(
+                    "open WhatsApp and select the first chat after write " + tail))
+
     def test_conversation_synonym_and_select_verb_compile(self) -> None:
         steps = compile_whatsapp_ordinal_mission(
             "open WhatsApp and select the second conversation"
@@ -45,7 +67,7 @@ class WhatsAppOrdinalFastMissionTests(unittest.TestCase):
         self.assertEqual(steps[0].arguments["query"].casefold(), "discord")
         self.assertEqual(steps[1].arguments["query"].casefold(), "whatsapp")
         self.assertEqual(steps[2].arguments, {"position": 2})
-        self.assertEqual(steps[3].arguments, {"text": "c"})
+        self.assertEqual(steps[3].arguments, {"text": "c", "title": "WhatsApp"})
 
     def test_numeric_and_named_ordinals_are_supported(self) -> None:
         for phrase, expected in (("third", 3), ("4th", 4), ("tenth", 10)):

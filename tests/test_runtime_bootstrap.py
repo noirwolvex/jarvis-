@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import io
+import socket
+import subprocess
+import sys
+import tempfile
+from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
@@ -9,6 +15,164 @@ from scripts import jarvis_runtime as runtime
 
 
 class RuntimeBootstrapTests(unittest.TestCase):
+    def test_busy_dashboard_port_rejects_before_bootstrap_for_both_entrypoints(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             socket.socket(socket.AF_INET, socket.SOCK_STREAM) as existing:
+            existing.bind(("127.0.0.1", 0))
+            existing.listen()
+            with patch.object(runtime, "RUNTIME_ROOT", Path(directory) / "rust-runtime"), \
+                 patch.object(runtime, "DASHBOARD_PORT", existing.getsockname()[1]), \
+                 patch.object(runtime, "_require_windows"), \
+                 patch.object(runtime, "_dashboard_command", return_value=["node", "next", "dev"]), \
+                 patch.object(runtime, "bootstrap") as bootstrap:
+                for launch in (lambda: runtime.run_dashboard("dev"), runtime.live_qualify):
+                    with self.assertRaisesRegex(RuntimeError, "already in use"):
+                        launch()
+                bootstrap.assert_not_called()
+
+    def test_runtime_lock_blocks_concurrent_launch_and_releases_after_error(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runtime, "RUNTIME_ROOT", Path(directory) / "rust-runtime"), \
+             patch.object(runtime, "_require_windows"), \
+             patch.object(runtime, "_dashboard_command", return_value=["node", "next", "dev"]), \
+             patch.object(runtime, "bootstrap") as bootstrap, \
+             patch.object(runtime, "_assert_dashboard_port_available") as port_check:
+            with self.assertRaisesRegex(ValueError, "fixture"):
+                with runtime._runtime_lock():
+                    for launch in (lambda: runtime.run_dashboard("dev"), runtime.live_qualify):
+                        with self.assertRaisesRegex(RuntimeError, "already starting or running"):
+                            launch()
+                    raise ValueError("fixture")
+            with runtime._runtime_lock():
+                pass
+            bootstrap.assert_not_called()
+            port_check.assert_not_called()
+
+    def test_runtime_lock_is_released_by_os_after_launcher_crash(self):
+        with tempfile.TemporaryDirectory() as directory:
+            source = (
+                "from scripts import jarvis_runtime as r; from pathlib import Path; import sys; "
+                "r.RUNTIME_ROOT=Path(sys.argv[1])/'rust-runtime'; "
+                "lock=r._runtime_lock(); lock.__enter__(); print('LOCKED',flush=True); sys.stdin.read()"
+            )
+            child = subprocess.Popen([sys.executable, "-u", "-c", source, directory], cwd=runtime.ROOT,
+                                     stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                     text=True, creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+            try:
+                self.assertEqual(child.stdout.readline().strip(), "LOCKED")
+                with patch.object(runtime, "RUNTIME_ROOT", Path(directory) / "rust-runtime"):
+                    with self.assertRaisesRegex(RuntimeError, "already starting"):
+                        with runtime._runtime_lock():
+                            pass
+                    child.kill()
+                    child.wait(timeout=5)
+                    with runtime._runtime_lock():
+                        pass
+            finally:
+                if child.poll() is None:
+                    child.kill()
+                child.communicate(timeout=5)
+
+    def test_dashboard_command_handles_spaces_without_batch_shell(self):
+        with tempfile.TemporaryDirectory(prefix="Jarvis project with spaces ") as directory:
+            root = Path(directory)
+            cli = root / "node_modules" / "next" / "dist" / "bin" / "next"
+            cli.parent.mkdir(parents=True)
+            cli.touch()
+            with patch.object(runtime, "ROOT", root), \
+                 patch.object(runtime, "_tool", return_value=r"C:\Program Files\nodejs\node.exe"):
+                command = runtime._dashboard_command("dev")
+            self.assertEqual(command, [r"C:\Program Files\nodejs\node.exe", str(cli), "dev",
+                                       "--hostname", "127.0.0.1", "--port", "3000"])
+            self.assertNotIn("cmd.exe", command)
+
+    def test_missing_dashboard_dependency_does_not_start_or_replace_rust(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runtime, "ROOT", Path(directory)), \
+             patch.object(runtime, "_require_windows"), \
+             patch.object(runtime, "_tool", return_value="node"), \
+             patch.object(runtime, "bootstrap") as bootstrap:
+            with self.assertRaisesRegex(RuntimeError, "npm ci"):
+                runtime.run_dashboard("dev")
+            bootstrap.assert_not_called()
+
+    def test_readiness_never_accepts_a_foreign_dashboard_response(self):
+        process = Mock(pid=1, returncode=1)
+        process.poll.side_effect = [None, 1]
+        output = io.StringIO()
+        with patch.object(runtime, "_dashboard_owns_port", return_value=False), \
+             patch.object(runtime.urllib.request, "urlopen") as request, \
+             patch.object(runtime.time, "sleep"), redirect_stdout(output):
+            with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+                runtime._wait_dashboard(process)
+        request.assert_not_called()
+        self.assertNotIn("READY", output.getvalue())
+
+    def test_readiness_requires_owned_listener_before_and_after_http_response(self):
+        process = Mock(pid=1, returncode=None)
+        process.poll.return_value = None
+        response = Mock(status=200)
+        with patch.object(runtime, "_dashboard_owns_port", return_value=True) as owns, \
+             patch.object(runtime.urllib.request, "urlopen") as request, redirect_stdout(io.StringIO()):
+            request.return_value.__enter__.return_value = response
+            runtime._wait_dashboard(process)
+        self.assertEqual(owns.call_count, 2)
+
+    def test_listener_replacement_during_http_probe_cannot_report_ready(self):
+        process = Mock(pid=1, returncode=1)
+        process.poll.side_effect = [None, None, 1]
+        output = io.StringIO()
+        with patch.object(runtime, "_dashboard_owns_port", side_effect=[True, False]), \
+             patch.object(runtime.urllib.request, "urlopen") as request, \
+             patch.object(runtime.time, "sleep"), redirect_stdout(output):
+            request.return_value.__enter__.return_value = Mock(status=200)
+            with self.assertRaisesRegex(RuntimeError, "exited during startup"):
+                runtime._wait_dashboard(process)
+        self.assertNotIn("READY", output.getvalue())
+
+    def test_listener_must_belong_to_launched_next_process_or_child(self):
+        parent = Mock(pid=41)
+        parent.children.return_value = [Mock(pid=42)]
+        for pid, ip, port, accepted in ((41, "127.0.0.1", 3000, True),
+                                        (42, "127.0.0.1", 3000, True),
+                                        (99, "127.0.0.1", 3000, False),
+                                        (41, "127.0.0.1", 4000, False)):
+            connection = SimpleNamespace(pid=pid, status="LISTEN", laddr=SimpleNamespace(ip=ip, port=port))
+            with self.subTest(pid=pid, port=port), patch("psutil.Process", return_value=parent), \
+                 patch("psutil.net_connections", return_value=[connection]):
+                self.assertEqual(runtime._dashboard_owns_port(Mock(pid=41)), accepted)
+
+    def test_dashboard_launch_is_direct_and_cleans_owned_tree_on_readiness_failure(self):
+        command = [r"C:\Program Files\nodejs\node.exe", "next", "dev"]
+        dashboard, daemon, log = Mock(), Mock(), Mock()
+        with patch.object(runtime, "bootstrap", return_value=(daemon, log, Path("session"), {}, {})), \
+             patch.object(runtime.subprocess, "Popen", return_value=dashboard) as spawn, \
+             patch.object(runtime, "_wait_dashboard", side_effect=RuntimeError("fixture startup failure")), \
+             patch.object(runtime, "_stop_dashboard") as stop_dashboard, \
+             patch.object(runtime, "_stop_process") as stop_process:
+            with self.assertRaisesRegex(RuntimeError, "fixture startup failure"):
+                runtime._run_dashboard(command)
+        self.assertEqual(spawn.call_args.args[0], command)
+        self.assertEqual(spawn.call_args.kwargs["cwd"], runtime.ROOT / "apps" / "control-center")
+        self.assertFalse(spawn.call_args.kwargs.get("shell", False))
+        stop_dashboard.assert_called_once_with(dashboard)
+        stop_process.assert_called_once_with(daemon)
+        log.close.assert_called_once()
+
+    def test_dashboard_shutdown_terminates_only_its_owned_process_tree(self):
+        dashboard = Mock(pid=41)
+        dashboard.poll.return_value = None
+        parent, child = Mock(pid=41), Mock(pid=42)
+        parent.children.return_value = [child]
+        with patch("psutil.Process", return_value=parent) as lookup, \
+             patch("psutil.wait_procs", return_value=([], [])) as wait:
+            runtime._stop_dashboard(dashboard)
+        lookup.assert_called_once_with(41)
+        parent.terminate.assert_called_once()
+        child.terminate.assert_called_once()
+        wait.assert_called_once_with([child, parent], timeout=3)
+        dashboard.wait.assert_called_once_with(timeout=3)
+
     def test_default_runtime_builds_and_selects_optimized_native_executable(self):
         with patch.dict(runtime.os.environ, {}, clear=True):
             self.assertIn("--release", runtime._daemon_build_command("cargo"))

@@ -12,7 +12,7 @@ from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
 from jsonschema import Draft202012Validator
 
-from .desktop_input import paste_text
+from .desktop_input import InputNotDispatchedError, paste_text
 from .execution_telemetry import record_backend
 from .permissions import PermissionEngine, Risk
 
@@ -51,6 +51,7 @@ class ToolRegistry:
         from .execution_telemetry import begin_execution, finish_execution
         span, token = begin_execution()
         dispatched = False
+        input_rejected = False
         result = "ERROR: Tool did not return a result"
         try:
             spec = self._tools.get(name)
@@ -67,10 +68,15 @@ class ToolRegistry:
                     self._validators[name].validate(arguments)
                     dispatched = True
                     result = spec.handler(**arguments)
+        except InputNotDispatchedError as exc:
+            input_rejected = True
+            result = f"ERROR executing {name}: {type(exc).__name__}: {exc}"
         except Exception as exc:
             result = f"ERROR executing {name}: {type(exc).__name__}: {exc}"
         finally:
             outcome = finish_execution(span, token, result, dispatched=dispatched)
+            if input_rejected:
+                outcome.execution["input_delivery"] = "not_dispatched"
         return outcome
 
     def _register_builtin_tools(self) -> None:

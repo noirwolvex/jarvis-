@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from .execution_telemetry import input_not_dispatched
+
 import re
 import time
 from typing import Any, Callable
@@ -32,7 +34,7 @@ def _ordinal(value: str) -> int:
     normalized = str(value).strip().casefold()
     if normalized in _ORDINALS:
         return _ORDINALS[normalized]
-    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)", normalized)
+    match = re.fullmatch(r"(\d{1,2})(?:st|nd|rd|th)?", normalized)
     if not match:
         raise ValueError("Unsupported chat ordinal")
     position = int(match.group(1))
@@ -43,12 +45,12 @@ def _ordinal(value: str) -> int:
 
 def compile_whatsapp_ordinal_mission(goal: str) -> list[FastStep] | None:
     """Compile app-chain -> Nth WhatsApp chat -> optional Rust type as one verified mission."""
-    text = re.sub(r"\s+", " ", str(goal or "")).strip()
+    text = str(goal or "").strip()
     if not text or len(text) > 8000 or "\0" in text:
         return None
 
     try:
-        base_text, trailing_type = _split_trailing_type(text)
+        base_text, trailing_type = _split_trailing_type(text, allow_after=True)
     except ValueError:
         return None
 
@@ -85,9 +87,9 @@ def compile_whatsapp_ordinal_mission(goal: str) -> list[FastStep] | None:
         steps.append(
             FastStep(
                 id=f"fast-{len(steps) + 1}",
-                description="Type the requested text into the selected WhatsApp chat through Rust",
+                description="Enter and verify the requested text in the selected WhatsApp chat",
                 tool="ui_type_native",
-                arguments={"text": trailing_type},
+                arguments={"text": trailing_type, "title": "WhatsApp"},
             )
         )
     return steps if len(steps) <= 32 else None
@@ -107,7 +109,7 @@ def execute_whatsapp_ordinal_mission(
 
     agent._mission_initial_tab_count = len(_chrome_tab_rows())
     agent.orchestrator.current.metrics["fast_compiled_steps"] = len(steps)
-    agent.orchestrator.current.metrics["whatsapp_ordinal_fast_path"] = True
+    agent.orchestrator.current.metrics["whatsapp_ordinal_fast_path"] = 1
     agent.workspace_context.save_snapshot()
     agent.messages.append({"role": "user", "content": goal})
     agent.memory.add("user", goal)
@@ -146,7 +148,7 @@ def execute_whatsapp_ordinal_mission(
         mutation = agent._is_mutation(step.tool)
         mutation = mutation and not str(result).startswith(
             ("PERMISSION_DENIED", "ERROR: Observe the last")
-        )
+        ) and not input_not_dispatched(result)
         agent.orchestrator.record_tool(
             step.tool,
             dict(step.arguments),
@@ -192,3 +194,36 @@ def execute_whatsapp_ordinal_mission(
     agent.memory.add("assistant", message)
     emit and emit(AgentEvent("status", message))
     return message
+
+
+def compile_chat_typing_mission(goal: str) -> list[FastStep] | None:
+    steps = compile_whatsapp_ordinal_mission(goal) or compile_fast_mission(goal)
+    if (steps and len(steps) >= 2 and steps[-1].tool == "ui_type_native"
+            and steps[-2].tool in {"whatsapp_select_chat_native", "discord_select_chat"}):
+        return steps
+    return None
+
+
+def typing_completion_error(task: Any, step_id: str) -> str | None:
+    """Keep a compiled write obligation intact when model recovery updates the plan."""
+    steps = compile_chat_typing_mission(task.goal)
+    if not steps or steps[-1].id != step_id:
+        return None
+    requested = steps[-1].arguments
+    selection = steps[-2]
+    selected_at = max((index for index, trace in enumerate(task.traces)
+                       if trace.name == selection.tool and trace.arguments == selection.arguments
+                       and trace.success and trace.result.startswith("VERIFIED:")), default=-1)
+    for index, trace in enumerate(task.traces):
+        if index <= selected_at or selected_at < 0 or index < task.last_mutation_index:
+            continue
+        arguments = trace.arguments
+        if (trace.name in {"ui_type", "ui_type_native"} and trace.success
+                and trace.result.startswith("VERIFIED:")
+                and arguments.get("text") == requested["text"]
+                and str(arguments.get("title", "")).casefold() == requested["title"].casefold()
+                and not arguments.get("submit") and not arguments.get("replace")):
+            return None
+    return ("ERROR: This typing step requires verified ui_type_native or ui_type readback "
+            f"for the exact requested text in title={requested['title']} after chat selection. "
+            "An existing draft or a task_verify claim cannot substitute for the requested write.")

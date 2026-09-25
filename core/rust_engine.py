@@ -10,7 +10,7 @@ import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Callable, Mapping
 
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
@@ -250,6 +250,7 @@ class RustDaemonClient:
         capability_id: str | None = None,
         *,
         mutating: bool = False,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         with self._lock:
             from .process_control import check_cancelled
@@ -264,6 +265,17 @@ class RustDaemonClient:
             if self._socket is None or self._sequence >= 240 or idle or aged:
                 self._connect()
             assert self._socket is not None
+            # Screen capture, connection renewal and lock acquisition can change the
+            # focused editor. Revalidate only after they finish and before allocating
+            # a wire sequence, so a rejected guard neither sends input nor loses sync.
+            if before_dispatch is not None:
+                try:
+                    before_dispatch()
+                except RustEngineUnavailable as exc:
+                    from .desktop_input import InputDeliveryError
+                    raise InputDeliveryError(
+                        f"Native input precondition failed before dispatch; automatic fallback refused: {exc}"
+                    ) from exc
             request_id = str(uuid.uuid4())
             self._sequence += 1
             request = {
@@ -433,7 +445,13 @@ class RustDaemonClient:
         display_id = int(selected.get("id", -1))
         if display_id < 0:
             raise RustEngineUnavailable("Rust daemon returned an invalid display id")
-        # Keyboard/wheel actions do not use frame pixels or coordinates. Reuse one
+        return self._cached_input_context_for_display(state, display_id)
+
+    def _cached_input_context_for_display(
+        self, state: dict[str, Any], display_id: int,
+    ) -> tuple[int, dict[str, Any], dict[str, Any]]:
+        foreground = self._foreground(state)
+        # Keyboard/wheel actions do not use frame pixels. Reuse one
         # very recent authorized frame across a tight input burst instead of forcing
         # xcap.capture_image() before every key. The daemon still checks the frame's
         # own <2s monotonic TTL and independently verifies HWND+PID before each action.
@@ -466,8 +484,9 @@ class RustDaemonClient:
         )
         return display_id, captured_foreground, frame
 
-    def click(self, x: int, y: int, status: dict[str, Any] | None = None) -> dict[str, Any]:
-        return self.click_button(x, y, "left", 1, status)
+    def click(self, x: int, y: int, status: dict[str, Any] | None = None, *,
+              before_dispatch: Callable[[], None] | None = None) -> dict[str, Any]:
+        return self.click_button(x, y, "left", 1, status, before_dispatch=before_dispatch)
 
     def click_button(
         self,
@@ -476,6 +495,8 @@ class RustDaemonClient:
         button: str = "left",
         clicks: int = 1,
         status: dict[str, Any] | None = None,
+        *,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         normalized = str(button).strip().casefold()
         if normalized not in {"left", "right", "middle"}:
@@ -501,6 +522,7 @@ class RustDaemonClient:
             },
             self.config.capability("input", display_id),
             mutating=True,
+            before_dispatch=before_dispatch,
         )
 
     def pointer_move(
@@ -585,7 +607,18 @@ class RustDaemonClient:
         amount = int(clicks)
         if not -1000 <= amount <= 1000:
             raise ValueError("Rust scroll requires -1000..1000 wheel steps")
-        display_id, foreground, frame = self._keyboard_input_context(status)
+        state = status or self.status()
+        pointer = state.get("pointer")
+        if not isinstance(pointer, dict) or any(type(pointer.get(axis)) is not int for axis in ("x", "y")):
+            raise ValueError("Rust scroll requires an observed physical pointer; no input dispatched")
+        try:
+            display_id = int(self._display_for_point(state, pointer["x"], pointer["y"])["id"])
+            capability = self.config.capability("input", display_id)
+            self.config.capability("observe", display_id)
+        except (RustEngineUnavailable, KeyError, TypeError, ValueError) as exc:
+            # Auto mode must not bypass a missing pointer/display grant via Python.
+            raise ValueError("Rust scroll pointer is outside the authorized displays; no input dispatched") from exc
+        display_id, foreground, frame = self._cached_input_context_for_display(state, display_id)
         return self._request(
             {
                 "kind": "scroll",
@@ -594,7 +627,7 @@ class RustDaemonClient:
                 "clicks": amount,
                 "foreground": foreground,
             },
-            self.config.capability("input", display_id),
+            capability,
             mutating=True,
         )
 
@@ -623,6 +656,8 @@ class RustDaemonClient:
         self,
         keys: list[str],
         status: dict[str, Any] | None = None,
+        *,
+        before_dispatch: Callable[[], None] | None = None,
     ) -> dict[str, Any]:
         values = [str(key).strip() for key in keys]
         if not 1 <= len(values) <= 8 or any(not key or len(key) > 32 or "\0" in key for key in values):
@@ -638,9 +673,13 @@ class RustDaemonClient:
             },
             self.config.capability("input", display_id),
             mutating=True,
+            before_dispatch=before_dispatch,
         )
 
-    def type_text(self, text: str, status: dict[str, Any] | None = None) -> dict[str, Any]:
+    def type_text(
+        self, text: str, status: dict[str, Any] | None = None, *,
+        before_dispatch: Callable[[], None] | None = None,
+    ) -> dict[str, Any]:
         if not text or len(text) > 4096 or "\0" in text:
             raise ValueError("Rust text input requires 1-4096 safe characters")
         display_id, foreground, frame = self._keyboard_input_context(status)
@@ -654,6 +693,7 @@ class RustDaemonClient:
             },
             self.config.capability("input", display_id),
             mutating=True,
+            before_dispatch=before_dispatch,
         )
 
 

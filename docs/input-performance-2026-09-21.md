@@ -1,5 +1,7 @@
 # Mouse, keyboard and interface execution follow-up
 
+Historical snapshot: the [September 23 follow-up](control-execution-2026-09-23.md) adds final native dispatch guards, pointer-display scroll authorization, guarded browser waits and updated validation. It also supersedes this report's emergency-connection saturation limitation.
+
 Date: September 21, 2026. This follows the [project review](project-review-2026-09-21.md) and preserves its uncommitted changes. The focus is the input delivery and semantic-target hot paths, rather than another architectural rewrite.
 
 ## Concrete changes

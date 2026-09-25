@@ -33,7 +33,7 @@ def select(rows: list[dict[str, Any]], target: str, control_type: str,
         raise ValueError("Ordinal selection requires an explicit control_type")
     visible = [row for row in rows if row.get("visible") is True and row.get("enabled") is True]
     matches = [row for row in visible if _matches(row, target, control_type)
-               and (not editable or row["type"] in {"Edit", "Document"})]
+               and (not editable or (row["type"] in {"Edit", "Document"} and row.get("editable") is not False))]
     for state in ("selected", "focused"):
         if state in selector:
             matches = [row for row in matches if row.get(state) is selector[state]]

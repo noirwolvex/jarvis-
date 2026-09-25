@@ -242,14 +242,15 @@ def _release_target(target: Any) -> None:
         target.dispose()
 
 
-def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], outer_page: Any = None) -> dict[str, Any]:
+def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], outer_page: Any = None,
+                timeout_limit_ms: int = 30000) -> dict[str, Any]:
     state = args.get("state", "visible")
     if state not in {"visible", "hidden", "enabled", "text"}:
         raise ValueError("Unsupported wait state")
     target = args["target"]
     if target.get("node_id"):
         raise ValueError("State waits require a stable semantic locator, not a snapshot node")
-    deadline = time.monotonic() + max(0, min(int(args.get("timeout_ms", 5000)), 30000)) / 1000
+    deadline = time.monotonic() + max(0, min(int(args.get("timeout_ms", 5000)), timeout_limit_ms, 60000)) / 1000
     polls = 0
     while True:
         check()
@@ -280,7 +281,8 @@ def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], oute
         time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
-def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check: Callable[[], None]) -> Any:
+def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check: Callable[[], None], *,
+                          wait_timeout_limit_ms: int = 30000) -> Any:
     check()
     if operation == "challenge_state":
         return challenge_state(page)
@@ -288,7 +290,7 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
         # The polling loop owns inspection. Avoid checking the same document twice
         # before a ready-state probe, and keep its parent protected on every poll.
         selected = _frame(page, str(args.get("frame_selector", "")))
-        return _wait_state(selected, args, check, outer_page=page)
+        return _wait_state(selected, args, check, outer_page=page, timeout_limit_ms=wait_timeout_limit_ms)
     require_clear_page(page)
     selected = _frame(page, str(args.get("frame_selector", "")))
     if selected is not page:
@@ -315,6 +317,7 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
             value = str(args.get("value", ""))
             if len(value) > 4096 or "\0" in value:
                 raise ValueError("Semantic action value must be at most 4096 characters without NUL")
+            check()
             # A single bounded action attempt. Timeouts may have side effects: never replay here.
             if action == "fill":
                 target.fill(value, timeout=1500)
@@ -334,6 +337,7 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
             require_clear_page(page)
             if selected is not page:
                 require_clear_page(selected)
+            check()
             if action in {"fill", "select", "check", "uncheck", "focus"} and not verified:
                 raise RuntimeError("Semantic action readback did not match; observe before any retry")
             return {"action": action, "executed": True, "verified": verified,
