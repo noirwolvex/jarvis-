@@ -201,12 +201,11 @@ class WhatsAppNativeExecutionTests(unittest.TestCase):
         self.client.click.assert_called_once()
 
     def test_modern_webview_discovery_uses_targeted_query_before_full_tree(self):
-        self.client.click.side_effect = lambda x, y, status, *, before_dispatch: (
-            before_dispatch(),
-            self.row.is_selected.return_value is not True and self.row.is_selected.return_value,
-            self.row.is_selected.configure_mock(return_value=True),
-            {"executed": True, "simulation": False},
-        )[-1]
+        def click(x, y, status, *, before_dispatch):
+            before_dispatch()
+            self.row.is_selected.return_value = True
+            return {"executed": True, "simulation": False}
+        self.client.click.side_effect = click
         with patch.object(self.ui, "_descendants", return_value=[self.row, self.composer]) as descendants, \
              patch.object(whatsapp, "_chat_candidates", side_effect=[[], [self.row]]) as candidates:
             result = whatsapp.whatsapp_select_chat_native(1)
