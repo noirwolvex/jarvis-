@@ -171,7 +171,11 @@ def run_agent_mission(
     observation_verified = read_only_observation_verified(goal, current)
 
     if current is not None and current.plan:
-        incomplete = [step.id for step in current.plan if step.status != "completed"]
+        resolver = getattr(agent.orchestrator, "step_is_resolved", None)
+        incomplete = [
+            step.id for step in current.plan
+            if not (resolver(step) if resolver is not None else step.status == "completed")
+        ]
     else:
         incomplete = []
     if current is not None:
