@@ -213,39 +213,45 @@ def interaction_type(
             ensure_ascii=False,
         )
 
-    # Prefer an exact editable UIA target. The native semantic path resolves/focuses
-    # the editor, validates its identity immediately before dispatch and verifies text.
-    if not submit and not replace:
-        _require_permission(registry, "ui_type_native")
-        from .native_ui_input import ui_type_native
-        try:
-            return ui_type_native(text=value, target=target, title=title, selector=selector)
-        except InputNotDispatchedError:
-            if not focused_fallback or target or selector is not None:
-                raise
-    else:
-        _require_permission(registry, "ui_type")
-        from .semantic_ui_tools import ui_type
-        try:
-            return ui_type(
-                text=value,
-                target=target,
-                title=title,
-                submit=bool(submit),
-                replace=bool(replace),
-                selector=selector,
-            )
-        except InputNotDispatchedError:
-            if submit or replace or not focused_fallback or target or selector is not None:
-                raise
+    # Desktop text follows the same deterministic priority as the rest of JARVIS:
+    # direct UI Automation write/readback first, then Rust-native caret-bound typing
+    # only when the exact editor exposes no writable Value pattern. Ambiguous targets,
+    # focus loss, draft changes and multiline safety errors never fall through.
+    _require_permission(registry, "ui_type")
+    from .semantic_ui_tools import ui_type
+    try:
+        return ui_type(
+            text=value,
+            target=target,
+            title=title,
+            submit=bool(submit),
+            replace=bool(replace),
+            selector=selector,
+        )
+    except InputNotDispatchedError as semantic_error:
+        semantic_text = str(semantic_error)
+        native_allowed = (
+            not submit
+            and not replace
+            and "no writable Value pattern" in semantic_text
+        )
+        if native_allowed:
+            _require_permission(registry, "ui_type_native")
+            from .native_ui_input import ui_type_native
+            try:
+                return ui_type_native(text=value, target=target, title=title, selector=selector)
+            except InputNotDispatchedError:
+                if not focused_fallback or target or selector is not None:
+                    raise
+        elif not focused_fallback or target or selector is not None or submit or replace:
+            raise
 
     # Last-resort keyboard path for custom/canvas apps with no useful accessibility
     # editor. It is opt-in, non-browser only, and types into the already-focused control.
     _require_permission(registry, "desktop_type")
     spec = registry._tools["desktop_type"]
     registry._validators["desktop_type"].validate({"text": value})
-    result = spec.handler(text=value)
-    return result
+    return spec.handler(text=value)
 
 
 def _browser_hotkey(keys: list[str]) -> str:
@@ -366,7 +372,7 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolSpec(
         "interaction_type",
-        "Universal verified text entry. Uses DOM fill/append in managed Chrome, semantic UIA + Rust-native typing in desktop apps, and only with focused_fallback=true may use guarded focused Rust input for custom controls with no editable UIA node. Typing does not submit unless submit=true.",
+        "Universal verified text entry. Uses DOM fill/append in managed Chrome. On desktop it prefers exact Windows UI Automation ValuePattern write/readback, falls back to Rust-native caret-bound typing only when that exact editor has no writable Value pattern, and only with focused_fallback=true may use guarded focused Rust input for custom controls with no editable UIA node. Typing does not submit unless submit=true.",
         Risk.MEDIUM,
         {"type": "object", "properties": {
             **common,
