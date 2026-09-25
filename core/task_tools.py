@@ -37,6 +37,21 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             rows.append(row)
         return json.dumps(rows, ensure_ascii=False)
 
+    def task_rewrite_recovery(
+        failed_step_id: str,
+        recovery_steps: list[dict[str, Any]] | list[str],
+        reason: str = "",
+    ) -> str:
+        rewrite = getattr(orchestrator, "rewrite_failed_step", None)
+        if rewrite is None:
+            raise ValueError("Adaptive graph rewriting is not available for this execution profile")
+        inserted = rewrite(failed_step_id, recovery_steps, reason)
+        return json.dumps({
+            "failed_step_id": failed_step_id,
+            "inserted_step_ids": [step.id for step in inserted],
+            "summary": orchestrator.summary(),
+        }, ensure_ascii=False)
+
     def task_update_step(step_id: str, status: str, result: str = "") -> str:
         normalized = str(status).strip().lower().replace("-", "_")
         if normalized == "in_progress":
@@ -136,7 +151,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                                 "required_state": {"type": "array", "items": {"type": "string"}},
                                 "execution_method": {
                                     "type": "string",
-                                    "enum": ["AUTO", "DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                    "enum": ["AUTO", "DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
                                 },
                                 "expected_result": {"type": "string"},
                                 "verification_method": {"type": "string"},
@@ -144,7 +159,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                                     "type": "array",
                                     "items": {
                                         "type": "string",
-                                        "enum": ["DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                        "enum": ["DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
                                     },
                                 },
                                 "retry_policy": {
@@ -167,6 +182,59 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             "additionalProperties": False,
         },
         task_plan,
+    ))
+    registry.register(ToolSpec(
+        "task_rewrite_recovery",
+        "Dynamically insert a bounded recovery subgraph after a failed/recovering plan step. The original failed node is preserved, completed work is not replayed, and direct downstream dependencies are rewired to the recovery tail. Use only after inspecting the live state and deciding on a safe alternate path.",
+        Risk.SAFE,
+        {
+            "type": "object",
+            "properties": {
+                "failed_step_id": {"type": "string"},
+                "reason": {"type": "string", "maxLength": 4000},
+                "recovery_steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "object", "properties": {
+                                "id": {"type": "string"},
+                                "description": {"type": "string"},
+                                "action": {"type": "string"},
+                                "required_state": {"type": "array", "items": {"type": "string"}},
+                                "execution_method": {
+                                    "type": "string",
+                                    "enum": ["AUTO", "DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                },
+                                "expected_result": {"type": "string"},
+                                "verification_method": {"type": "string"},
+                                "fallback_strategy": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                    },
+                                },
+                                "retry_policy": {
+                                    "type": "object",
+                                    "properties": {
+                                        "max_attempts": {"type": "integer", "minimum": 0, "maximum": 10},
+                                        "retry_only_if_safe": {"type": "boolean"},
+                                        "backoff_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+                                    },
+                                    "additionalProperties": False,
+                                },
+                            }, "required": ["description"], "additionalProperties": False},
+                        ]
+                    },
+                },
+            },
+            "required": ["failed_step_id", "recovery_steps"],
+            "additionalProperties": False,
+        },
+        task_rewrite_recovery,
     ))
     registry.register(ToolSpec(
         "task_update_step",
