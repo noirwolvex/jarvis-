@@ -33,6 +33,7 @@ _DESKTOP_FAST_EXPLICIT = {
 _DESKTOP_FAST_PREFIXES = (
     "task_",
     "ui_",
+    "interaction_",
     "discord_",
     "whatsapp_",
     "youtube_",
@@ -66,7 +67,7 @@ High-speed autonomous execution rules:
 - Minimize model round-trips. When the arguments for several safe semantic/direct tools are already known, emit the whole executable batch in the SAME assistant tool-call response. The runtime will execute them sequentially and preserve verification boundaries.
 - Do not spend a separate model turn merely restating a plan. When task_plan is useful, emit task_plan together with the first immediately executable verified actions whenever their arguments do not depend on unknown future observations.
 - Prefer deterministic compound tools that complete an entire user clause in one verified call. In particular, when the user asks for a Google search followed by the first result/link, use browser_google_search_first_result rather than separate search/read/click actions.
-- For labeled Windows desktop interfaces, use ui_activate/ui_type/ui_hotkey or ui_batch before any coordinate click. ui_inspect is the compact semantic observation path; screen_observe is a fallback for canvas/unlabeled/ambiguous visual state only.
+- For labeled Windows desktop interfaces, prefer interaction_type/interaction_click/interaction_hotkey so the universal router can choose UIA before Rust; use ui_batch when several same-app UIA actions are already known. ui_inspect is the compact semantic observation path; screen_observe is a fallback for canvas/unlabeled/ambiguous visual state only.
 - For a quick visual read without coordinate input, screen_observe(settle_ms=0) captures once and does not claim stability. Use its normal settling mode before raw coordinates. desktop_move honors duration in seconds (0 for immediate movement); smooth Rust movement and drags stay within the authorized display. Use an immediate move when repositioning across displays. Keep known input steps in existing bounded workflows and verify the important outcome before advancing.
 - Use ui_resolve and selector fields for ordinal, selected, focused, parent-scoped and adjacent controls. Ordinals require an explicit control_type and one unambiguous container. Actions always resolve fresh targets. Never invent coordinates from a stale snapshot. A delivered action is not a completed plan step; obtain verified tool readback or observe and call task_verify before task_update_step(completed).
 - If several already-known Windows UI actions are in the same application, combine them with ui_batch so focus/click/type/hotkey actions do not require a model turn between each one.

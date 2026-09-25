@@ -198,7 +198,7 @@ def execute_whatsapp_ordinal_mission(
 
 def compile_chat_typing_mission(goal: str) -> list[FastStep] | None:
     steps = compile_whatsapp_ordinal_mission(goal) or compile_fast_mission(goal)
-    if (steps and len(steps) >= 2 and steps[-1].tool == "ui_type_native"
+    if (steps and len(steps) >= 2 and steps[-1].tool in {"ui_type_native", "interaction_type"}
             and steps[-2].tool in {"whatsapp_select_chat_native", "discord_select_chat"}):
         return steps
     return None
@@ -218,12 +218,12 @@ def typing_completion_error(task: Any, step_id: str) -> str | None:
         if index <= selected_at or selected_at < 0 or index < task.last_mutation_index:
             continue
         arguments = trace.arguments
-        if (trace.name in {"ui_type", "ui_type_native"} and trace.success
+        if (trace.name in {"ui_type", "ui_type_native", "interaction_type"} and trace.success
                 and trace.result.startswith("VERIFIED:")
                 and arguments.get("text") == requested["text"]
                 and str(arguments.get("title", "")).casefold() == requested["title"].casefold()
                 and not arguments.get("submit") and not arguments.get("replace")):
             return None
-    return ("ERROR: This typing step requires verified ui_type_native or ui_type readback "
+    return ("ERROR: This typing step requires verified interaction_type, ui_type_native or ui_type readback "
             f"for the exact requested text in title={requested['title']} after chat selection. "
             "An existing draft or a task_verify claim cannot substitute for the requested write.")

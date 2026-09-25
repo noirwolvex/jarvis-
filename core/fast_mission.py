@@ -388,8 +388,8 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
                      FastStep("fast-2", f"Select and verify Discord chat position {position}",
                               "discord_select_chat", {"position": position})]
             if trailing_type is not None:
-                steps.append(FastStep("fast-3", "Enter and verify the requested Discord draft", "ui_type_native",
-                                      {"text": trailing_type, "title": "Discord"}))
+                steps.append(FastStep("fast-3", "Enter and verify the requested Discord draft", "interaction_type",
+                                      {"text": trailing_type, "title": "Discord", "surface": "desktop"}))
             return steps
         except ValueError:
             return None

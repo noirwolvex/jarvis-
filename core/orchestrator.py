@@ -294,6 +294,11 @@ class TaskOrchestrator:
             hints.append("Inspect the previous action with ui_inspect or screen_observe, then call task_verify with observed evidence (verified=false if it failed) before another mutation. Do not retry the blocked click.")
         if "verification requires successful observation" in low:
             hints.append("Call ui_inspect or screen_observe and obtain a successful fresh observation before task_verify. Rewording the claim or evidence does not create an observation; do not repeat task_verify until that read succeeds.")
+        if (
+            ("no input delivered" in low or "inputnotdispatchederror" in low)
+            and ("editor" in low or tool_name in {"ui_type_native", "ui_type", "interaction_type"})
+        ):
+            hints.append("The text input was rejected before dispatch, so there is no typed action to verify. Do not call task_verify for this rejection. Re-inspect the exact editor, then retry the requested unsent draft through interaction_type; preserve submit=false.")
         if "exact visible enabled matches" in low:
             hints.append("The semantic target is ambiguous. Use ui_inspect to identify the intended editable control, then retry semantic typing with its unique selector or control identity. Do not guess a coordinate to bypass target resolution.")
         if "foreground" in low or "focus" in low:
