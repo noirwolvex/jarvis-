@@ -39,14 +39,18 @@ class Control:
 def measure():
     counter = [0]
     window, control = Control(counter, [1]), Control(counter, [2])
-    # Exact pre-optimization binding implementation, retained only as a fixture baseline.
+    # Retain the older full metadata path as a read-count baseline, then compare
+    # only fields that are part of the dispatch binding contract.
+    full = ui._meta(control)
     before = {"window_hwnd": int(window.handle), "window_identity": ui._node_identity(window),
-              "window_process_id": ui._meta(window).get("process_id"), "identity": ui._node_identity(control),
-              "control": ui._meta(control), "generation": ui._SNAPSHOTS.generation}
+              "window_process_id": ui._process_id(window), "identity": ui._node_identity(control),
+              "control": {key: full[key] for key in
+                          ("name", "type", "automation_id", "rect", "enabled", "visible", "runtime_id", "process_id")},
+              "generation": ui._SNAPSHOTS.generation}
     old_reads = counter[0]
     counter[0] = 0
     after = ui._target_binding(window, control)
-    assert before == after, "Optimization must preserve binding evidence"
+    assert before == after, "Optimization must preserve every dispatch-binding field"
     return {"fixture_provider_reads_before": old_reads, "fixture_provider_reads_after": counter[0],
             "identical_binding": True, "live_uia_latency_measured": False}
 

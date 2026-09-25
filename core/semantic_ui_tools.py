@@ -115,7 +115,8 @@ def _process_id(control: Any) -> int | None:
         return None
 
 
-def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
+def _binding_meta(control: Any, index: int | None = None) -> dict[str, Any]:
+    """Read only properties that can invalidate an input binding."""
     row: dict[str, Any] = {
         "name": _control_name(control)[:512],
         "type": _control_type(control)[:80],
@@ -133,6 +134,16 @@ def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
     except Exception:
         row["visible"] = None
     try:
+        row["runtime_id"] = list(control.element_info.runtime_id)
+    except Exception:
+        row["runtime_id"] = None
+    row["process_id"] = _process_id(control)
+    return row
+
+
+def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
+    row = _binding_meta(control, index)
+    try:
         row["selected"] = bool(control.is_selected())
     except Exception:
         pass
@@ -140,11 +151,6 @@ def _meta(control: Any, index: int | None = None) -> dict[str, Any]:
         row["focused"] = bool(control.has_keyboard_focus())
     except Exception:
         row["focused"] = None
-    try:
-        row["runtime_id"] = list(control.element_info.runtime_id)
-    except Exception:
-        row["runtime_id"] = None
-    row["process_id"] = _process_id(control)
     return row
 
 
@@ -451,7 +457,7 @@ def _resolve_input_control(win: Any, target: str = "", control_type: str = "", e
 
 
 def _target_binding(win: Any, control: Any, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
-    metadata = _meta(control) if metadata is None else metadata
+    metadata = _binding_meta(control) if metadata is None else metadata
     runtime_id = metadata["runtime_id"]
     # Window labels, rectangles and selection/focus patterns are not part of this
     # binding. Avoid fetching that whole UIA record merely to obtain its PID.
