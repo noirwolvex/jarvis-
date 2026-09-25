@@ -270,6 +270,29 @@ def _browser_hotkey(keys: list[str]) -> str:
     return "+".join(result)
 
 
+def interaction_scroll(
+    delta_y: int,
+    *,
+    registry: ToolRegistry,
+    delta_x: int = 0,
+    surface: str = "auto",
+    frame_selector: str = "",
+) -> str:
+    route = _surface(surface)
+    if route == "browser":
+        _require_permission(registry, "browser_semantic_scroll")
+        from .browser_semantic import browser_semantic_scroll
+        return browser_semantic_scroll(delta_y=int(delta_y), delta_x=int(delta_x), frame_selector=frame_selector)
+
+    if int(delta_x) != 0:
+        raise ValueError("Desktop native scroll currently supports vertical wheel input only")
+    _require_permission(registry, "desktop_scroll")
+    spec = registry._tools["desktop_scroll"]
+    arguments = {"clicks": int(delta_y)}
+    registry._validators["desktop_scroll"].validate(arguments)
+    return spec.handler(**arguments)
+
+
 def interaction_hotkey(
     keys: list[str],
     *,
@@ -346,6 +369,17 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
             "focused_fallback": {"type": "boolean"},
         }, "required": ["text"], "additionalProperties": False},
         lambda text, **kwargs: interaction_type(text, registry=registry, **kwargs),
+    ))
+    registry.register(ToolSpec(
+        "interaction_scroll",
+        "Universal scroll. Managed Chrome scrolls the DOM viewport with challenge guards; desktop apps use guarded native wheel input. For nested/canvas regions that need pointer placement, use screen_observe first.",
+        Risk.MEDIUM,
+        {"type": "object", "properties": {
+            "delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000},
+            "delta_x": {"type": "integer", "minimum": -5000, "maximum": 5000},
+            "surface": common["surface"], "frame_selector": common["frame_selector"],
+        }, "required": ["delta_y"], "additionalProperties": False},
+        lambda delta_y, **kwargs: interaction_scroll(delta_y, registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(
         "interaction_hotkey",
