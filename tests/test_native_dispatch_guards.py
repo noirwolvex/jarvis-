@@ -34,6 +34,10 @@ class NativeDispatchGuardTests(unittest.TestCase):
             patch.object(ui, "_window", return_value=self.window),
             patch.object(ui, "_focus_window", return_value=123),
             patch.object(ui, "_guard_foreground"),
+            # ui_activate reports the actual post-action foreground. Keep this
+            # Windows API read inside the fixture so the native-dispatch contract
+            # remains testable on Linux CI without weakening production guards.
+            patch.object(ui, "_foreground_hwnd", return_value=123),
             patch("core.rust_engine._preflight", return_value=(self.client, self.status)),
             patch("core.rust_engine.native_engine_mode", return_value="auto"),
             patch.object(self.client, "_foreground_center", return_value=(300, 100)),
