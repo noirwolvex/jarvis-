@@ -13,6 +13,18 @@ class SemanticUiStateTests(unittest.TestCase):
         self.assertTrue(result["identical_binding"])
         self.assertLess(result["fixture_provider_reads_after"], result["fixture_provider_reads_before"])
 
+    def test_target_binding_skips_reporting_only_selected_and_focus_reads(self):
+        from scripts.benchmark_ui_target_binding import Control
+        from core import semantic_ui_tools as ui
+        window, control = Control([0], [1]), Control([0], [2])
+        control.is_selected = lambda: (_ for _ in ()).throw(AssertionError("selected is reporting-only"))
+        control.has_keyboard_focus = lambda: (_ for _ in ()).throw(AssertionError("focus is reporting-only"))
+        binding = ui._target_binding(window, control)
+        self.assertNotIn("selected", binding["control"])
+        self.assertNotIn("focused", binding["control"])
+        self.assertTrue({"name", "type", "automation_id", "rect", "enabled", "visible",
+                         "runtime_id", "process_id"}.issubset(binding["control"]))
+
     def test_changed_window_process_still_invalidates_optimized_target_binding(self):
         from scripts.benchmark_ui_target_binding import Control
         from core import semantic_ui_tools as ui
