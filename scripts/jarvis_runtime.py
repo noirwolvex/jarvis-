@@ -614,6 +614,10 @@ def run_dashboard(kind: str) -> int:
 
 
 def _run_dashboard(command: list[str]) -> int:
+    # Capture the npm/cmd lifecycle parent before any bootstrap work. If that wrapper
+    # is terminated by Windows' "Terminate batch job" path, this process can otherwise
+    # be orphaned while still holding the repository runtime lock.
+    parent_identity = _launcher_parent_identity()
     daemon: subprocess.Popen[Any] | None = None
     dashboard: subprocess.Popen[Any] | None = None
     daemon_log = None
@@ -624,7 +628,7 @@ def _run_dashboard(command: list[str]) -> int:
         _wait_dashboard(dashboard)
         _open_paired_dashboard(env)
         print("JARVIS_RUNTIME_RUST_ACTIVE Python worker missions are configured fail-closed through Rust.", flush=True)
-        return _wait_dashboard_or_parent_exit(dashboard, _launcher_parent_identity())
+        return _wait_dashboard_or_parent_exit(dashboard, parent_identity)
     except KeyboardInterrupt:
         return 130
     finally:
