@@ -351,6 +351,19 @@ class SemanticUiToolsTests(unittest.TestCase):
         self.assertTrue(result.startswith("VERIFIED:"))
         self.assertTrue(json.loads(result.split(": ", 1)[1])["composer_cleared"])
 
+    def test_composer_clear_skips_post_submit_conversation_scan(self):
+        editor = _Editor()
+        win = _Window([editor])
+        with patch.object(ui, "_window", return_value=win), patch.object(ui, "_focus_window", return_value=123), \
+             patch.object(ui, "_guard_foreground"), patch.object(ui, "_descendants", wraps=ui._descendants) as descendants, \
+             patch("core.tools._desktop_press", side_effect=lambda key: setattr(editor, "value", "")):
+            result = ui.ui_type("hello", target="Message", submit=True)
+        self.assertTrue(result.startswith("VERIFIED:"))
+        self.assertEqual(descendants.call_count, 2)  # target resolution + pre-submit echo baseline only
+        data = json.loads(result.split(": ", 1)[1])
+        self.assertTrue(data["composer_cleared"])
+        self.assertFalse(data["new_message_visible"])
+
     def test_existing_draft_is_not_silently_submitted(self):
         editor = _Editor("draft")
         with patch.object(ui, "_window", return_value=_Window([editor])), patch.object(ui, "_focus_window", return_value=123), \
