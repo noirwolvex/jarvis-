@@ -292,12 +292,15 @@ function startWorker(): WorkerState {
 
   const root = repoRoot();
   const python = process.env.JARVIS_PYTHON_EXECUTABLE?.trim() || "python";
+  // Browser pairing authority belongs only to the Node control plane. The execution
+  // worker receives daemon capabilities but never inherits the browser-session secret.
+  const { JARVIS_CONTROL_PAIRING_TOKEN: _pairingToken, ...workerEnv } = process.env;
   // Python and the checkout are runtime dependencies, not files to bundle into Next output.
   const child = spawn(/* turbopackIgnore: true */ python, ["-u", "-m", "core.full_access_worker"], {
     cwd: root,
     windowsHide: true,
     stdio: ["pipe", "pipe", "pipe"],
-    env: { ...process.env, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", JARVIS_ACCESS_MODE: "standard", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "true" },
+    env: { ...workerEnv, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", JARVIS_ACCESS_MODE: "standard", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "true" },
   });
   const state: WorkerState = { revision: FULL_ACCESS_WORKER_REVISION, child, buffer: "", stderr: "", pending: new Map() };
   globalState.jarvisFullAccessWorkerV1 = state;
