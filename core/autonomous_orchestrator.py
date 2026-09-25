@@ -478,7 +478,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
 
         failed = self.current.plan[failed_index]
         failed_phase = getattr(failed, "phase", "")
-        if failed.status not in {"failed", "running"} and failed_phase != "RECOVERING":
+        if failed.status != "failed" and failed_phase != "RECOVERING":
             raise ValueError("Only a failed or recovering step can be rewritten")
 
         existing_ids = {step.id for step in self.current.plan}
