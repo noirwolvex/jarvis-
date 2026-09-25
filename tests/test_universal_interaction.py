@@ -50,13 +50,15 @@ class UniversalInteractionTests(unittest.TestCase):
         self.assertTrue(result.startswith("DELIVERED:"))
         activate.assert_called_once_with(target="Save", title="Notepad", control_type="Button", selector=None)
 
-    def test_desktop_type_prefers_exact_native_semantic_editor(self):
+    def test_desktop_type_prefers_exact_uia_value_write_before_native(self):
         tools = registry()
         with patch("core.universal_interaction._browser_active", return_value=False), \
-             patch("core.native_ui_input.ui_type_native", return_value='VERIFIED: {"method":"rust_native_input"}') as native:
+             patch("core.semantic_ui_tools.ui_type", return_value='VERIFIED: {"method":"uia_value_pattern"}') as semantic, \
+             patch("core.native_ui_input.ui_type_native") as native:
             result = interaction_type("hello", registry=tools, target="Message", title="Any App")
         self.assertTrue(result.startswith("VERIFIED:"))
-        native.assert_called_once_with(text="hello", target="Message", title="Any App", selector=None)
+        semantic.assert_called_once_with(text="hello", target="Message", title="Any App", submit=False, replace=False, selector=None)
+        native.assert_not_called()
 
     def test_custom_desktop_editor_requires_explicit_focused_fallback(self):
         tools = registry()
@@ -67,6 +69,7 @@ class UniversalInteractionTests(unittest.TestCase):
             focused,
         ))
         with patch("core.universal_interaction._browser_active", return_value=False), \
+             patch("core.semantic_ui_tools.ui_type", side_effect=InputNotDispatchedError("Editor has no writable Value pattern; use guarded input to control selection explicitly")), \
              patch("core.native_ui_input.ui_type_native", side_effect=InputNotDispatchedError("no editor")):
             with self.assertRaises(InputNotDispatchedError):
                 interaction_type("hello", registry=tools)
@@ -83,10 +86,22 @@ class UniversalInteractionTests(unittest.TestCase):
             focused,
         ))
         with patch("core.universal_interaction._browser_active", return_value=False), \
-             patch("core.native_ui_input.ui_type_native", side_effect=InputNotDispatchedError("ambiguous")):
+             patch("core.semantic_ui_tools.ui_type", side_effect=InputNotDispatchedError("Target has 2 exact visible enabled matches")), \
+             patch("core.native_ui_input.ui_type_native") as native:
             with self.assertRaises(InputNotDispatchedError):
                 interaction_type("hello", registry=tools, target="Message", focused_fallback=True)
+        native.assert_not_called()
         focused.assert_not_called()
+
+    def test_missing_value_pattern_falls_back_once_to_native_semantic_typing(self):
+        tools = registry()
+        with patch("core.universal_interaction._browser_active", return_value=False), \
+             patch("core.semantic_ui_tools.ui_type", side_effect=InputNotDispatchedError("Editor has no writable Value pattern; use guarded input to control selection explicitly")) as semantic, \
+             patch("core.native_ui_input.ui_type_native", return_value='VERIFIED: {"method":"rust_native_input"}') as native:
+            result = interaction_type("hello", registry=tools, target="Message", title="Discord")
+        self.assertTrue(result.startswith("VERIFIED:"))
+        semantic.assert_called_once()
+        native.assert_called_once_with(text="hello", target="Message", title="Discord", selector=None)
 
     def test_browser_type_uses_verified_append_and_never_native_fallback(self):
         tools = registry()
