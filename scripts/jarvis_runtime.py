@@ -515,6 +515,96 @@ def _open_paired_dashboard(env: dict[str, str]) -> None:
     print("JARVIS_CONTROL_SESSION_OPENED Authenticated local browser session requested.", flush=True)
 
 
+def _launcher_parent_identity() -> tuple[int, float] | None:
+    """Capture the exact parent process so npm/cmd wrapper exit cannot orphan JARVIS."""
+    try:
+        import psutil
+        parent = psutil.Process(os.getppid())
+        return parent.pid, float(parent.create_time())
+    except Exception:
+        return None
+
+
+def _launcher_parent_alive(identity: tuple[int, float] | None) -> bool:
+    if identity is None:
+        return True
+    pid, created = identity
+    try:
+        import psutil
+        parent = psutil.Process(pid)
+        return parent.is_running() and abs(float(parent.create_time()) - created) < 0.001
+    except Exception:
+        return False
+
+
+def _wait_dashboard_or_parent_exit(process: subprocess.Popen[Any], parent_identity: tuple[int, float] | None) -> int:
+    """Wait for Next.js while also retiring an orphaned npm/cmd-launched runtime."""
+    while True:
+        try:
+            return process.wait(timeout=0.25)
+        except subprocess.TimeoutExpired:
+            if not _launcher_parent_alive(parent_identity):
+                print("JARVIS_RUNTIME_PARENT_EXITED Parent launcher ended; cleaning owned runtime.", flush=True)
+                return 130
+
+
+def _pump_tk_events(root: Any) -> None:
+    """Process delivered Win32 input before issuing the next independent probe."""
+    root.update_idletasks()
+    root.update()
+
+
+def _qualify_virtual_key_delivery(root: Any, entry: Any, tk: Any, worker: subprocess.Popen[str],
+                                  worker_reader: "_WorkerProtocolReader", display_id: int,
+                                  token: str) -> str:
+    # Verify Ctrl+A independently before Unicode replacement. SendInput returns after
+    # queueing input, while Tk processes that queue only when its event loop is pumped.
+    replacement = f"HOTKEY-{display_id}-{uuid.uuid4().hex[:8]}"
+    _worker_probe(worker, worker_reader, {"kind": "hotkey", "keys": ["ctrl", "a"]})
+    _pump_tk_events(root)
+    try:
+        selected_all = bool(entry.selection_present()) \
+            and int(entry.index(tk.SEL_FIRST)) == 0 \
+            and int(entry.index(tk.SEL_LAST)) == len(token)
+    except Exception:
+        selected_all = False
+    if not selected_all:
+        raise RuntimeError(
+            f"Independent hotkey verification failed on display {display_id}: "
+            "Ctrl+A did not select the complete prior text"
+        )
+
+    _worker_probe(worker, worker_reader, {"kind": "type_text", "text": replacement})
+    _pump_tk_events(root)
+    if entry.get() != replacement:
+        raise RuntimeError(
+            f"Independent hotkey replacement failed on display {display_id}: "
+            f"expected {replacement!r}, got {entry.get()!r}"
+        )
+
+    # Verify Home separately before the text probe for the same reason: the target
+    # UI must consume the VK message before the next Unicode input is dispatched.
+    prefix = "VK-"
+    _worker_probe(worker, worker_reader, {"kind": "press_key", "key": "home"})
+    _pump_tk_events(root)
+    try:
+        home_verified = int(entry.index(tk.INSERT)) == 0
+    except Exception:
+        home_verified = False
+    if not home_verified:
+        raise RuntimeError(
+            f"Independent key verification failed on display {display_id}: Home did not move the caret to the start"
+        )
+    _worker_probe(worker, worker_reader, {"kind": "type_text", "text": prefix})
+    _pump_tk_events(root)
+    if entry.get() != prefix + replacement:
+        raise RuntimeError(
+            f"Independent key text verification failed on display {display_id}: "
+            f"got {entry.get()!r}"
+        )
+    return replacement
+
+
 def run_dashboard(kind: str) -> int:
     _require_windows()
     command = _dashboard_command(kind)
@@ -534,7 +624,7 @@ def _run_dashboard(command: list[str]) -> int:
         _wait_dashboard(dashboard)
         _open_paired_dashboard(env)
         print("JARVIS_RUNTIME_RUST_ACTIVE Python worker missions are configured fail-closed through Rust.", flush=True)
-        return dashboard.wait()
+        return _wait_dashboard_or_parent_exit(dashboard, _launcher_parent_identity())
     except KeyboardInterrupt:
         return 130
     finally:
@@ -802,28 +892,12 @@ def _live_qualify() -> int:
                 )
 
             # Qualify real Virtual-Key delivery, not only Unicode text injection.
-            # Ctrl+A must select the existing token; the replacement proves that the
-            # modifier + letter shortcut was delivered atomically by the Rust daemon.
-            replacement = f"HOTKEY-{display_id}-{uuid.uuid4().hex[:8]}"
-            _worker_probe(worker, worker_reader, {"kind": "hotkey", "keys": ["ctrl", "a"]})
-            _worker_probe(worker, worker_reader, {"kind": "type_text", "text": replacement})
-            root.update()
-            if entry.get() != replacement:
-                raise RuntimeError(
-                    f"Independent hotkey verification failed on display {display_id}: "
-                    f"Ctrl+A did not select the prior text; got {entry.get()!r}"
-                )
-
-            # A standalone navigation key must also arrive through the VK path.
-            prefix = "VK-"
-            _worker_probe(worker, worker_reader, {"kind": "press_key", "key": "home"})
-            _worker_probe(worker, worker_reader, {"kind": "type_text", "text": prefix})
-            root.update()
-            if entry.get() != prefix + replacement:
-                raise RuntimeError(
-                    f"Independent key verification failed on display {display_id}: "
-                    f"Home did not move the caret to the start; got {entry.get()!r}"
-                )
+            # Pump Tk between independent probes so each Win32 message is consumed
+            # before the next action; otherwise a valid Ctrl+A/Home can be falsely
+            # reported as failed while the target UI thread is still paused here.
+            replacement = _qualify_virtual_key_delivery(
+                root, entry, tk, worker, worker_reader, display_id, token
+            )
 
             bx = button.winfo_rootx() + button.winfo_width() // 2
             by = button.winfo_rooty() + button.winfo_height() // 2
