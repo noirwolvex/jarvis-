@@ -14,7 +14,7 @@ export async function GET(request: Request) {
     const url = new URL(request.url);
     const token = url.searchParams.get("token") || "";
     verifyPairingToken(token);
-    const response = Response.redirect(new URL("/", request.url), 303);
+    const response = new Response(null, { status: 303, headers: { Location: new URL("/", request.url).toString() } });
     response.headers.set("Set-Cookie", controlSessionCookie(issueControlSession()));
     response.headers.set("Cache-Control", "no-store");
     response.headers.set("Referrer-Policy", "no-referrer");
