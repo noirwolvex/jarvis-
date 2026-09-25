@@ -450,8 +450,8 @@ def _resolve_input_control(win: Any, target: str = "", control_type: str = "", e
         raise InputNotDispatchedError(str(exc)) from exc
 
 
-def _target_binding(win: Any, control: Any) -> dict[str, Any]:
-    metadata = _meta(control)
+def _target_binding(win: Any, control: Any, metadata: dict[str, Any] | None = None) -> dict[str, Any]:
+    metadata = _meta(control) if metadata is None else metadata
     runtime_id = metadata["runtime_id"]
     # Window labels, rectangles and selection/focus patterns are not part of this
     # binding. Avoid fetching that whole UIA record merely to obtain its PID.
@@ -636,8 +636,8 @@ def ui_activate(target: str = "", title: str = "", control_type: str = "", selec
     win = _window(title)
     hwnd = _focus_window(win)
     control = _resolve_input_control(win, target, control_type, selector=selector)
-    binding = _target_binding(win, control)
     before = _meta(control)
+    binding = _target_binding(win, control, before)
     try:
         _validate_target(win, control, binding)
     except InputDeliveryError as exc:
