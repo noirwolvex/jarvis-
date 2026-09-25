@@ -973,8 +973,13 @@ def ui_type(
     def submitted():
         _guard_foreground(hwnd, state_guard)
         state["cleared"] = bool(expected) and _control_value(control) == ""
+        if state["cleared"]:
+            # Exact composer clear is already independent post-submit evidence.
+            # Avoid a full conversation-tree enumeration on the common path.
+            state["echoed"] = False
+            return True
         state["echoed"] = bool(wanted) and echo_count() > before_echoes
-        return state["cleared"] or state["echoed"]
+        return state["echoed"]
     try:
         wait_until(submitted, timeout=2.0, description="new post-submit evidence")
     except Exception as exc:
