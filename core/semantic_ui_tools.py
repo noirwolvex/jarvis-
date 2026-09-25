@@ -238,9 +238,16 @@ def _query_descendants(win: Any, control_types: tuple[str, ...], *, visible_only
                 if identity in seen:
                     continue
                 seen.add(identity)
-            # Only identity was cached; geometry, text, focus and all dispatch
-            # guards still read live properties from the returned provider.
-            yield backend.generic_wrapper_class(backend.element_info_class(element))
+            # Reuse this provider-cached identity only for read-time dedupe/counting.
+            # Geometry, text, focus, binding and every dispatch guard still read live
+            # properties from the returned provider immediately before mutation.
+            wrapper = backend.generic_wrapper_class(backend.element_info_class(element))
+            if runtime_id and isinstance(pid, int):
+                try:
+                    setattr(wrapper, "_jarvis_provider_identity", (pid, ("uia", *runtime_id)))
+                except Exception:
+                    pass
+            yield wrapper
         return
     for kind in control_types or (None,):
         check_cancelled()
@@ -276,8 +283,12 @@ def _read_descendants(win: Any, *, require_complete: bool = False,
     # Keep Document as well as Edit: WebView contenteditable uses either type.
     for control in _query_descendants(win, control_types, visible_only=visible_only):
         check_cancelled()
-        # Count native identities, not duplicate WebView wrapper instances.
-        identity = (_process_id(control), _node_identity(control))
+        # Count native identities, not duplicate WebView wrapper instances. UIA
+        # queries already cached RuntimeId + PID in the same provider traversal, so
+        # avoid two extra cross-process reads here when that exact snapshot is available.
+        identity = getattr(control, "_jarvis_provider_identity", None)
+        if identity is None:
+            identity = (_process_id(control), _node_identity(control))
         if identity in seen:
             continue
         seen.add(identity)
