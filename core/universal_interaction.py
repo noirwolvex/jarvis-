@@ -288,7 +288,9 @@ def interaction_scroll(
         raise ValueError("Desktop native scroll currently supports vertical wheel input only")
     _require_permission(registry, "desktop_scroll")
     spec = registry._tools["desktop_scroll"]
-    arguments = {"clicks": int(delta_y)}
+    # Browser/CSS coordinates use positive Y for downward movement; Windows wheel
+    # uses positive notches for upward movement. Normalize the public contract.
+    arguments = {"clicks": -int(delta_y)}
     registry._validators["desktop_scroll"].validate(arguments)
     return spec.handler(**arguments)
 
@@ -372,11 +374,11 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolSpec(
         "interaction_scroll",
-        "Universal scroll. Managed Chrome scrolls the DOM viewport with challenge guards; desktop apps use guarded native wheel input. For nested/canvas regions that need pointer placement, use screen_observe first.",
+        "Universal scroll where positive delta_y means down and negative means up. Managed Chrome scrolls the DOM viewport with challenge guards; desktop apps use guarded native wheel input. For nested/canvas regions that need pointer placement, use screen_observe first.",
         Risk.MEDIUM,
         {"type": "object", "properties": {
-            "delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000},
-            "delta_x": {"type": "integer", "minimum": -5000, "maximum": 5000},
+            "delta_y": {"type": "integer", "minimum": -1000, "maximum": 1000},
+            "delta_x": {"type": "integer", "minimum": -1000, "maximum": 1000},
             "surface": common["surface"], "frame_selector": common["frame_selector"],
         }, "required": ["delta_y"], "additionalProperties": False},
         lambda delta_y, **kwargs: interaction_scroll(delta_y, registry=registry, **kwargs),
