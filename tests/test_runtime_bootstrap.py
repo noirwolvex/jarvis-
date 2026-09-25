@@ -173,6 +173,32 @@ class RuntimeBootstrapTests(unittest.TestCase):
         wait.assert_called_once_with([child, parent], timeout=3)
         dashboard.wait.assert_called_once_with(timeout=3)
 
+    def test_runtime_env_generates_fresh_browser_pairing_secret(self):
+        with patch.dict(runtime.os.environ, {"JARVIS_CONTROL_PAIRING_TOKEN": "caller-fixed-token"}, clear=True):
+            first = runtime._runtime_env(Path("session-a"), {"0": "observe"}, {"0": "input"})
+            second = runtime._runtime_env(Path("session-b"), {"0": "observe"}, {"0": "input"})
+        self.assertEqual(first["JARVIS_CONTROL_MODE"], "hybrid")
+        self.assertGreaterEqual(len(first["JARVIS_CONTROL_PAIRING_TOKEN"]), 32)
+        self.assertNotEqual(first["JARVIS_CONTROL_PAIRING_TOKEN"], "caller-fixed-token")
+        self.assertNotEqual(first["JARVIS_CONTROL_PAIRING_TOKEN"], second["JARVIS_CONTROL_PAIRING_TOKEN"])
+
+    def test_pairing_opens_secret_url_without_printing_secret(self):
+        token = "runtime-pairing-secret-that-must-not-appear-in-output"
+        output = io.StringIO()
+        with patch.object(runtime.webbrowser, "open", return_value=True) as open_browser, \
+             redirect_stdout(output):
+            runtime._open_paired_dashboard({"JARVIS_CONTROL_PAIRING_TOKEN": token})
+        opened = open_browser.call_args.args[0]
+        self.assertIn("/api/pair?token=", opened)
+        self.assertIn(token, opened)
+        self.assertNotIn(token, output.getvalue())
+        self.assertIn("JARVIS_CONTROL_SESSION_OPENED", output.getvalue())
+
+    def test_pairing_fails_closed_when_browser_cannot_open(self):
+        with patch.object(runtime.webbrowser, "open", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "authenticated Control Center"):
+                runtime._open_paired_dashboard({"JARVIS_CONTROL_PAIRING_TOKEN": "x" * 40})
+
     def test_default_runtime_builds_and_selects_optimized_native_executable(self):
         with patch.dict(runtime.os.environ, {}, clear=True):
             self.assertIn("--release", runtime._daemon_build_command("cargo"))
