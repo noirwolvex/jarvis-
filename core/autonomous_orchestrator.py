@@ -21,6 +21,7 @@ from .orchestrator import (
 
 EXECUTION_PRIORITY = (
     "DIRECT",
+    "APP_API",
     "CDP_DOM",
     "UIA",
     "RUST_NATIVE",
@@ -86,8 +87,18 @@ class RecoveryRecord:
 
 
 @dataclass
+class GraphRewriteRecord:
+    failed_step_id: str
+    inserted_step_ids: list[str]
+    rewired_step_ids: list[str]
+    reason: str
+    created_at: float = field(default_factory=time.time)
+
+
+@dataclass
 class AutonomousTaskRun(TaskRun):
     recovery_history: list[RecoveryRecord] = field(default_factory=list)
+    graph_rewrites: list[GraphRewriteRecord] = field(default_factory=list)
 
 
 class ExecutionRouter:
@@ -109,6 +120,15 @@ class ExecutionRouter:
     def classify(cls, tool_name: str, arguments: dict[str, Any] | None = None) -> EngineRoute:
         name = str(tool_name or "").strip().casefold()
         args = arguments or {}
+
+        if name.startswith(("wincom_", "office_", "word_", "excel_", "powerpoint_")):
+            # Native application APIs should win over GUI automation when an explicit,
+            # permission-gated adapter exists. Recovery never calls arbitrary COM.
+            return EngineRoute(
+                "APP_API",
+                "WINCOM",
+                ("UIA", "RUST_NATIVE", "VISION", "COORDINATE"),
+            )
 
         if name.endswith("_native") or name.startswith("rust_") or name in {
             "whatsapp_select_chat_native",
@@ -428,6 +448,86 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                 break
         self._persist(self.current)
 
+    @_atomic_checkpoint
+    def rewrite_failed_step(
+        self,
+        failed_step_id: str,
+        recovery_steps: list[PlanStep | dict[str, Any] | str],
+        reason: str = "",
+    ) -> list[ExecutionPlanStep]:
+        """Insert a bounded recovery subgraph without deleting or replaying mission steps.
+
+        The failed node remains in the graph as historical evidence. Recovery nodes are
+        inserted immediately after it, inherit only its already-satisfied dependencies,
+        and downstream nodes that directly depended on the failed node are rewired to
+        the recovery tail. This allows the mission to continue after a verified alternate
+        path while preserving the original requested work and its failure record.
+        """
+        if not self.current:
+            raise ValueError("No active task")
+        if not recovery_steps or len(recovery_steps) > 8:
+            raise ValueError("Recovery rewrite requires 1-8 bounded steps")
+
+        try:
+            failed_index = next(
+                index for index, step in enumerate(self.current.plan)
+                if step.id == failed_step_id
+            )
+        except StopIteration as exc:
+            raise ValueError(f"Unknown failed plan step: {failed_step_id}") from exc
+
+        failed = self.current.plan[failed_index]
+        failed_phase = getattr(failed, "phase", "")
+        if failed.status not in {"failed", "running"} and failed_phase != "RECOVERING":
+            raise ValueError("Only a failed or recovering step can be rewritten")
+
+        existing_ids = {step.id for step in self.current.plan}
+        inserted: list[ExecutionPlanStep] = []
+        previous_id = ""
+        inherited_dependencies = list(failed.depends_on)
+
+        for offset, raw in enumerate(recovery_steps, start=1):
+            step = self._rich_step(raw, failed_index + offset + 1)
+            if step.id in existing_ids or any(item.id == step.id for item in inserted):
+                raise ValueError(f"Recovery step id already exists: {step.id}")
+            step.depends_on = [previous_id] if previous_id else inherited_dependencies
+            step.status = "pending"
+            step.result = ""
+            step.phase = "QUEUED"
+            step.execution_backend = ""
+            step.resolution_backend = ""
+            step.verification_result = ""
+            inserted.append(step)
+            previous_id = step.id
+
+        tail_id = inserted[-1].id
+        rewired: list[str] = []
+        for step in self.current.plan:
+            if step.id == failed_step_id or failed_step_id not in step.depends_on:
+                continue
+            next_dependencies: list[str] = []
+            for dependency in step.depends_on:
+                candidate = tail_id if dependency == failed_step_id else dependency
+                if candidate not in next_dependencies:
+                    next_dependencies.append(candidate)
+            step.depends_on = next_dependencies
+            rewired.append(step.id)
+
+        self.current.plan[failed_index + 1:failed_index + 1] = inserted
+        if isinstance(failed, ExecutionPlanStep):
+            failed.phase = "RECOVERING"
+
+        if isinstance(self.current, AutonomousTaskRun):
+            self.current.graph_rewrites.append(GraphRewriteRecord(
+                failed_step_id=failed_step_id,
+                inserted_step_ids=[step.id for step in inserted],
+                rewired_step_ids=rewired,
+                reason=str(reason)[:4000],
+            ))
+        self.current.metrics["graph_rewrites"] = self.current.metrics.get("graph_rewrites", 0) + 1
+        self._persist(self.current)
+        return inserted
+
     def live_task_graph(self) -> list[dict[str, Any]]:
         if not self.current:
             return []
@@ -484,6 +584,10 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                 asdict(item) if isinstance(item, RecoveryRecord) else dict(item)
                 for item in getattr(self.current, "recovery_history", [])
             ],
+            "graph_rewrites": [
+                asdict(item) if isinstance(item, GraphRewriteRecord) else dict(item)
+                for item in getattr(self.current, "graph_rewrites", [])
+            ],
         })
         return data
 
@@ -498,6 +602,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         payload["traces"] = [ExecutionToolTrace(**trace) for trace in payload.get("traces", [])]
         payload["verifications"] = [VerificationRecord(**item) for item in payload.get("verifications", [])]
         payload["recovery_history"] = [RecoveryRecord(**item) for item in payload.get("recovery_history", [])]
+        payload["graph_rewrites"] = [GraphRewriteRecord(**item) for item in payload.get("graph_rewrites", [])]
         restored = AutonomousTaskRun(**payload)
         if restored.status == "running" or restored.in_flight:
             restored.status = "interrupted"
