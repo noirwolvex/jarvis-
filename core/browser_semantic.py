@@ -132,7 +132,7 @@ _VERSION_JS = r"""() => {
 
 _ACTION_READBACK_JS = r"""(el, {action, value}) => {
   if (!el.isConnected) return false;
-  if (action === 'fill' || action === 'select')
+  if (action === 'fill' || action === 'append' || action === 'select')
     return ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null)) === value;
   if (action === 'check' || action === 'uncheck') return el.checked === (action === 'check');
   if (action === 'focus') return el === el.getRootNode().activeElement;
@@ -301,7 +301,7 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
         return result
     if operation == "semantic_action":
         action = args["action"]
-        if action not in {"click", "fill", "press", "select", "check", "uncheck", "focus"}:
+        if action not in {"click", "fill", "append", "press", "select", "check", "uncheck", "focus"}:
             raise ValueError("Unsupported semantic action")
         target = _target(selected, args["target"], str(args.get("expected_version", "")))
         try:
@@ -319,8 +319,18 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
                 raise ValueError("Semantic action value must be at most 4096 characters without NUL")
             check()
             # A single bounded action attempt. Timeouts may have side effects: never replay here.
+            readback_value = value
             if action == "fill":
                 target.fill(value, timeout=1500)
+            elif action == "append":
+                # Read the live field value only inside the trusted local action. Never
+                # expose it in the semantic snapshot or result. Re-fill exact old+new
+                # content so append is deterministic regardless of caret position.
+                before = target.evaluate("""el => ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null))""")
+                if not isinstance(before, str):
+                    raise RuntimeError("Target does not expose an appendable text value")
+                readback_value = before + value
+                target.fill(readback_value, timeout=1500)
             elif action == "select":
                 target.select_option(value=value, timeout=1500)
             elif action in {"check", "uncheck"}:
@@ -332,13 +342,13 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
             else:
                 target.click(timeout=1500)
             check()
-            verified = action in {"fill", "select", "check", "uncheck", "focus"} and bool(
-                target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": value}))
+            verified = action in {"fill", "append", "select", "check", "uncheck", "focus"} and bool(
+                target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": readback_value}))
             require_clear_page(page)
             if selected is not page:
                 require_clear_page(selected)
             check()
-            if action in {"fill", "select", "check", "uncheck", "focus"} and not verified:
+            if action in {"fill", "append", "select", "check", "uncheck", "focus"} and not verified:
                 raise RuntimeError("Semantic action readback did not match; observe before any retry")
             return {"action": action, "executed": True, "verified": verified,
                     "requires_result_verification": not verified, "url": page.url}
@@ -421,7 +431,7 @@ def register_browser_semantic_tools(registry: Any) -> None:
     frame = {"type": "string", "maxLength": 500}
     registry.register(ToolSpec("browser_semantic_snapshot", "Observe bounded visible DOM controls, parent hierarchy, focus, dialogs, page and tabs with a change version. Prefer these exact controls over coordinates; inspect an iframe explicitly when needed. Values are omitted.", Risk.LOW,
         {"type": "object", "properties": {"force": {"type": "boolean"}, "max_nodes": {"type": "integer", "minimum": 1, "maximum": 250}, "frame_selector": frame}, "additionalProperties": False}, browser_semantic_snapshot))
-    registry.register(ToolSpec("browser_semantic_action", "Execute one exact semantic action, refusing ambiguous or stale targets. Use snapshot node_id plus expected_version, or exact role/name. Fill/select/check/focus verify locally; click/press require important result verification. Never blindly repeat an uncertain click.", Risk.MEDIUM,
-        {"type": "object", "properties": {"action": {"enum": ["click", "fill", "press", "select", "check", "uncheck", "focus"]}, "target": target, "value": {"type": "string", "maxLength": 4096}, "expected_version": {"type": "string", "maxLength": 100}, "frame_selector": frame}, "required": ["action", "target"], "additionalProperties": False}, browser_semantic_action))
+    registry.register(ToolSpec("browser_semantic_action", "Execute one exact semantic action, refusing ambiguous or stale targets. Use snapshot node_id plus expected_version, or exact role/name. Fill/append/select/check/focus verify locally; click/press require important result verification. Append preserves the existing field value without exposing it. Never blindly repeat an uncertain click.", Risk.MEDIUM,
+        {"type": "object", "properties": {"action": {"enum": ["click", "fill", "append", "press", "select", "check", "uncheck", "focus"]}, "target": target, "value": {"type": "string", "maxLength": 4096}, "expected_version": {"type": "string", "maxLength": 100}, "frame_selector": frame}, "required": ["action", "target"], "additionalProperties": False}, browser_semantic_action))
     registry.register(ToolSpec("browser_wait_state", "Wait for an exact unique DOM target state with bounded 50ms polling and cancellation. Returns immediately when true; no fixed loading delay or action retries.", Risk.LOW,
         {"type": "object", "properties": {"target": target, "state": {"enum": ["visible", "hidden", "enabled", "text"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 1000}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))
