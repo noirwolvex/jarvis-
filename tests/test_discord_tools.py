@@ -281,7 +281,7 @@ class DiscordToolsTests(unittest.TestCase):
         document = Control("Discord", "Document", value=route)
         composer = Control("Message @bel", "Edit")
         win = Window(parent, child, document, composer)
-        win.element_info.name = "@bel - Discord"
+        win.element_info.name = "Friends - Discord"
         with desktop_fixture(win):
             context = discord._context(win, (42, 100, 1.0), "bel")
         self.assertIsNotNone(context)
@@ -295,7 +295,7 @@ class DiscordToolsTests(unittest.TestCase):
         document = Control("Discord", "Document", value=route)
         composer = Control("Message @bel", "Edit")
         win = Window(parent, child, document, composer)
-        win.element_info.name = "@bel - Discord"
+        win.element_info.name = "Friends - Discord"
         with desktop_fixture(win) as mocks:
             result = discord.discord_send_message("FDD", destination="bel")
         self.assertTrue(result.startswith("VERIFIED:"))
