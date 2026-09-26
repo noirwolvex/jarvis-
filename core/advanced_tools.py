@@ -58,9 +58,16 @@ def focus_window_advanced(title: str) -> str:
     user32 = ctypes.windll.user32
     user32.ShowWindow(hwnd, 9)
     user32.SetForegroundWindow(hwnd)
-    time.sleep(0.4)
-    if int(user32.GetForegroundWindow()) != hwnd:
-        raise RuntimeError(f"Could not focus window: {actual}")
+    from .ui_state import wait_until
+    try:
+        wait_until(
+            lambda: int(user32.GetForegroundWindow()) == hwnd,
+            timeout=0.8,
+            interval=0.02,
+            description=f"foreground window {actual!r}",
+        )
+    except TimeoutError as exc:
+        raise RuntimeError(f"Could not focus window: {actual}") from exc
     return f"VERIFIED: focused '{actual}' (hwnd={hwnd})"
 
 
@@ -71,9 +78,18 @@ def close_window(title: str) -> str:
         raise RuntimeError(f"No visible window matches: {title}")
     hwnd = candidates[0]
     ctypes.windll.user32.PostMessageW(hwnd, 0x0010, 0, 0)
-    time.sleep(0.4)
-    still_open = any(candidate == hwnd for candidate, _name, _pid in _windows())
-    return f"Window close requested for hwnd={hwnd}; closed={not still_open}"
+    from .ui_state import wait_until
+    try:
+        wait_until(
+            lambda: not any(candidate == hwnd for candidate, _name, _pid in _windows()),
+            timeout=0.8,
+            interval=0.04,
+            description=f"window {hwnd} to close",
+        )
+        closed = True
+    except TimeoutError:
+        closed = False
+    return f"Window close requested for hwnd={hwnd}; closed={closed}"
 
 
 def inspect_window(title: str = "") -> str:
