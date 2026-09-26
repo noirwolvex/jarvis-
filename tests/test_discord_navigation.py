@@ -67,7 +67,12 @@ class DiscordNavigationTests(unittest.TestCase):
         if control is self.home:
             self.window.children.append(self.scope)
         else:
-            self.document.value = control.value
+            for candidate in (self.first, self.second):
+                candidate.selected = False
+            if hasattr(control, "selected"):
+                control.selected = True
+            if control.value:
+                self.document.value = control.value
             self.composer.element_info.name = "Message @" + nav._destination_name(control)
         return "invoke"
 
@@ -96,6 +101,40 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertEqual(result["destination"], nav._destination_name(self.first))
         self.assertEqual(result["method"], "uia_invoke")
         self.invoke.assert_called_once_with(self.first, 42)
+
+    def test_route_less_list_item_dm_is_selected_and_verified_without_model_or_coordinates(self):
+        route_less = Element("RouteLess (direct message),", "ListItem", value="",
+                             rect=(20, 210, 240, 250))
+        self.window.children = [route_less, self.document, self.composer]
+
+        def navigate_route_less(control, hwnd=None):
+            route_less.selected = True
+            self.composer.element_info.name = "Message @" + nav._destination_name(control)
+            return "invoke"
+
+        self.invoke.side_effect = navigate_route_less
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["destination"], "RouteLess")
+        self.assertEqual(result["route"], "")
+        self.assertFalse(result["route_verified"])
+        self.assertTrue(result["selection_verified"])
+        self.assertTrue(result["composer_verified"])
+        self.assertEqual(result["method"], "uia_invoke")
+
+    def test_nested_duplicate_dm_row_and_anchor_count_as_one_ordinal(self):
+        parent = Element("Same (direct message),", "ListItem", value="",
+                         rect=(20, 210, 240, 250))
+        child = Element("Same (direct message),", "Hyperlink",
+                        value="https://discord.com/channels/@me/333",
+                        rect=(20, 210, 240, 250))
+        parent.children = [child]
+        later = Element("Later (direct message),", "ListItem", value="",
+                        rect=(20, 260, 240, 300))
+        controls = [parent, child, later]
+        rows = nav._conversation_links(self.window, None, controls)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][1], "/channels/@me/333")
+        self.assertIs(rows[1][0], later)
 
     def test_server_view_opens_dm_list_then_exact_chat(self):
         self.window.children.remove(self.scope)
