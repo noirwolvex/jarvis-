@@ -15,6 +15,7 @@ from core.universal_interaction import (
     interaction_inspect,
     interaction_scroll,
     interaction_type,
+    interaction_wait,
     register_universal_interaction_tools,
 )
 
@@ -152,6 +153,44 @@ class UniversalInteractionTests(unittest.TestCase):
             frame_selector="",
         )
         desktop.assert_not_called()
+
+    def test_universal_wait_routes_browser_and_desktop_without_input(self):
+        tools = registry()
+        with patch("core.universal_interaction._browser_active", return_value=True), \
+             patch("core.browser_semantic.browser_wait_state", return_value='VERIFIED: {"matched":true}') as browser_wait:
+            result = interaction_wait(
+                registry=tools,
+                target="Save",
+                control_type="button",
+                state="visible",
+            )
+        self.assertTrue(result.startswith("VERIFIED:"))
+        browser_wait.assert_called_once_with(
+            {"role": "button", "name": "Save"},
+            state="visible",
+            timeout_ms=1500,
+            text="",
+            frame_selector="",
+        )
+
+        with patch("core.universal_interaction._browser_active", return_value=False), \
+             patch("core.semantic_ui_tools.ui_wait_state", return_value='VERIFIED: {"state":"visible"}') as desktop_wait:
+            result = interaction_wait(
+                registry=tools,
+                target="Save",
+                control_type="Button",
+                state="visible",
+                title="Notepad",
+            )
+        self.assertTrue(result.startswith("VERIFIED:"))
+        desktop_wait.assert_called_once_with(
+            target="Save",
+            title="Notepad",
+            control_type="Button",
+            state="visible",
+            timeout_ms=1500,
+            selector=None,
+        )
 
     def test_browser_scroll_routes_to_guarded_dom_scroll(self):
         tools = registry()
