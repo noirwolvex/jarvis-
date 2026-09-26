@@ -52,25 +52,40 @@ def _dm_scope(controls: list[Any]):
                            "Direct Messages list", missing_ok=True)
 
 
-def _conversation_links(win: Any, scope: Any, controls: list[Any] | None = None) -> list[tuple[Any, str]]:
-    bounds = ui._rect(scope)
-    if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
-        raise InputNotDispatchedError("Discord Direct Messages scope geometry is unavailable")
+def _conversation_links(win: Any, scope: Any | None, controls: list[Any] | None = None) -> list[tuple[Any, str]]:
+    bounds: list[int] | None = None
+    if scope is not None:
+        bounds = ui._rect(scope)
+        if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            raise InputNotDispatchedError("Discord Direct Messages scope geometry is unavailable")
     links = []
     source = controls if controls is not None else ui._descendants(
-        scope, require_complete=True, control_types=("Hyperlink",), visible_only=True)
+        scope if scope is not None else win,
+        require_complete=True,
+        control_types=("Hyperlink",),
+        visible_only=True,
+    )
     for control in source:
         if ui._control_type(control) != "Hyperlink":
             continue
         route = _dm_route(ui._control_value(control))
         if not route or not discord._visible(control):
             continue
+        # A route by itself is not enough when the named list container is absent:
+        # Discord can expose unrelated links elsewhere in the WebView. Require the
+        # explicit accessible DM/group-DM label before treating a global link as a chat.
+        if scope is None:
+            try:
+                _destination_name(control)
+            except InputNotDispatchedError:
+                continue
         rect = ui._rect(control)
         if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
             raise InputNotDispatchedError("Discord chat geometry is unavailable; no chat input delivered")
-        x, y = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
-        if not (bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]):
-            continue
+        if bounds is not None:
+            x, y = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+            if not (bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]):
+                continue
         links.append((control, route))
     links.sort(key=lambda row: (ui._rect(row[0])[1], ui._rect(row[0])[0]))
     positions = [tuple(ui._rect(control)[:2]) for control, _ in links]
@@ -142,18 +157,32 @@ def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | No
     record_backend("windows_uia", phase="resolve", detail="Resolve Discord Direct Messages list and conversation links")
     controls = _snapshot(win)
     scope = _dm_scope(controls)
-    if scope is None:
-        home = discord._unique([c for c in controls if ui._control_type(c) == "TreeItem"
-                                and discord._normalized(ui._control_name(c)) == "direct messages"], "Direct Messages navigation")
-        _activate(win, home, guard)
-        def list_ready():
-            nonlocal controls
-            guard()
-            controls = _snapshot(win)
-            return _dm_scope(controls)
-        scope = wait_until(list_ready, timeout=3, description="Discord Direct Messages list")
+    links = _conversation_links(win, scope, controls) if scope is not None else _conversation_links(win, None, controls)
+    if scope is None and len(links) < position:
+        home = discord._unique(
+            [
+                c for c in controls
+                if ui._control_type(c) == "TreeItem"
+                and discord._normalized(ui._control_name(c)) == "direct messages"
+            ],
+            "Direct Messages navigation",
+            missing_ok=True,
+        )
+        if home is not None:
+            _activate(win, home, guard)
+            def list_ready():
+                nonlocal controls
+                guard()
+                controls = _snapshot(win)
+                discovered_scope = _dm_scope(controls)
+                if discovered_scope is not None:
+                    return discovered_scope
+                discovered_links = _conversation_links(win, None, controls)
+                return True if len(discovered_links) >= position else None
+            wait_until(list_ready, timeout=3, description="Discord Direct Messages conversations")
+            scope = _dm_scope(controls)
+            links = _conversation_links(win, scope, controls) if scope is not None else _conversation_links(win, None, controls)
     guard()
-    links = _conversation_links(win, scope, controls)
     if len(links) < position:
         raise RuntimeError(f"Discord exposes {len(links)} visible conversation links; cannot select chat {position}")
     control, route = links[position - 1]
