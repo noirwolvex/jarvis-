@@ -124,31 +124,46 @@ def _destination_name(control: Any) -> str:
     return match.group(1)
 
 
-def _opened(controls: list[Any], route: str | None, destination: str) -> bool:
+def _opened(win: Any, controls: list[Any], route: str | None, destination: str) -> bool:
     composer = discord._composer(controls, destination)
     if composer is None:
         return False
 
     if route is not None:
+        # For route-bearing rows, exact document route + exact composer are two
+        # independent postconditions. Discord may omit SelectionItem state entirely.
         documents = [
             c for c in controls
             if ui._control_type(c) == "Document" and ui._automation_id(c) == "RootWebArea"
         ]
         document = discord._unique(documents, "application document", missing_ok=True)
-        if document is None or _dm_route(ui._control_value(document)) != route:
-            return False
+        return bool(document is not None and _dm_route(ui._control_value(document)) == route)
 
     selected = []
+    matching_rows = []
     for control in controls:
-        if ui._control_type(control) not in _ROW_TYPES or not discord._selected(control):
+        if ui._control_type(control) not in _ROW_TYPES:
             continue
         try:
             current = _destination_name(control)
         except InputNotDispatchedError:
             continue
-        if discord._normalized(current) == discord._normalized(destination):
+        if discord._normalized(current) != discord._normalized(destination):
+            continue
+        matching_rows.append(control)
+        if discord._selected(control):
             selected.append(control)
-    return discord._unique(selected, "selected conversation", missing_ok=True) is not None
+    if discord._unique(selected, "selected conversation", missing_ok=True) is not None:
+        return True
+
+    # Route-less Electron builds can omit UIA selected state. Accept the active DM
+    # only when the row is unique and the native title independently agrees with
+    # the already-matched composer.
+    row = discord._unique(matching_rows, "active DM conversation", missing_ok=True)
+    return bool(
+        row is not None
+        and discord._window_dm_destination(win) == discord._channel_name(destination)
+    )
 
 
 def _activate(win: Any, control: Any, guard: Callable[[], None], route: str | None = None) -> str:
@@ -229,14 +244,14 @@ def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | No
     guard()
     # Independent current route + matching composer also make repeated requests
     # idempotent when Discord is already showing the requested conversation.
-    already_open = _opened(controls, route, destination)
+    already_open = _opened(win, controls, route, destination)
     method = "already_open"
     if not already_open:
         method = _activate(win, control, guard, route)
         def opened():
             guard()
             record_backend("windows_uia", phase="verify", detail="Exact Discord document route and matching composer")
-            return _opened(_verification_snapshot(win), route, destination)
+            return _opened(win, _verification_snapshot(win), route, destination)
         try:
             wait_until(opened, timeout=3, description="exact Discord conversation route and composer")
         except TimeoutError as exc:
