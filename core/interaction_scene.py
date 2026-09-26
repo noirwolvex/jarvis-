@@ -391,18 +391,21 @@ def interaction_resolve(
         }
     elif actual == "desktop":
         exact_token = _clean(selected_node.get("name")) or _clean(selected_node.get("automation_id"))
+        selector: dict[str, Any] = {}
         if ordinal is not None:
-            selector: dict[str, Any] = {"ordinal": ordinal}
-            if selected is not None:
-                selector["selected"] = selected
-            if focused is not None:
-                selector["focused"] = focused
+            selector["ordinal"] = ordinal
+        if selected is not None:
+            selector["selected"] = selected
+        if focused is not None:
+            selector["focused"] = focused
+        if selector:
             target = {
                 "surface": "desktop",
-                "target": query or exact_token,
                 "control_type": role or selected_node.get("role", ""),
                 "selector": selector,
             }
+            if query:
+                target["target"] = query
         elif exact_token:
             target = {
                 "surface": "desktop",
