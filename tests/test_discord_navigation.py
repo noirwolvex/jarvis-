@@ -260,7 +260,16 @@ class DiscordNavigationTests(unittest.TestCase):
         fixture.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object"})
         fixture.agent.client.chat.completions.create.side_effect = RuntimeError("429 quota exhausted")
 
-        with patch.object(nav.discord, "ui_type", return_value='VERIFIED: {"submitted":true}'), \
+        def discord_descendants(root, **kwargs):
+            kinds = kwargs.get("control_types")
+            return [
+                control for control in root.descendants()
+                if not kinds or control.element_info.control_type in kinds
+            ]
+
+        with patch.object(nav.discord, "_focus_window", return_value=42), \
+             patch.object(nav.discord, "_descendants", side_effect=discord_descendants), \
+             patch.object(nav.discord, "ui_type", return_value='VERIFIED: {"submitted":true}'), \
              patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
             result = fixture.agent.run(
                 "OPEN DISCORD AND PRESS THE FIRST CHAT THEN WRITE FDD THEN SEND IT"
