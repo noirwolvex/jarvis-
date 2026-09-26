@@ -54,6 +54,23 @@ def _channel_name(value: str) -> str:
     return (result[1:] if result.startswith(("#", "@")) else result).strip()
 
 
+def _window_dm_destination(win: Any) -> str:
+    """Return an exact DM identity from Discord's native window title when exposed.
+
+    Discord commonly renders active DMs as "@name - Discord". This is accepted only
+    for @-prefixed DM titles; server/channel titles are intentionally not inferred.
+    """
+    try:
+        title = str(win.window_text() or "").strip()
+    except Exception:
+        try:
+            title = str(getattr(win.element_info, "name", "") or "").strip()
+        except Exception:
+            return ""
+    match = re.fullmatch(r"@(.+?)\s+-\s+Discord", title, re.IGNORECASE)
+    return _channel_name(match.group(1)) if match else ""
+
+
 def _visible(control: Any) -> bool:
     try:
         return bool(control.is_visible() and control.is_enabled())
@@ -191,6 +208,15 @@ def _context(win: Any, identity: tuple[int, int, float], destination: str = "", 
     current = _control_name(composer)[len("message "):]
     selected = [control for control in _named(controls, current, _DESTINATION_TYPES, channel=True) if _selected(control)]
     item = _unique(selected, "selected conversation", missing_ok=True)
+    if item is None and current.startswith("@"):
+        # Some Discord/Electron builds expose the active row but never set the UIA
+        # SelectionItem state. Require two independent active-context signals before
+        # accepting a route-less DM: exact @name window title + exact message composer.
+        title_destination = _window_dm_destination(win)
+        if title_destination == _channel_name(current):
+            fallback_types = _DESTINATION_TYPES | {"Button"}
+            matches = _named(controls, current, fallback_types, channel=True)
+            item = _unique(matches, "active DM conversation", missing_ok=True)
     if item is None:
         return None
     server_item = None
