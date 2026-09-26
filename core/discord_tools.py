@@ -259,16 +259,19 @@ def _context(win: Any, identity: tuple[int, int, float], destination: str = "", 
 
     if item is None and current.startswith("@"):
         # Some Discord/Electron builds expose the same DM as multiple nested UIA rows
-        # and never set SelectionItem state. An exact active document route collapses
-        # those aliases safely because the route uniquely identifies one DM.
-        title_destination = _window_dm_destination(win)
-        if title_destination == _channel_name(current):
-            fallback_types = _DESTINATION_TYPES | {"Button"}
-            matches = _named(controls, current, fallback_types, channel=True)
-            item = _route_bound_dm(matches, active_route)
-            if item is not None:
-                semantic_destination_id = ("route", active_route)
-            else:
+        # and never set SelectionItem state. Exact active document route + matching
+        # composer is sufficient to collapse those aliases even if the native window
+        # title has not refreshed from "Friends - Discord" yet.
+        fallback_types = _DESTINATION_TYPES | {"Button"}
+        matches = _named(controls, current, fallback_types, channel=True)
+        item = _route_bound_dm(matches, active_route)
+        if item is not None:
+            semantic_destination_id = ("route", active_route)
+        else:
+            # Without a route, require the independent native @name title before
+            # accepting one unique route-less row as the active conversation.
+            title_destination = _window_dm_destination(win)
+            if title_destination == _channel_name(current):
                 item = _unique(matches, "active DM conversation", missing_ok=True)
     if item is None:
         return None
