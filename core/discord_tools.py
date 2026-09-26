@@ -504,7 +504,7 @@ def register_discord_tools(registry: ToolRegistry) -> None:
         ("discord_go_to", "Navigate to an exact Discord channel/DM through UI Automation, using the Quick Switcher only when needed. Specify server for server-scoped channels. Rejects ambiguous targets and verifies selected conversation plus matching composer.",
          {"destination": destination, "server": server}, ["destination"], discord_go_to),
         ("discord_send_message", "Send one explicitly requested message in the verified selected Discord conversation. Optional destination/server bind the intended context. Refuses existing drafts and changed focus; never retries uncertain delivery.",
-         {"text": message, "destination": server, "server": server}, ["text"], discord_send_message),
+         {"text": message, "destination": destination, "server": server}, ["text"], discord_send_message),
         ("discord_navigate_and_send", "Navigate to an exact Discord channel/DM then send exactly one explicitly requested message without another model round-trip. Specify server to disambiguate channels. Verifies selection and composer; aborts before send if context changes.",
          {"destination": destination, "text": message, "server": server}, ["destination", "text"], discord_navigate_and_send),
     ):
