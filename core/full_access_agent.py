@@ -350,6 +350,11 @@ Full Access execution profile:
     def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None, *, resume_current: bool = False) -> str:
         self._active_emit = emit
         if not resume_current:
+            try:
+                from .interaction_scene import reset_interaction_scenes
+                reset_interaction_scenes()
+            except ImportError:
+                pass
             self.orchestrator.begin(user_text)
             self.workspace_context.save_snapshot()
             self.messages.append({"role": "user", "content": user_text})
