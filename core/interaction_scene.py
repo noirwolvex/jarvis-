@@ -212,6 +212,7 @@ def _capture(
     max_controls: int,
     frame_selector: str,
     force_refresh: bool,
+    scope: str,
 ) -> tuple[str, dict[str, Any], list[dict[str, Any]], str]:
     raw = interaction_inspect(
         registry=registry,
@@ -221,6 +222,7 @@ def _capture(
         max_controls=max_controls,
         frame_selector=frame_selector,
         force_refresh=force_refresh,
+        actionable_only=scope == "actionable",
     )
     wrapped = json.loads(raw)
     actual = str(wrapped["surface"])
@@ -228,6 +230,8 @@ def _capture(
     if actual == "browser":
         nodes = _browser_nodes(snapshot)
         wanted = _norm(query)
+        if scope == "actionable":
+            nodes = [node for node in nodes if node.get("actionable")]
         if wanted:
             nodes = [
                 node for node in nodes
@@ -236,13 +240,13 @@ def _capture(
             ]
         context = (
             f"browser:{snapshot.get('url', '')}:{frame_selector}"
-            f":q={wanted}:limit={int(max_controls)}"
+            f":q={wanted}:limit={int(max_controls)}:scope={scope}"
         )
     else:
         nodes = _desktop_nodes(snapshot)
         context = (
             f"desktop:{snapshot.get('hwnd', '')}:{title}"
-            f":q={_norm(query)}:limit={int(max_controls)}"
+            f":q={_norm(query)}:limit={int(max_controls)}:scope={scope}"
         )
     return actual, snapshot, nodes, context
 
@@ -257,10 +261,14 @@ def interaction_scene(
     frame_selector: str = "",
     force_refresh: bool = False,
     mode: str = "auto",
+    scope: str = "actionable",
 ) -> str:
     mode = str(mode or "auto").casefold()
+    scope = str(scope or "actionable").casefold()
     if mode not in {"auto", "full", "delta"}:
         raise ValueError("interaction_scene mode must be auto, full, or delta")
+    if scope not in {"actionable", "structure"}:
+        raise ValueError("interaction_scene scope must be actionable or structure")
     actual, snapshot, nodes, context = _capture(
         registry,
         surface=surface,
@@ -269,6 +277,7 @@ def interaction_scene(
         max_controls=max_controls,
         frame_selector=frame_selector,
         force_refresh=force_refresh,
+        scope=scope,
     )
     scene_id, delta = _SCENES.update(context, nodes)
     use_delta = delta is not None and mode in {"auto", "delta"}
@@ -289,6 +298,7 @@ def interaction_scene(
         "source_version": snapshot.get("version", snapshot.get("generation")),
         "cached_source": bool(snapshot.get("cached")),
         "truncated": bool(snapshot.get("truncated")),
+        "scope": scope,
         "node_count": len(nodes),
         "actionable_count": sum(bool(node.get("actionable")) for node in nodes),
         "role_counts": role_counts,
@@ -348,6 +358,7 @@ def interaction_resolve(
         max_controls=max_controls,
         frame_selector=frame_selector,
         force_refresh=force_refresh,
+        scope="actionable",
     )
     candidates = [
         node for node in nodes
@@ -462,6 +473,7 @@ def register_interaction_scene_tools(registry: ToolRegistry) -> None:
     registry.register(ToolSpec(
         "interaction_scene",
         "Read a unified semantic scene for the current browser or Windows application. "
+        "Use scope=actionable for the fastest control map or scope=structure when headings/containers/navigation are needed. "
         "The first read returns the full detached scene; later auto/delta reads return only added, changed, "
         "and removed nodes when possible. Use this instead of repeated screenshots for labeled interfaces.",
         Risk.LOW,
@@ -473,6 +485,7 @@ def register_interaction_scene_tools(registry: ToolRegistry) -> None:
             "frame_selector": {"type": "string", "maxLength": 500},
             "force_refresh": {"type": "boolean"},
             "mode": {"enum": ["auto", "full", "delta"]},
+            "scope": {"enum": ["actionable", "structure"]},
         }, "additionalProperties": False},
         lambda **kwargs: interaction_scene(registry=registry, **kwargs),
     ))
