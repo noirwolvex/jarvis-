@@ -154,6 +154,21 @@ class DiscordNavigationTests(unittest.TestCase):
             nav.discord_select_chat(1)
         self.invoke.assert_called_once()
 
+    def test_route_and_composer_verify_even_when_discord_omits_selected_state(self):
+        def navigate_without_selection(control, hwnd=None):
+            self.document.value = control.value
+            self.composer.element_info.name = "Message @" + nav._destination_name(control)
+            self.first.selected = False
+            return "invoke"
+
+        self.invoke.side_effect = navigate_without_selection
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["destination"], nav._destination_name(self.first))
+        self.assertTrue(result["route_verified"])
+        self.assertTrue(result["composer_verified"])
+        self.assertEqual(result["method"], "uia_invoke")
+        self.assertFalse(self.first.selected)
+
     def test_uncertain_semantic_action_never_falls_back_or_repeats(self):
         self.invoke.side_effect = InputDeliveryError("Invoke failed after delivery")
         with patch("core.rust_engine._preflight") as preflight, self.assertRaises(InputDeliveryError):
