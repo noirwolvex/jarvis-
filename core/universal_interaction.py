@@ -315,18 +315,23 @@ def interaction_wait(
     control_type: str = "",
     selector: dict[str, Any] | None = None,
     browser_target: dict[str, Any] | None = None,
+    expected_version: str = "",
     frame_selector: str = "",
     timeout_ms: int = 1500,
     text: str = "",
 ) -> str:
     """Universal read-only postcondition wait; never dispatches mouse or keyboard input."""
+    if expected_version:
+        raise ValueError("interaction_wait requires a stable exact locator, not a snapshot expected_version")
     route = _surface(surface)
     timeout = max(0, min(int(timeout_ms), 15000))
     if route == "browser":
+        if state == "focused":
+            raise ValueError("Browser interaction_wait supports visible, hidden, enabled, or text state")
         _require_permission(registry, "browser_wait_state")
         from .browser_semantic import browser_wait_state
         return browser_wait_state(
-            _browser_target(browser_target, target, control_type or "button"),
+            _browser_target(browser_target, target, control_type),
             state=state,
             timeout_ms=timeout,
             text=text,
