@@ -239,6 +239,41 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertIn("explicitly denied", registry.execute("discord_select_chat", {"position": 1}, approved=True))
         self.invoke.assert_not_called()
 
+    def test_route_less_dm_write_send_fast_mission_never_calls_model(self):
+        from test_workflow_execution import WorkflowExecutionTests
+        fixture = WorkflowExecutionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+
+        route_less = Element("RouteLess (direct message),", "ListItem", value="",
+                             rect=(20, 210, 240, 250))
+        self.window.children = [route_less, self.document, self.composer]
+
+        def navigate_route_less(control, hwnd=None):
+            route_less.selected = True
+            self.composer.element_info.name = "Message @RouteLess"
+            return "invoke"
+
+        self.invoke.side_effect = navigate_route_less
+        register_discord_tools(fixture.agent.tools)
+        launch = Mock(return_value="VERIFIED: Discord is foreground")
+        fixture.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object"})
+        fixture.agent.client.chat.completions.create.side_effect = RuntimeError("429 quota exhausted")
+
+        with patch.object(nav.discord, "ui_type", return_value='VERIFIED: {"submitted":true}'), \
+             patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            result = fixture.agent.run(
+                "OPEN DISCORD AND PRESS THE FIRST CHAT THEN WRITE FDD THEN SEND IT"
+            )
+
+        self.assertIn("Completed and verified", result)
+        self.assertEqual(
+            [trace.name for trace in fixture.agent.orchestrator.current.traces],
+            ["launch_installed_app", "discord_select_chat", "discord_send_message"],
+        )
+        fixture.agent.client.chat.completions.create.assert_not_called()
+        self.assertTrue(all(step.status == "completed" for step in fixture.agent.orchestrator.current.plan))
+
     def test_real_adapter_fast_mission_completes_when_model_is_unavailable(self):
         from test_workflow_execution import WorkflowExecutionTests
         fixture = WorkflowExecutionTests()
