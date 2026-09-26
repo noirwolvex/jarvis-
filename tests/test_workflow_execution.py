@@ -121,6 +121,21 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertTrue(self.execute([step(), step("read", "ui_wait_state")]).startswith("ERROR"))
         self.action.assert_not_called()
 
+    def test_universal_wait_checkpoint_completes_delivered_action_in_same_workflow_call(self):
+        self.action.return_value = "DELIVERED: semantic click"
+        waiter = Mock(return_value="VERIFIED: target visible")
+        self.register("interaction_wait", Risk.LOW, waiter)
+        program = [
+            step(
+                checkpoint={"tool": "interaction_wait", "arguments": {"surface": "desktop", "target": "Composer"}}
+            )
+        ]
+        result = self.execute(program)
+        self.assertTrue(result.startswith("VERIFIED:"), result)
+        self.action.assert_called_once()
+        waiter.assert_called_once()
+        self.agent.client.chat.completions.create.assert_not_called()
+
     def test_checkpoint_retry_does_not_repeat_delivered_action(self):
         self.action.return_value = "ACTION_EXECUTED: navigation requested"
         waiter = Mock(side_effect=["ERROR: still loading", "VERIFIED: destination loaded"])
