@@ -73,6 +73,16 @@ class DesktopRecoveryTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
+    def test_provider_rate_limit_pauses_with_checkpoint_instead_of_crashing(self):
+        self.agent._chat_completion.side_effect = RuntimeError(
+            "AI_PROVIDER_RATE_LIMITED: quota exhausted"
+        )
+        result = self.agent.run("inspect Discord")
+        self.assertIn("AI_PROVIDER_RATE_LIMITED", result)
+        self.assertIn("checkpoint", result.casefold())
+        self.assertEqual(self.agent.orchestrator.current.status, "waiting_user")
+        self.assertEqual(self.agent._chat_completion.call_count, 1)
+
     def test_missing_scene_is_refreshed_without_replaying_click_or_following_typing(self):
         self.agent._chat_completion.side_effect = [
             response(("desktop_click_button", {"x": 10, "y": 20}), ("desktop_type", {"text": "HI"})),
