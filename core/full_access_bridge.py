@@ -73,6 +73,8 @@ def build_full_access_agent():
     register_browser_semantic_tools(agent.tools)
     from .universal_interaction import register_universal_interaction_tools
     register_universal_interaction_tools(agent.tools)
+    from .interaction_scene import register_interaction_scene_tools
+    register_interaction_scene_tools(agent.tools)
     from .workflow_tools import register_workflow_tools
 
     register_workflow_tools(agent)
