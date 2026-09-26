@@ -89,6 +89,14 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertEqual(self.descendants.call_count, 1)
         self.assertEqual(self.descendants.call_args.kwargs["control_types"], nav._DISCOVERY_TYPES)
 
+    def test_visible_dm_route_links_work_without_named_dm_container_or_navigation_node(self):
+        self.window.children = [self.first, self.second, self.friends, self.document, self.composer]
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["route"], "/channels/@me/111")
+        self.assertEqual(result["destination"], nav._destination_name(self.first))
+        self.assertEqual(result["method"], "uia_invoke")
+        self.invoke.assert_called_once_with(self.first, 42)
+
     def test_server_view_opens_dm_list_then_exact_chat(self):
         self.window.children.remove(self.scope)
         self.assertTrue(nav.discord_select_chat(2).startswith("VERIFIED:"))
