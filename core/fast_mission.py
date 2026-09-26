@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .execution_telemetry import input_not_dispatched
 
+import json
 import os
 import re
 import time
@@ -542,6 +543,7 @@ def execute_fast_mission(
     )
 
     completed: list[str] = []
+    verified_discord_destination = ""
     for step in steps:
         if agent._is_stopped():
             result = "CANCELLED: Emergency stop is active"
@@ -553,21 +555,37 @@ def execute_fast_mission(
         emit and emit(AgentEvent("tool", f"Fast step: {step.description}", step.tool))
         started = time.perf_counter()
         mutation = agent._is_mutation(step.tool)
-        approved = agent.approval(step.tool, step.arguments)
-        result = agent._execute_tool(step.tool, dict(step.arguments), approved=approved)
+        arguments = dict(step.arguments)
+        if (
+            step.tool == "discord_send_message"
+            and verified_discord_destination
+            and not arguments.get("destination")
+        ):
+            arguments["destination"] = verified_discord_destination
+        approved = agent.approval(step.tool, arguments)
+        result = agent._execute_tool(step.tool, arguments, approved=approved)
         duration_ms = (time.perf_counter() - started) * 1000.0
         mutation = mutation and not str(result).startswith(
             ("PERMISSION_DENIED", "ERROR: Observe the last")
         ) and not input_not_dispatched(result)
         agent.orchestrator.record_tool(
             step.tool,
-            dict(step.arguments),
+            arguments,
             result,
             duration_ms,
             1,
             mutation=mutation,
         )
         emit and emit(AgentEvent("tool_result", result, step.tool))
+
+        if step.tool == "discord_select_chat" and str(result).startswith("VERIFIED: "):
+            try:
+                payload = json.loads(str(result)[len("VERIFIED: "):])
+                destination = str(payload.get("destination") or "").strip()
+                if destination:
+                    verified_discord_destination = destination
+            except (TypeError, ValueError, json.JSONDecodeError):
+                verified_discord_destination = ""
 
         if str(result).startswith("BROWSER_ACTION_BLOCKED:"):
             message = (
