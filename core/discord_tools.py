@@ -9,7 +9,7 @@ from functools import partial
 from typing import Any, Callable
 
 from .desktop_control_tools import desktop_key_down, desktop_key_up, release_held_inputs
-from .desktop_input import InputDeliveryError
+from .desktop_input import InputDeliveryError, InputNotDispatchedError
 from .permissions import Risk
 from .process_control import check_cancelled
 from .semantic_ui_tools import (
