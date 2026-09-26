@@ -629,6 +629,16 @@ Full Access execution profile:
             self.orchestrator.finish("incomplete", result)
             return result
         except Exception as exc:
+            if isinstance(exc, RuntimeError) and str(exc).startswith("AI_PROVIDER_RATE_LIMITED:"):
+                result = (
+                    str(exc)
+                    + " JARVIS paused with the current checkpoint intact; "
+                    "continue the same mission after quota becomes available or configure a fallback provider."
+                )
+                self.memory.add("assistant", result)
+                self.orchestrator.finish("waiting_user", result)
+                emit and emit(AgentEvent("status", result))
+                return result
             result = f"ERROR: {type(exc).__name__}: {exc}"
             self.memory.add("assistant", result)
             self.orchestrator.finish("failed", result)
