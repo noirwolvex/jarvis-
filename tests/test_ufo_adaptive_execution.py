@@ -67,8 +67,14 @@ class DynamicDagRewriteTests(unittest.TestCase):
             self.assertFalse(orchestrator.step_is_resolved(original))
 
             orchestrator.update_step("recovery-select-target-1", "running")
+            orchestrator.record_tool(
+                "ui_inspect", {}, "VERIFIED: fresh target located", 1.0, 1, mutation=False
+            )
             orchestrator.update_step("recovery-select-target-1", "completed", "Fresh target resolved")
             orchestrator.update_step("recovery-select-target-2", "running")
+            orchestrator.record_tool(
+                "ui_activate", {"target": "Alternate"}, "VERIFIED: alternate target selected", 1.0, 1, mutation=True
+            )
             orchestrator.update_step("recovery-select-target-2", "completed", "Alternate target selected")
             self.assertTrue(orchestrator.step_is_resolved(original))
             self.assertEqual([step.id for step in orchestrator.ready_steps()], ["type-text"])
@@ -77,6 +83,8 @@ class DynamicDagRewriteTests(unittest.TestCase):
             self.assertTrue(recovered_node["recovered"])
             self.assertEqual(recovered_node["original_status"], "RECOVERING")
             self.assertEqual(recovered_node["verification_result"], "VERIFIED")
+            self.assertTrue(recovered_node["result"].startswith("RECOVERED:"))
+            self.assertEqual(recovered_node["original_result"], "UIA target ambiguous")
 
             summary = orchestrator.summary()
             self.assertEqual(summary["metrics"]["graph_rewrites"], 1)
@@ -88,6 +96,45 @@ class DynamicDagRewriteTests(unittest.TestCase):
             restored_original = next(step for step in restored.current.plan if step.id == "select-target")
             self.assertTrue(restored.step_is_resolved(restored_original))
             self.assertEqual(restored.summary()["graph_rewrites"][0]["reason"], "Original UIA target became ambiguous")
+
+    def test_observation_only_recovery_does_not_resolve_a_mutating_failed_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            orchestrator.begin("Select a Discord conversation")
+            orchestrator.set_plan([
+                {"id": "select-chat", "description": "Select the first Discord chat"},
+            ])
+            orchestrator.update_step("select-chat", "running")
+            orchestrator.update_step("select-chat", "failed", "UIA container missing")
+            inserted = orchestrator.rewrite_failed_step(
+                "select-chat",
+                [{"description": "Locate the first DM visually", "execution_method": "VISION"}],
+                "Need alternate observation",
+            )
+            orchestrator.update_step(inserted[0].id, "running")
+            orchestrator.record_tool(
+                "screen_observe", {}, "VERIFIED: first DM located", 1.0, 1, mutation=False
+            )
+            orchestrator.update_step(inserted[0].id, "completed", "First DM located")
+            original = next(step for step in orchestrator.current.plan if step.id == "select-chat")
+            self.assertFalse(orchestrator.step_is_resolved(original))
+
+    def test_mutating_task_step_rejects_observation_only_completion(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            registry = ToolRegistry()
+            register_task_tools(registry, orchestrator)
+            orchestrator.begin("Click a Discord DM")
+            orchestrator.set_plan([
+                {"id": "click-dm", "description": "Click the first Direct Message chat visually"},
+            ])
+            orchestrator.update_step("click-dm", "running")
+            orchestrator.record_tool(
+                "screen_observe", {}, "VERIFIED: first DM located", 1.0, 1, mutation=False
+            )
+            handler = registry._tools["task_update_step"].handler
+            with self.assertRaisesRegex(ValueError, "observation-only evidence"):
+                handler("click-dm", "completed", "First DM located")
 
     def test_rewrite_refuses_completed_node_and_duplicate_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
