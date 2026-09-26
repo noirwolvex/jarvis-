@@ -81,6 +81,7 @@ def interaction_inspect(
     max_controls: int = 120,
     frame_selector: str = "",
     force_refresh: bool = False,
+    actionable_only: bool = True,
 ) -> str:
     route = _surface(surface)
     if route == "browser":
@@ -98,6 +99,7 @@ def interaction_inspect(
     raw = ui_inspect(
         title=title,
         query=query,
+        actionable_only=bool(actionable_only),
         max_controls=max_controls,
         force_refresh=bool(force_refresh),
     )
@@ -401,6 +403,7 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
             "surface": common["surface"], "title": common["title"], "query": {"type": "string", "maxLength": 500},
             "max_controls": {"type": "integer", "minimum": 1, "maximum": 250},
             "frame_selector": common["frame_selector"], "force_refresh": {"type": "boolean"},
+            "actionable_only": {"type": "boolean"},
         }, "additionalProperties": False},
         lambda **kwargs: interaction_inspect(registry=registry, **kwargs),
     ))
