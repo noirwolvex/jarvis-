@@ -252,6 +252,26 @@ class DiscordToolsTests(unittest.TestCase):
         with desktop_fixture(win):
             self.assertEqual(discord._context(win, (42, 100, 1.0), "Alice").destination, "alice")
 
+    def test_dm_title_and_composer_bind_context_when_selection_state_is_missing(self):
+        row = Control("bel (direct message),", selected=False)
+        composer = Control("Message @bel", "Edit")
+        win = Window(row, composer)
+        win.element_info.name = "@bel - Discord"
+        with desktop_fixture(win):
+            context = discord._context(win, (42, 100, 1.0), "")
+        self.assertIsNotNone(context)
+        self.assertEqual(context.destination, "bel")
+        self.assertEqual(context.destination_id, discord._control_id(row))
+
+    def test_dm_title_fallback_requires_unique_matching_row(self):
+        first = Control("bel (direct message),", selected=False)
+        duplicate = Control("bel (direct message),", selected=False)
+        composer = Control("Message @bel", "Edit")
+        win = Window(first, duplicate, composer)
+        win.element_info.name = "@bel - Discord"
+        with desktop_fixture(win), self.assertRaisesRegex(RuntimeError, "ambiguous"):
+            discord._context(win, (42, 100, 1.0), "")
+
     def test_explicit_channel_marker_does_not_match_a_dm(self):
         win = Window(Control("Alice", selected=True), Control("Message @Alice", "Edit"))
         with desktop_fixture(win):
