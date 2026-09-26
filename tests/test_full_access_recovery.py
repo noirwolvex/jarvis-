@@ -242,6 +242,7 @@ class RecoveryGuidanceTests(unittest.TestCase):
                 ("ERROR: Observe the last action and call task_verify", "verified=false"),
                 ("ERROR: Verification requires successful observation after the action and nonempty evidence", "do not repeat task_verify"),
                 ("ERROR executing ui_type_native: InputNotDispatchedError: Editor caret changed before input; no input delivered", "Do not call task_verify"),
+                ("ERROR executing discord_send_message: InputNotDispatchedError: no message was sent", "Do not call task_verify"),
                 ("ERROR: Target '' has 8 exact visible enabled matches", "unique selector or control identity"),
             ):
                 with self.subTest(error=error):
