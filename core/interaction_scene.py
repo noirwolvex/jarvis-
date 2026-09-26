@@ -227,9 +227,16 @@ def _capture(
     snapshot = wrapped["snapshot"]
     if actual == "browser":
         nodes = _browser_nodes(snapshot)
+        wanted = _norm(query)
+        if wanted:
+            nodes = [
+                node for node in nodes
+                if wanted in _norm(node.get("name"))
+                or wanted in _norm(node.get("role"))
+            ]
         context = (
             f"browser:{snapshot.get('url', '')}:{frame_selector}"
-            f":q={_norm(query)}:limit={int(max_controls)}"
+            f":q={wanted}:limit={int(max_controls)}"
         )
     else:
         nodes = _desktop_nodes(snapshot)
@@ -265,6 +272,11 @@ def interaction_scene(
     )
     scene_id, delta = _SCENES.update(context, nodes)
     use_delta = delta is not None and mode in {"auto", "delta"}
+    role_counts: dict[str, int] = {}
+    for node in nodes:
+        role_name = _clean(node.get("role")) or "unknown"
+        role_counts[role_name] = role_counts.get(role_name, 0) + 1
+
     payload: dict[str, Any] = {
         "scene_id": scene_id,
         "surface": actual,
@@ -278,6 +290,16 @@ def interaction_scene(
         "cached_source": bool(snapshot.get("cached")),
         "truncated": bool(snapshot.get("truncated")),
         "node_count": len(nodes),
+        "actionable_count": sum(bool(node.get("actionable")) for node in nodes),
+        "role_counts": role_counts,
+        "focused": [
+            {"id": node["id"], "role": node.get("role"), "name": node.get("name")}
+            for node in nodes if node.get("focused") is True
+        ][:8],
+        "selected": [
+            {"id": node["id"], "role": node.get("role"), "name": node.get("name")}
+            for node in nodes if node.get("selected") is True
+        ][:12],
         "mode": "delta" if use_delta else "full",
         "note": (
             "Detached semantic metadata only. Actions resolve live targets again; "
@@ -316,6 +338,8 @@ def interaction_resolve(
 ) -> str:
     wanted = _norm(query)
     wanted_role = _norm(role)
+    if ordinal is not None and not wanted_role:
+        raise ValueError("interaction_resolve ordinal requires an explicit role/control type")
     actual, snapshot, nodes, context = _capture(
         registry,
         surface=surface,
