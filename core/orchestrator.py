@@ -301,6 +301,15 @@ class TaskOrchestrator:
             and ("editor" in low or tool_name in {"ui_type_native", "ui_type", "interaction_type"})
         ):
             hints.append("The text input was rejected before dispatch, so there is no typed action to verify. Do not call task_verify for this rejection. Re-inspect the exact editor, then retry the requested unsent draft through interaction_type; preserve submit=false.")
+        if (
+            tool_name == "discord_send_message"
+            and ("inputnotdispatchederror" in low or "no message was sent" in low or "no message input was dispatched" in low)
+        ):
+            hints.append(
+                "Discord rejected the send before any message input was dispatched. Do not call task_verify for this rejection. "
+                "Re-resolve the current Discord conversation/composer, then retry the original discord_send_message once; "
+                "do not insert a separate draft/write recovery step."
+            )
         if "exact visible enabled matches" in low:
             hints.append("The semantic target is ambiguous. Use ui_inspect to identify the intended editable control, then retry semantic typing with its unique selector or control identity. Do not guess a coordinate to bypass target resolution.")
         if "foreground" in low or "focus" in low:
