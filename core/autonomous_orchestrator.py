@@ -509,6 +509,11 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             elif isinstance(raw, dict) and not raw.get("id"):
                 prepared = {**raw, "id": generated_id}
             step = self._rich_step(prepared, failed_index + offset + 1)
+            if self._mutation_rank(step) > self._mutation_rank(failed):
+                raise ValueError(
+                    "Recovery step broadens the failed node's side effects; "
+                    "recover only the failed action and leave downstream writes/sends in their original nodes"
+                )
             if step.id in existing_ids or any(item.id == step.id for item in inserted):
                 raise ValueError(f"Recovery step id already exists: {step.id}")
             step.depends_on = [previous_id] if previous_id else inherited_dependencies
@@ -549,6 +554,25 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         self.current.metrics["graph_rewrites"] = self.current.metrics.get("graph_rewrites", 0) + 1
         self._persist(self.current)
         return inserted
+
+    @staticmethod
+    def _mutation_rank(step: PlanStep) -> int:
+        text = " ".join(
+            str(value or "") for value in (
+                getattr(step, "action", ""),
+                getattr(step, "description", ""),
+            )
+        ).casefold()
+        if re.search(r"\b(?:send|submit|post|publish|save|delete)\b", text):
+            return 3
+        if re.search(r"\b(?:type|write|fill|append|enter text)\b", text):
+            return 2
+        if re.search(
+            r"\b(?:click|press|tap|select|choose|open|launch|activate|navigate|focus|scroll|drag|drop|move)\b",
+            text,
+        ):
+            return 1
+        return 0
 
     @staticmethod
     def step_requires_mutation(step: PlanStep) -> bool:
