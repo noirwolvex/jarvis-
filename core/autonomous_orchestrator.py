@@ -555,6 +555,25 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         for item in self.current.plan:
             if isinstance(item, ExecutionPlanStep):
                 recovered = item.status != "completed" and self.step_is_resolved(item)
+                recovery_tail = None
+                if recovered and isinstance(self.current, AutonomousTaskRun):
+                    for rewrite in reversed(self.current.graph_rewrites):
+                        if rewrite.failed_step_id != item.id or not rewrite.inserted_step_ids:
+                            continue
+                        tail_id = rewrite.inserted_step_ids[-1]
+                        recovery_tail = next((step for step in self.current.plan if step.id == tail_id), None)
+                        break
+                projected_result = item.result
+                projected_execution_backend = item.execution_backend
+                projected_resolution_backend = item.resolution_backend
+                projected_verification = item.verification_result
+                if recovered and recovery_tail is not None:
+                    projected_result = (
+                        "RECOVERED: " + (recovery_tail.result or recovery_tail.description)
+                    )[:12000]
+                    projected_execution_backend = getattr(recovery_tail, "execution_backend", "") or item.execution_backend
+                    projected_resolution_backend = getattr(recovery_tail, "resolution_backend", "") or item.resolution_backend
+                    projected_verification = getattr(recovery_tail, "verification_result", "") or "VERIFIED"
                 graph.append({
                     "id": item.id,
                     "action": item.action or item.description,
@@ -562,17 +581,18 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                     "dependencies": list(item.depends_on),
                     "required_state": list(item.required_state),
                     "execution_method": item.execution_method,
-                    "execution_backend": item.execution_backend,
-                    "resolution_backend": item.resolution_backend,
+                    "execution_backend": projected_execution_backend,
+                    "resolution_backend": projected_resolution_backend,
                     "expected_result": item.expected_result,
                     "verification_method": item.verification_method,
-                    "verification_result": "VERIFIED" if recovered else item.verification_result,
+                    "verification_result": projected_verification,
                     "fallback_strategy": list(item.fallback_strategy),
                     "retry_policy": dict(item.retry_policy),
                     "status": "COMPLETED" if recovered else item.phase,
-                    "result": item.result,
+                    "result": projected_result,
                     "recovered": recovered,
                     "original_status": item.phase if recovered else "",
+                    "original_result": item.result if recovered else "",
                 })
             else:
                 graph.append({
