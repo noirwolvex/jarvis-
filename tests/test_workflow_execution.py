@@ -124,7 +124,20 @@ class WorkflowExecutionTests(unittest.TestCase):
     def test_universal_wait_checkpoint_completes_delivered_action_in_same_workflow_call(self):
         self.action.return_value = "DELIVERED: semantic click"
         waiter = Mock(return_value="VERIFIED: target visible")
-        self.register("interaction_wait", Risk.LOW, waiter)
+        self.register(
+            "interaction_wait",
+            Risk.LOW,
+            waiter,
+            {
+                "type": "object",
+                "properties": {
+                    "surface": {"type": "string"},
+                    "target": {"type": "string"},
+                },
+                "required": ["surface", "target"],
+                "additionalProperties": False,
+            },
+        )
         program = [
             step(
                 checkpoint={"tool": "interaction_wait", "arguments": {"surface": "desktop", "target": "Composer"}}
