@@ -200,6 +200,8 @@ class JarvisAgent:
             register_dev_tools(self.tools)
             from .advanced_tools import register_advanced_tools
             register_advanced_tools(self.tools)
+            from .wincom_tools import register_wincom_tools
+            register_wincom_tools(self.tools)
             register_skill_tools(self.tools)
             register_monitor_tools(self.tools)
             register_browser_guard_tools(self.tools)
@@ -246,6 +248,21 @@ class JarvisAgent:
         )
 
     @staticmethod
+    def _is_provider_rate_limited(exc: Exception) -> bool:
+        status_code = getattr(exc, "status_code", None)
+        if status_code == 429:
+            return True
+        text = str(exc).casefold()
+        return (
+            "resource_exhausted" in text
+            or "rate limit" in text
+            or "rate_limit" in text
+            or "quota exceeded" in text
+            or "too many requests" in text
+            or "error code: 429" in text
+        )
+
+    @staticmethod
     def _provider_error_summary(exc: Exception) -> str:
         text = " ".join(str(exc).split())
         return text[:1200]
@@ -256,13 +273,23 @@ class JarvisAgent:
         try:
             return self.client.chat.completions.create(**kwargs)
         except Exception as exc:
-            if not self._is_provider_access_denied(exc):
+            access_denied = self._is_provider_access_denied(exc)
+            rate_limited = self._is_provider_rate_limited(exc)
+            if not access_denied and not rate_limited:
                 raise
 
             primary = (
                 f"provider={self.provider} base_url={self.base_url} model={self.model}"
             )
             if self._fallback_client is None:
+                if rate_limited:
+                    raise RuntimeError(
+                        "AI_PROVIDER_RATE_LIMITED: The configured AI provider exhausted its current quota "
+                        f"({primary}). The active mission checkpoint was preserved. "
+                        "Retry after the provider quota resets or configure AI_FALLBACK_PROVIDER, "
+                        "AI_FALLBACK_BASE_URL, AI_FALLBACK_MODEL, and AI_FALLBACK_API_KEY. "
+                        f"Upstream response: {self._provider_error_summary(exc)}"
+                    ) from exc
                 raise RuntimeError(
                     "AI_PROVIDER_ACCESS_DENIED: The configured AI provider rejected this project "
                     f"with HTTP 403 ({primary}). JARVIS did not start desktop execution. "
@@ -280,10 +307,10 @@ class JarvisAgent:
             try:
                 response = fallback_client.chat.completions.create(**fallback_kwargs)
             except Exception as fallback_exc:
-                if self._is_provider_access_denied(fallback_exc):
+                if self._is_provider_access_denied(fallback_exc) or self._is_provider_rate_limited(fallback_exc):
                     raise RuntimeError(
-                        "AI_PROVIDER_ACCESS_DENIED: Both primary and fallback AI providers "
-                        "rejected access. "
+                        "AI_PROVIDER_FAILOVER_FAILED: Both primary and fallback AI providers "
+                        "are currently unavailable for this mission. "
                         f"Primary: {primary}. "
                         f"Fallback: provider={fallback_provider} "
                         f"base_url={fallback_base_url} model={fallback_model}. "
@@ -296,8 +323,9 @@ class JarvisAgent:
             self.base_url = fallback_base_url
             self.model = fallback_model
             self._fallback_client = None
+            trigger = "HTTP 429/quota limit" if rate_limited else "HTTP 403/access denial"
             self._provider_failover_notice = (
-                "Primary AI provider returned HTTP 403; JARVIS switched to configured "
+                f"Primary AI provider returned {trigger}; JARVIS switched to configured "
                 f"fallback provider={self.provider} model={self.model} and continued the same mission."
             )
             return response

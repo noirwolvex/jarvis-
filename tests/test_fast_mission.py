@@ -110,8 +110,26 @@ class FastMissionCompilerTests(unittest.TestCase):
         self.assertEqual(steps[1].arguments, {"position": 2})
         self.assertEqual(steps[-1].arguments, {"text": "hello  \u0639\u0627\u0644\u0645", "title": "Discord", "surface": "desktop"})
 
+    def test_exact_reported_discord_write_then_send_compiles_without_model(self):
+        steps = compile_fast_mission(
+            "OPEN DISCORD AND PRESS THE FIRST CHAT THEN WRITE FDD THEN SEND IT"
+        )
+        self.assertEqual(
+            [s.tool for s in steps],
+            ["launch_installed_app", "discord_select_chat", "discord_send_message"],
+        )
+        self.assertEqual(steps[1].arguments, {"position": 1})
+        self.assertEqual(steps[2].arguments, {"text": "FDD"})
+
+    def test_discord_write_then_send_preserves_quoted_unicode(self):
+        steps = compile_fast_mission(
+            'open Discord and select the 2 chat then write "hello  \u0639\u0627\u0644\u0645" then send it'
+        )
+        self.assertEqual(steps[-1].tool, "discord_send_message")
+        self.assertEqual(steps[-1].arguments, {"text": "hello  \u0639\u0627\u0644\u0645"})
+
     def test_discord_unknown_or_out_of_range_work_is_not_dropped(self):
-        for tail in ("and send hi", "and delete it", "after write HI then send it"):
+        for tail in ("and send hi", "and delete it", "after write HI then delete it"):
             self.assertIsNone(compile_fast_mission("open Discord and press the first chat " + tail))
         for ordinal in ("0", "21", "100"):
             self.assertIsNone(compile_fast_mission(f"open Discord and press the {ordinal} chat"))

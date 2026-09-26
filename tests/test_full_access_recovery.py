@@ -73,6 +73,16 @@ class DesktopRecoveryTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
+    def test_provider_rate_limit_pauses_with_checkpoint_instead_of_crashing(self):
+        self.agent._chat_completion.side_effect = RuntimeError(
+            "AI_PROVIDER_RATE_LIMITED: quota exhausted"
+        )
+        result = self.agent.run("inspect Discord")
+        self.assertIn("AI_PROVIDER_RATE_LIMITED", result)
+        self.assertIn("checkpoint", result.casefold())
+        self.assertEqual(self.agent.orchestrator.current.status, "waiting_user")
+        self.assertEqual(self.agent._chat_completion.call_count, 1)
+
     def test_missing_scene_is_refreshed_without_replaying_click_or_following_typing(self):
         self.agent._chat_completion.side_effect = [
             response(("desktop_click_button", {"x": 10, "y": 20}), ("desktop_type", {"text": "HI"})),
@@ -232,6 +242,7 @@ class RecoveryGuidanceTests(unittest.TestCase):
                 ("ERROR: Observe the last action and call task_verify", "verified=false"),
                 ("ERROR: Verification requires successful observation after the action and nonempty evidence", "do not repeat task_verify"),
                 ("ERROR executing ui_type_native: InputNotDispatchedError: Editor caret changed before input; no input delivered", "Do not call task_verify"),
+                ("ERROR executing discord_send_message: InputNotDispatchedError: no message was sent", "Do not call task_verify"),
                 ("ERROR: Target '' has 8 exact visible enabled matches", "unique selector or control identity"),
             ):
                 with self.subTest(error=error):

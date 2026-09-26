@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .execution_telemetry import input_not_dispatched
 
+import json
 import os
 import re
 import time
@@ -65,6 +66,15 @@ _MIXED_APP_CHAT = re.compile(
     r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
     r"\s+(?:chat|conversation)$",
     re.IGNORECASE,
+)
+_DISCORD_ORDINAL_WRITE_SEND = re.compile(
+    r"^\s*open\s+(?:the\s+)?discord(?:\s+(?:app|application))?\s+(?:and\s+then|and|then)\s+"
+    r"(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
+    r"(?P<ordinal>first|second|third|fourth|fifth|sixth|seventh|eighth|ninth|tenth|\d{1,2}(?:st|nd|rd|th)?)"
+    r"\s+(?:chat|conversation)\s+(?:(?:and\s+then|then|and|after(?:\s+that)?)\s+)"
+    r"(?:write|type)(?:\s+text)?\s+(?P<text>.+?)\s+"
+    r"(?:(?:and\s+then|then|and)\s+)?send\s+(?:it|that|the\s+message)\s*$",
+    re.IGNORECASE | re.DOTALL,
 )
 _MIXED_CHAT_ONLY = re.compile(
     r"^(?:press|click|open|select|choose|tap)(?:\s+on)?\s+(?:the\s+)?"
@@ -370,6 +380,46 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     if "\0" in text:
         return None
 
+    discord_send = _DISCORD_ORDINAL_WRITE_SEND.fullmatch(text)
+    if discord_send:
+        try:
+            position = _mixed_ordinal(discord_send.group("ordinal"))
+        except ValueError:
+            return None
+        message = discord_send.group("text").strip()
+        quoted = len(message) >= 2 and message[0] == message[-1] and message[0] in {'"', "'"}
+        if quoted:
+            message = message[1:-1]
+        if (
+            not message
+            or len(message) > 4000
+            or "\0" in message
+            or _EXTRA_ACTION.search(message)
+            or message[:1] in {'"', "'"}
+            or message[-1:] in {'"', "'"}
+        ):
+            return None
+        return [
+            FastStep(
+                "fast-1",
+                "Open and verify Discord",
+                "launch_installed_app",
+                {"query": "Discord", "timeout_seconds": 12},
+            ),
+            FastStep(
+                "fast-2",
+                f"Select and verify Discord chat position {position}",
+                "discord_select_chat",
+                {"position": position},
+            ),
+            FastStep(
+                "fast-3",
+                "Write and send the requested Discord message once, then verify delivery",
+                "discord_send_message",
+                {"text": message},
+            ),
+        ]
+
     mixed = _compile_explicit_sequence(text)
     if mixed:
         return mixed
@@ -493,6 +543,7 @@ def execute_fast_mission(
     )
 
     completed: list[str] = []
+    verified_discord_destination = ""
     for step in steps:
         if agent._is_stopped():
             result = "CANCELLED: Emergency stop is active"
@@ -504,21 +555,37 @@ def execute_fast_mission(
         emit and emit(AgentEvent("tool", f"Fast step: {step.description}", step.tool))
         started = time.perf_counter()
         mutation = agent._is_mutation(step.tool)
-        approved = agent.approval(step.tool, step.arguments)
-        result = agent._execute_tool(step.tool, dict(step.arguments), approved=approved)
+        arguments = dict(step.arguments)
+        if (
+            step.tool == "discord_send_message"
+            and verified_discord_destination
+            and not arguments.get("destination")
+        ):
+            arguments["destination"] = verified_discord_destination
+        approved = agent.approval(step.tool, arguments)
+        result = agent._execute_tool(step.tool, arguments, approved=approved)
         duration_ms = (time.perf_counter() - started) * 1000.0
         mutation = mutation and not str(result).startswith(
             ("PERMISSION_DENIED", "ERROR: Observe the last")
         ) and not input_not_dispatched(result)
         agent.orchestrator.record_tool(
             step.tool,
-            dict(step.arguments),
+            arguments,
             result,
             duration_ms,
             1,
             mutation=mutation,
         )
         emit and emit(AgentEvent("tool_result", result, step.tool))
+
+        if step.tool == "discord_select_chat" and str(result).startswith("VERIFIED: "):
+            try:
+                payload = json.loads(str(result)[len("VERIFIED: "):])
+                destination = str(payload.get("destination") or "").strip()
+                if destination:
+                    verified_discord_destination = destination
+            except (TypeError, ValueError, json.JSONDecodeError):
+                verified_discord_destination = ""
 
         if str(result).startswith("BROWSER_ACTION_BLOCKED:"):
             message = (

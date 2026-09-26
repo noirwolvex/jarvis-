@@ -37,6 +37,21 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             rows.append(row)
         return json.dumps(rows, ensure_ascii=False)
 
+    def task_rewrite_recovery(
+        failed_step_id: str,
+        recovery_steps: list[dict[str, Any]] | list[str],
+        reason: str = "",
+    ) -> str:
+        rewrite = getattr(orchestrator, "rewrite_failed_step", None)
+        if rewrite is None:
+            raise ValueError("Adaptive graph rewriting is not available for this execution profile")
+        inserted = rewrite(failed_step_id, recovery_steps, reason)
+        return json.dumps({
+            "failed_step_id": failed_step_id,
+            "inserted_step_ids": [step.id for step in inserted],
+            "summary": orchestrator.summary(),
+        }, ensure_ascii=False)
+
     def task_update_step(step_id: str, status: str, result: str = "") -> str:
         normalized = str(status).strip().lower().replace("-", "_")
         if normalized == "in_progress":
@@ -46,12 +61,31 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             raise ValueError(f"Unsupported step status: {status}")
 
         verified_evidence = None
+        target_step = None
+        mutation_required = False
+        recent_mutation_attempt = False
         if normalized == "completed" and orchestrator.current is not None:
+            target_step = next((step for step in orchestrator.current.plan if step.id == step_id), None)
+            requires_mutation = getattr(orchestrator, "step_requires_mutation", None)
+            mutation_required = bool(
+                target_step is not None
+                and requires_mutation is not None
+                and requires_mutation(target_step)
+            )
             recent = []
             for trace in reversed(orchestrator.current.traces):
                 if trace.name == "task_update_step":
                     break
                 recent.append(trace)
+            recent_start = len(orchestrator.current.traces) - len(recent)
+            mutation_index = orchestrator.current.last_mutation_index
+            recent_mutation_attempt = recent_start <= mutation_index < len(orchestrator.current.traces)
+            if mutation_required and not recent_mutation_attempt:
+                raise ValueError(
+                    "Cannot complete a mutating plan step from observation-only evidence; "
+                    "execute or attempt the requested click/select/open/type/send action first, "
+                    "then verify its observed outcome without replaying uncertain side effects"
+                )
             evidence = [
                 trace for trace in recent
                 if trace.success and not trace.name.startswith(("task_", "workflow_"))
@@ -76,6 +110,18 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             if verified_evidence is None and not independently_verified:
                 raise ValueError("Cannot complete a step from delivery alone; observe the outcome and verify it first")
 
+        if (
+            normalized == "completed"
+            and mutation_required
+            and recent_mutation_attempt
+            and target_step is not None
+            and hasattr(target_step, "mutation_delivered")
+        ):
+            # A successful mutation or an uncertain mutation whose postcondition was
+            # independently verified both establish that the requested state change
+            # happened. This does not authorize replay.
+            target_step.mutation_delivered = True
+
         orchestrator.update_step(step_id, normalized, result)
         if normalized == "completed" and verified_evidence is not None:
             orchestrator.verify(
@@ -93,7 +139,14 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                     if trace.success and not trace.name.startswith(("task_", "workflow_"))
                     and (index > current.last_mutation_index
                          or index == current.last_mutation_index and trace.result.startswith("VERIFIED:") and not trace.name.startswith("desktop_"))]
-        if not observed or not evidence.strip():
+        if not observed:
+            if current.last_mutation_index < 0:
+                raise ValueError(
+                    "Verification requires successful execution or observation evidence; "
+                    "no non-task action has succeeded yet. Execute or observe the pending plan step before task_verify"
+                )
+            raise ValueError("Verification requires successful observation after the action and nonempty evidence")
+        if not evidence.strip():
             raise ValueError("Verification requires successful observation after the action and nonempty evidence")
         ok = orchestrator.verify(claim, bool(verified), evidence)
         return json.dumps({"verified": ok, "claim": claim, "evidence": evidence[:12000]}, ensure_ascii=False)
@@ -136,7 +189,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                                 "required_state": {"type": "array", "items": {"type": "string"}},
                                 "execution_method": {
                                     "type": "string",
-                                    "enum": ["AUTO", "DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                    "enum": ["AUTO", "DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
                                 },
                                 "expected_result": {"type": "string"},
                                 "verification_method": {"type": "string"},
@@ -144,7 +197,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
                                     "type": "array",
                                     "items": {
                                         "type": "string",
-                                        "enum": ["DIRECT", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                        "enum": ["DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
                                     },
                                 },
                                 "retry_policy": {
@@ -167,6 +220,59 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             "additionalProperties": False,
         },
         task_plan,
+    ))
+    registry.register(ToolSpec(
+        "task_rewrite_recovery",
+        "Dynamically insert a bounded recovery subgraph after a failed/recovering plan step. The original failed node is preserved, completed work is not replayed, and direct downstream dependencies are rewired to the recovery tail. Use only after inspecting the live state and deciding on a safe alternate path.",
+        Risk.SAFE,
+        {
+            "type": "object",
+            "properties": {
+                "failed_step_id": {"type": "string"},
+                "reason": {"type": "string", "maxLength": 4000},
+                "recovery_steps": {
+                    "type": "array",
+                    "minItems": 1,
+                    "maxItems": 8,
+                    "items": {
+                        "oneOf": [
+                            {"type": "string"},
+                            {"type": "object", "properties": {
+                                "id": {"type": "string"},
+                                "description": {"type": "string"},
+                                "action": {"type": "string"},
+                                "required_state": {"type": "array", "items": {"type": "string"}},
+                                "execution_method": {
+                                    "type": "string",
+                                    "enum": ["AUTO", "DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                },
+                                "expected_result": {"type": "string"},
+                                "verification_method": {"type": "string"},
+                                "fallback_strategy": {
+                                    "type": "array",
+                                    "items": {
+                                        "type": "string",
+                                        "enum": ["DIRECT", "APP_API", "CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"],
+                                    },
+                                },
+                                "retry_policy": {
+                                    "type": "object",
+                                    "properties": {
+                                        "max_attempts": {"type": "integer", "minimum": 0, "maximum": 10},
+                                        "retry_only_if_safe": {"type": "boolean"},
+                                        "backoff_ms": {"type": "integer", "minimum": 0, "maximum": 30000},
+                                    },
+                                    "additionalProperties": False,
+                                },
+                            }, "required": ["description"], "additionalProperties": False},
+                        ]
+                    },
+                },
+            },
+            "required": ["failed_step_id", "recovery_steps"],
+            "additionalProperties": False,
+        },
+        task_rewrite_recovery,
     ))
     registry.register(ToolSpec(
         "task_update_step",

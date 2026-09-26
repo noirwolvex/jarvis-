@@ -67,7 +67,12 @@ class DiscordNavigationTests(unittest.TestCase):
         if control is self.home:
             self.window.children.append(self.scope)
         else:
-            self.document.value = control.value
+            for candidate in (self.first, self.second):
+                candidate.selected = False
+            if hasattr(control, "selected"):
+                control.selected = True
+            if control.value:
+                self.document.value = control.value
             self.composer.element_info.name = "Message @" + nav._destination_name(control)
         return "invoke"
 
@@ -89,6 +94,48 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertEqual(self.descendants.call_count, 1)
         self.assertEqual(self.descendants.call_args.kwargs["control_types"], nav._DISCOVERY_TYPES)
 
+    def test_visible_dm_route_links_work_without_named_dm_container_or_navigation_node(self):
+        self.window.children = [self.first, self.second, self.friends, self.document, self.composer]
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["route"], "/channels/@me/111")
+        self.assertEqual(result["destination"], nav._destination_name(self.first))
+        self.assertEqual(result["method"], "uia_invoke")
+        self.invoke.assert_called_once_with(self.first, 42)
+
+    def test_route_less_list_item_dm_is_selected_and_verified_without_model_or_coordinates(self):
+        route_less = Element("RouteLess (direct message),", "ListItem", value="",
+                             rect=(20, 210, 240, 250))
+        self.window.children = [route_less, self.document, self.composer]
+
+        def navigate_route_less(control, hwnd=None):
+            route_less.selected = True
+            self.composer.element_info.name = "Message @" + nav._destination_name(control)
+            return "invoke"
+
+        self.invoke.side_effect = navigate_route_less
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["destination"], "RouteLess")
+        self.assertEqual(result["route"], "")
+        self.assertFalse(result["route_verified"])
+        self.assertTrue(result["selection_verified"])
+        self.assertTrue(result["composer_verified"])
+        self.assertEqual(result["method"], "uia_invoke")
+
+    def test_nested_duplicate_dm_row_and_anchor_count_as_one_ordinal(self):
+        parent = Element("Same (direct message),", "ListItem", value="",
+                         rect=(20, 210, 240, 250))
+        child = Element("Same (direct message),", "Hyperlink",
+                        value="https://discord.com/channels/@me/333",
+                        rect=(20, 210, 240, 250))
+        parent.children = [child]
+        later = Element("Later (direct message),", "ListItem", value="",
+                        rect=(20, 260, 240, 300))
+        controls = [parent, child, later]
+        rows = nav._conversation_links(self.window, None, controls)
+        self.assertEqual(len(rows), 2)
+        self.assertEqual(rows[0][1], "/channels/@me/333")
+        self.assertIs(rows[1][0], later)
+
     def test_server_view_opens_dm_list_then_exact_chat(self):
         self.window.children.remove(self.scope)
         self.assertTrue(nav.discord_select_chat(2).startswith("VERIFIED:"))
@@ -106,6 +153,21 @@ class DiscordNavigationTests(unittest.TestCase):
         with self.assertRaises(InputDeliveryError):
             nav.discord_select_chat(1)
         self.invoke.assert_called_once()
+
+    def test_route_and_composer_verify_even_when_discord_omits_selected_state(self):
+        def navigate_without_selection(control, hwnd=None):
+            self.document.value = control.value
+            self.composer.element_info.name = "Message @" + nav._destination_name(control)
+            self.first.selected = False
+            return "invoke"
+
+        self.invoke.side_effect = navigate_without_selection
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["destination"], nav._destination_name(self.first))
+        self.assertTrue(result["route_verified"])
+        self.assertTrue(result["composer_verified"])
+        self.assertEqual(result["method"], "uia_invoke")
+        self.assertFalse(self.first.selected)
 
     def test_uncertain_semantic_action_never_falls_back_or_repeats(self):
         self.invoke.side_effect = InputDeliveryError("Invoke failed after delivery")
@@ -191,6 +253,98 @@ class DiscordNavigationTests(unittest.TestCase):
         registry.permissions.deny_tools.add("ui_activate")
         self.assertIn("explicitly denied", registry.execute("discord_select_chat", {"position": 1}, approved=True))
         self.invoke.assert_not_called()
+
+    def test_route_dm_without_selected_state_write_send_never_calls_model(self):
+        from test_workflow_execution import WorkflowExecutionTests
+        fixture = WorkflowExecutionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+
+        destination = nav._destination_name(self.first)
+        self.window.element_info.name = f"@{destination} - Discord"
+        self.first.selected = False
+
+        def navigate_without_selection(control, hwnd=None):
+            self.document.value = control.value
+            self.composer.element_info.name = "Message @" + nav._destination_name(control)
+            self.first.selected = False
+            return "invoke"
+
+        self.invoke.side_effect = navigate_without_selection
+        register_discord_tools(fixture.agent.tools)
+        launch = Mock(return_value="VERIFIED: Discord is foreground")
+        fixture.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object"})
+        fixture.agent.client.chat.completions.create.side_effect = RuntimeError("429 quota exhausted")
+
+        def discord_descendants(root, **kwargs):
+            kinds = kwargs.get("control_types")
+            return [
+                control for control in root.descendants()
+                if not kinds or control.element_info.control_type in kinds
+            ]
+
+        with patch.object(nav.discord, "_focus_window", return_value=42), \
+             patch.object(nav.discord, "_descendants", side_effect=discord_descendants), \
+             patch.object(nav.discord, "ui_type", return_value='VERIFIED: {"submitted":true}'), \
+             patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            result = fixture.agent.run(
+                "OPEN DISCORD AND PRESS THE FIRST CHAT THEN WRITE FDD THEN SEND IT"
+            )
+
+        self.assertIn("Completed and verified", result)
+        self.assertEqual(
+            [trace.name for trace in fixture.agent.orchestrator.current.traces],
+            ["launch_installed_app", "discord_select_chat", "discord_send_message"],
+        )
+        send_trace = fixture.agent.orchestrator.current.traces[-1]
+        self.assertEqual(send_trace.arguments["destination"], destination)
+        fixture.agent.client.chat.completions.create.assert_not_called()
+        self.assertFalse(self.first.selected)
+        self.assertTrue(all(step.status == "completed" for step in fixture.agent.orchestrator.current.plan))
+
+    def test_route_less_dm_write_send_fast_mission_never_calls_model(self):
+        from test_workflow_execution import WorkflowExecutionTests
+        fixture = WorkflowExecutionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+
+        route_less = Element("RouteLess (direct message),", "ListItem", value="",
+                             rect=(20, 210, 240, 250))
+        self.window.children = [route_less, self.document, self.composer]
+
+        def navigate_route_less(control, hwnd=None):
+            route_less.selected = True
+            self.composer.element_info.name = "Message @RouteLess"
+            return "invoke"
+
+        self.invoke.side_effect = navigate_route_less
+        register_discord_tools(fixture.agent.tools)
+        launch = Mock(return_value="VERIFIED: Discord is foreground")
+        fixture.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object"})
+        fixture.agent.client.chat.completions.create.side_effect = RuntimeError("429 quota exhausted")
+
+        def discord_descendants(root, **kwargs):
+            kinds = kwargs.get("control_types")
+            return [
+                control for control in root.descendants()
+                if not kinds or control.element_info.control_type in kinds
+            ]
+
+        with patch.object(nav.discord, "_focus_window", return_value=42), \
+             patch.object(nav.discord, "_descendants", side_effect=discord_descendants), \
+             patch.object(nav.discord, "ui_type", return_value='VERIFIED: {"submitted":true}'), \
+             patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            result = fixture.agent.run(
+                "OPEN DISCORD AND PRESS THE FIRST CHAT THEN WRITE FDD THEN SEND IT"
+            )
+
+        self.assertIn("Completed and verified", result)
+        self.assertEqual(
+            [trace.name for trace in fixture.agent.orchestrator.current.traces],
+            ["launch_installed_app", "discord_select_chat", "discord_send_message"],
+        )
+        fixture.agent.client.chat.completions.create.assert_not_called()
+        self.assertTrue(all(step.status == "completed" for step in fixture.agent.orchestrator.current.plan))
 
     def test_real_adapter_fast_mission_completes_when_model_is_unavailable(self):
         from test_workflow_execution import WorkflowExecutionTests

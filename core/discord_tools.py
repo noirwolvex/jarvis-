@@ -2,12 +2,14 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
+from urllib.parse import urlsplit
 from functools import partial
 from typing import Any, Callable
 
 from .desktop_control_tools import desktop_key_down, desktop_key_up, release_held_inputs
-from .desktop_input import InputDeliveryError
+from .desktop_input import InputDeliveryError, InputNotDispatchedError
 from .permissions import Risk
 from .process_control import check_cancelled
 from .semantic_ui_tools import (
@@ -43,13 +45,73 @@ def _normalized(value: str) -> str:
     return " ".join(str(value).split()).casefold()
 
 
+def _dm_route(value: str | None) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = urlsplit(value)
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc:
+        if parsed.scheme != "https" or parsed.netloc != "discord.com":
+            return None
+    if parsed.query or parsed.fragment or not re.fullmatch(r"/channels/@me/[0-9]{1,24}", parsed.path):
+        return None
+    return parsed.path
+
+
+def _active_dm_route(controls: list[Any]) -> str:
+    routes = []
+    for control in controls:
+        if _control_type(control) != "Document":
+            continue
+        route = _dm_route(_control_value(control))
+        if route and route not in routes:
+            routes.append(route)
+    if len(routes) > 1:
+        raise RuntimeError("Discord exposes multiple active DM document routes")
+    return routes[0] if routes else ""
+
+
+def _route_bound_dm(matches: list[Any], route: str) -> Any | None:
+    if not route:
+        return None
+    routed = [control for control in matches if _dm_route(_control_value(control)) == route]
+    if not routed:
+        return None
+    # Multiple accessibility nodes with the same exact DM route represent the same
+    # conversation (e.g. ListItem parent + nested Hyperlink). Prefer the route-bearing
+    # Hyperlink but bind context identity to the semantic route, not this transient node.
+    priority = {"Hyperlink": 0, "ListItem": 1, "TreeItem": 2, "TabItem": 3, "Button": 4}
+    routed.sort(key=lambda control: priority.get(_control_type(control), 9))
+    return routed[0]
+
+
 def _channel_name(value: str) -> str:
-    # Strip only explicit channel markers, never fuzzy/subsequence-match a name.
+    # Strip only explicit accessibility-role metadata, never fuzzy/subsequence-match a name.
     result = _normalized(value)
+    result = re.sub(r"\s+\((?:direct|group) message\)(?:,.*)?$", "", result)
     for suffix in (" (text channel)", ", text channel"):
         if result.endswith(suffix):
             result = result[:-len(suffix)]
     return (result[1:] if result.startswith(("#", "@")) else result).strip()
+
+
+def _window_dm_destination(win: Any) -> str:
+    """Return an exact DM identity from Discord's native window title when exposed.
+
+    Discord commonly renders active DMs as "@name - Discord". This is accepted only
+    for @-prefixed DM titles; server/channel titles are intentionally not inferred.
+    """
+    try:
+        title = str(win.window_text() or "").strip()
+    except Exception:
+        try:
+            title = str(getattr(win.element_info, "name", "") or "").strip()
+        except Exception:
+            return ""
+    match = re.fullmatch(r"@(.+?)\s+-\s+Discord", title, re.IGNORECASE)
+    return _channel_name(match.group(1)) if match else ""
 
 
 def _visible(control: Any) -> bool:
@@ -187,8 +249,30 @@ def _context(win: Any, identity: tuple[int, int, float], destination: str = "", 
     if composer is None:
         return None
     current = _control_name(composer)[len("message "):]
-    selected = [control for control in _named(controls, current, _DESTINATION_TYPES, channel=True) if _selected(control)]
-    item = _unique(selected, "selected conversation", missing_ok=True)
+    active_route = _active_dm_route(controls) if current.startswith("@") else ""
+    destination_matches = _named(controls, current, _DESTINATION_TYPES, channel=True)
+    selected = [control for control in destination_matches if _selected(control)]
+    item = _route_bound_dm(selected, active_route)
+    if item is None:
+        item = _unique(selected, "selected conversation", missing_ok=True)
+    semantic_destination_id: tuple = ("route", active_route) if item is not None and active_route else ()
+
+    if item is None and current.startswith("@"):
+        # Some Discord/Electron builds expose the same DM as multiple nested UIA rows
+        # and never set SelectionItem state. Exact active document route + matching
+        # composer is sufficient to collapse those aliases even if the native window
+        # title has not refreshed from "Friends - Discord" yet.
+        fallback_types = _DESTINATION_TYPES | {"Button"}
+        matches = _named(controls, current, fallback_types, channel=True)
+        item = _route_bound_dm(matches, active_route)
+        if item is not None:
+            semantic_destination_id = ("route", active_route)
+        else:
+            # Without a route, require the independent native @name title before
+            # accepting one unique route-less row as the active conversation.
+            title_destination = _window_dm_destination(win)
+            if title_destination == _channel_name(current):
+                item = _unique(matches, "active DM conversation", missing_ok=True)
     if item is None:
         return None
     server_item = None
@@ -196,8 +280,15 @@ def _context(win: Any, identity: tuple[int, int, float], destination: str = "", 
         server_item = _unique(_named(controls, server, _SERVER_TYPES), "server", missing_ok=True)
         if server_item is None or not _selected(server_item):
             return None
-    return _Context(identity, _channel_name(current), _control_id(item), _control_name(composer),
-                    _control_id(composer), server, _control_id(server_item) if server_item is not None else ())
+    return _Context(
+        identity,
+        _channel_name(current),
+        semantic_destination_id or _control_id(item),
+        _control_name(composer),
+        _control_id(composer),
+        server,
+        _control_id(server_item) if server_item is not None else (),
+    )
 
 
 def _context_guard(win: Any, context: _Context, policy_guard: Callable[[], None] | None = None) -> None:
@@ -343,10 +434,17 @@ def discord_go_to(destination: str, server: str = "", *, _policy_guard: Callable
 def _send(win: Any, context: _Context, message: str,
           policy_guard: Callable[[], None] | None = None) -> dict[str, Any]:
     guard = lambda: _context_guard(win, context, policy_guard)
-    guard()
+    try:
+        guard()
+    except RuntimeError as exc:
+        raise InputNotDispatchedError(
+            f"Discord context changed before message input; inspect and re-resolve without task_verify: {exc}"
+        ) from exc
     composer = _composer(_controls(win, _CONTEXT_TYPES), context.destination)
     if composer is None or _control_value(composer) != "":
-        raise RuntimeError("Discord composer is unreadable or contains a draft; inspect it before sending")
+        raise InputNotDispatchedError(
+            "Discord composer is unreadable or contains a draft; no message input was dispatched"
+        )
     # The guard runs before focus, writing, Enter, and delivery probes. Never retry a send.
     try:
         result = ui_type(text=message, target=context.composer_name, submit=True, replace=False, state_guard=guard)
@@ -370,9 +468,16 @@ def discord_send_message(text: str, destination: str = "", server: str = "", *,
     win = _discord_window()
     identity = _identity(win)
     _focus_window(win)
-    context = _context(win, identity, target, scope)
+    try:
+        context = _context(win, identity, target, scope)
+    except RuntimeError as exc:
+        raise InputNotDispatchedError(
+            f"Discord destination could not be bound before message input; no message was sent: {exc}"
+        ) from exc
     if context is None:
-        raise RuntimeError("Discord selected destination could not be verified; message was not sent")
+        raise InputNotDispatchedError(
+            "Discord selected destination could not be verified before message input; no message was sent"
+        )
     return "VERIFIED: " + json.dumps(_send(win, context, message, _policy_guard), ensure_ascii=False)
 
 
@@ -402,7 +507,7 @@ def register_discord_tools(registry: ToolRegistry) -> None:
         ("discord_go_to", "Navigate to an exact Discord channel/DM through UI Automation, using the Quick Switcher only when needed. Specify server for server-scoped channels. Rejects ambiguous targets and verifies selected conversation plus matching composer.",
          {"destination": destination, "server": server}, ["destination"], discord_go_to),
         ("discord_send_message", "Send one explicitly requested message in the verified selected Discord conversation. Optional destination/server bind the intended context. Refuses existing drafts and changed focus; never retries uncertain delivery.",
-         {"text": message, "destination": server, "server": server}, ["text"], discord_send_message),
+         {"text": message, "destination": destination, "server": server}, ["text"], discord_send_message),
         ("discord_navigate_and_send", "Navigate to an exact Discord channel/DM then send exactly one explicitly requested message without another model round-trip. Specify server to disambiguate channels. Verifies selection and composer; aborts before send if context changes.",
          {"destination": destination, "text": message, "server": server}, ["destination", "text"], discord_navigate_and_send),
     ):

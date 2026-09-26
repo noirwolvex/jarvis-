@@ -17,7 +17,7 @@ from .permissions import Risk
 from .tools import ToolSpec
 
 
-_CHECKPOINTS = {"ui_wait_state", "browser_wait_state", "browser_wait"}
+_CHECKPOINTS = {"ui_wait_state", "browser_wait_state", "browser_wait", "interaction_wait"}
 _EXCLUDED = {"screen_observe", "take_screenshot", "browser_screenshot", "wait"}
 
 

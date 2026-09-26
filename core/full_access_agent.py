@@ -350,6 +350,11 @@ Full Access execution profile:
     def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None, *, resume_current: bool = False) -> str:
         self._active_emit = emit
         if not resume_current:
+            try:
+                from .interaction_scene import reset_interaction_scenes
+                reset_interaction_scenes()
+            except ImportError:
+                pass
             self.orchestrator.begin(user_text)
             self.workspace_context.save_snapshot()
             self.messages.append({"role": "user", "content": user_text})
@@ -435,9 +440,10 @@ Full Access execution profile:
 
                     result = (message.content or "Done.").strip()
                     if self.orchestrator.current and self.orchestrator.current.plan:
+                        resolver = getattr(self.orchestrator, "step_is_resolved", None)
                         pending = [
                             step for step in self.orchestrator.current.plan
-                            if step.status != "completed"
+                            if not (resolver(step) if resolver is not None else step.status == "completed")
                         ]
                         if pending:
                             self.messages.append({"role": "user", "content": "Required plan steps remain: " + ", ".join(step.id for step in pending) + ". Continue in order using observed evidence; do not silently skip these steps."})
@@ -628,6 +634,16 @@ Full Access execution profile:
             self.orchestrator.finish("incomplete", result)
             return result
         except Exception as exc:
+            if isinstance(exc, RuntimeError) and str(exc).startswith("AI_PROVIDER_RATE_LIMITED:"):
+                result = (
+                    str(exc)
+                    + " JARVIS paused with the current checkpoint intact; "
+                    "continue the same mission after quota becomes available or configure a fallback provider."
+                )
+                self.memory.add("assistant", result)
+                self.orchestrator.finish("waiting_user", result)
+                emit and emit(AgentEvent("status", result))
+                return result
             result = f"ERROR: {type(exc).__name__}: {exc}"
             self.memory.add("assistant", result)
             self.orchestrator.finish("failed", result)

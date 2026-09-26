@@ -292,13 +292,24 @@ class TaskOrchestrator:
             hints.append("The coordinate input was not executed. Call screen_observe, inspect the returned image and coordinate mapping, and resolve the target again before any coordinate input. Do not repeat the rejected coordinates without fresh evidence.")
         if result.startswith("ERROR: Observe the last"):
             hints.append("Inspect the previous action with ui_inspect or screen_observe, then call task_verify with observed evidence (verified=false if it failed) before another mutation. Do not retry the blocked click.")
-        if "verification requires successful observation" in low:
+        if "no non-task action has succeeded yet" in low:
+            hints.append("Do not call task_verify again yet. Execute or observe the next pending mission step with a non-task tool first; task_verify cannot create evidence.")
+        elif "verification requires successful observation" in low:
             hints.append("Call ui_inspect or screen_observe and obtain a successful fresh observation before task_verify. Rewording the claim or evidence does not create an observation; do not repeat task_verify until that read succeeds.")
         if (
             ("no input delivered" in low or "inputnotdispatchederror" in low)
             and ("editor" in low or tool_name in {"ui_type_native", "ui_type", "interaction_type"})
         ):
             hints.append("The text input was rejected before dispatch, so there is no typed action to verify. Do not call task_verify for this rejection. Re-inspect the exact editor, then retry the requested unsent draft through interaction_type; preserve submit=false.")
+        if (
+            (tool_name == "discord_send_message" or "discord_send_message" in low)
+            and ("inputnotdispatchederror" in low or "no message was sent" in low or "no message input was dispatched" in low)
+        ):
+            hints.append(
+                "Discord rejected the send before any message input was dispatched. Do not call task_verify for this rejection. "
+                "Re-resolve the current Discord conversation/composer, then retry the original discord_send_message once; "
+                "do not insert a separate draft/write recovery step."
+            )
         if "exact visible enabled matches" in low:
             hints.append("The semantic target is ambiguous. Use ui_inspect to identify the intended editable control, then retry semantic typing with its unique selector or control identity. Do not guess a coordinate to bypass target resolution.")
         if "foreground" in low or "focus" in low:

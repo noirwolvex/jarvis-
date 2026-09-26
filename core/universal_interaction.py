@@ -81,6 +81,7 @@ def interaction_inspect(
     max_controls: int = 120,
     frame_selector: str = "",
     force_refresh: bool = False,
+    actionable_only: bool = True,
 ) -> str:
     route = _surface(surface)
     if route == "browser":
@@ -98,6 +99,7 @@ def interaction_inspect(
     raw = ui_inspect(
         title=title,
         query=query,
+        actionable_only=bool(actionable_only),
         max_controls=max_controls,
         force_refresh=bool(force_refresh),
     )
@@ -305,6 +307,54 @@ def interaction_scroll(
     return spec.handler(**arguments)
 
 
+def interaction_wait(
+    *,
+    registry: ToolRegistry,
+    state: str = "visible",
+    surface: str = "auto",
+    target: str = "",
+    title: str = "",
+    control_type: str = "",
+    selector: dict[str, Any] | None = None,
+    browser_target: dict[str, Any] | None = None,
+    expected_version: str = "",
+    frame_selector: str = "",
+    timeout_ms: int = 1500,
+    text: str = "",
+) -> str:
+    """Universal read-only postcondition wait; never dispatches mouse or keyboard input."""
+    if expected_version:
+        raise ValueError("interaction_wait requires a stable exact locator, not a snapshot expected_version")
+    route = _surface(surface)
+    timeout = max(0, min(int(timeout_ms), 15000))
+    if route == "browser":
+        if state == "focused":
+            raise ValueError("Browser interaction_wait supports visible, hidden, enabled, or text state")
+        _require_permission(registry, "browser_wait_state")
+        from .browser_semantic import browser_wait_state
+        return browser_wait_state(
+            _browser_target(browser_target, target, control_type),
+            state=state,
+            timeout_ms=timeout,
+            text=text,
+            frame_selector=frame_selector,
+        )
+
+    if state not in {"visible", "focused"}:
+        raise ValueError("Desktop interaction_wait supports visible or focused state")
+    _require_permission(registry, "ui_wait_state")
+    _desktop_target(target, selector)
+    from .semantic_ui_tools import ui_wait_state
+    return ui_wait_state(
+        target=target,
+        title=title,
+        control_type=control_type,
+        state=state,
+        timeout_ms=timeout,
+        selector=selector,
+    )
+
+
 def interaction_hotkey(
     keys: list[str],
     *,
@@ -353,6 +403,7 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
             "surface": common["surface"], "title": common["title"], "query": {"type": "string", "maxLength": 500},
             "max_controls": {"type": "integer", "minimum": 1, "maximum": 250},
             "frame_selector": common["frame_selector"], "force_refresh": {"type": "boolean"},
+            "actionable_only": {"type": "boolean"},
         }, "additionalProperties": False},
         lambda **kwargs: interaction_inspect(registry=registry, **kwargs),
     ))
@@ -381,6 +432,18 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
             "focused_fallback": {"type": "boolean"},
         }, "required": ["text"], "additionalProperties": False},
         lambda text, **kwargs: interaction_type(text, registry=registry, **kwargs),
+    ))
+    registry.register(ToolSpec(
+        "interaction_wait",
+        "Universal read-only postcondition checkpoint. Auto-routes managed Chrome to bounded DOM polling and desktop apps to fresh UIA state polling. Use inside workflow_execute after delivered semantic clicks/hotkeys so execution can continue without another model turn.",
+        Risk.LOW,
+        {"type": "object", "properties": {
+            **common,
+            "state": {"enum": ["visible", "hidden", "enabled", "text", "focused"]},
+            "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 15000},
+            "text": {"type": "string", "maxLength": 1000},
+        }, "anyOf": [{"required": ["target"]}, {"required": ["selector"]}, {"required": ["browser_target"]}], "additionalProperties": False},
+        lambda **kwargs: interaction_wait(registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(
         "interaction_scroll",
