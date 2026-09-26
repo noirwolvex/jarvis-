@@ -144,6 +144,18 @@ class ExecutionRouter:
         }:
             return EngineRoute("CDP_DOM", "DOM", cls._fallbacks("CDP_DOM"))
 
+        if name.startswith("interaction_"):
+            surface = str(args.get("surface", "auto")).casefold()
+            if surface == "browser":
+                return EngineRoute("CDP_DOM", "DOM", cls._fallbacks("CDP_DOM"))
+            if surface == "desktop":
+                return EngineRoute("UIA", "UIA", cls._fallbacks("UIA"))
+            return EngineRoute(
+                "DIRECT",
+                "SEMANTIC_AUTO",
+                ("CDP_DOM", "UIA", "RUST_NATIVE", "VISION", "COORDINATE"),
+            )
+
         if name.startswith(("ui_", "dialog_", "discord_")) or name in {
             "list_windows",
             "inspect_window",
