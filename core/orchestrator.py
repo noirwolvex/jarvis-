@@ -302,7 +302,7 @@ class TaskOrchestrator:
         ):
             hints.append("The text input was rejected before dispatch, so there is no typed action to verify. Do not call task_verify for this rejection. Re-inspect the exact editor, then retry the requested unsent draft through interaction_type; preserve submit=false.")
         if (
-            tool_name == "discord_send_message"
+            (tool_name == "discord_send_message" or "discord_send_message" in low)
             and ("inputnotdispatchederror" in low or "no message was sent" in low or "no message input was dispatched" in low)
         ):
             hints.append(
