@@ -254,6 +254,52 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertIn("explicitly denied", registry.execute("discord_select_chat", {"position": 1}, approved=True))
         self.invoke.assert_not_called()
 
+    def test_route_dm_without_selected_state_write_send_never_calls_model(self):
+        from test_workflow_execution import WorkflowExecutionTests
+        fixture = WorkflowExecutionTests()
+        fixture.setUp()
+        self.addCleanup(fixture.doCleanups)
+
+        destination = nav._destination_name(self.first)
+        self.window.element_info.name = f"@{destination} - Discord"
+        self.first.selected = False
+
+        def navigate_without_selection(control, hwnd=None):
+            self.document.value = control.value
+            self.composer.element_info.name = "Message @" + nav._destination_name(control)
+            self.first.selected = False
+            return "invoke"
+
+        self.invoke.side_effect = navigate_without_selection
+        register_discord_tools(fixture.agent.tools)
+        launch = Mock(return_value="VERIFIED: Discord is foreground")
+        fixture.register("launch_installed_app", Risk.MEDIUM, launch, {"type": "object"})
+        fixture.agent.client.chat.completions.create.side_effect = RuntimeError("429 quota exhausted")
+
+        def discord_descendants(root, **kwargs):
+            kinds = kwargs.get("control_types")
+            return [
+                control for control in root.descendants()
+                if not kinds or control.element_info.control_type in kinds
+            ]
+
+        with patch.object(nav.discord, "_focus_window", return_value=42), \
+             patch.object(nav.discord, "_descendants", side_effect=discord_descendants), \
+             patch.object(nav.discord, "ui_type", return_value='VERIFIED: {"submitted":true}'), \
+             patch("core.full_access_agent._chrome_tab_rows", return_value=[]):
+            result = fixture.agent.run(
+                "OPEN DISCORD AND PRESS THE FIRST CHAT THEN WRITE FDD THEN SEND IT"
+            )
+
+        self.assertIn("Completed and verified", result)
+        self.assertEqual(
+            [trace.name for trace in fixture.agent.orchestrator.current.traces],
+            ["launch_installed_app", "discord_select_chat", "discord_send_message"],
+        )
+        fixture.agent.client.chat.completions.create.assert_not_called()
+        self.assertFalse(self.first.selected)
+        self.assertTrue(all(step.status == "completed" for step in fixture.agent.orchestrator.current.plan))
+
     def test_route_less_dm_write_send_fast_mission_never_calls_model(self):
         from test_workflow_execution import WorkflowExecutionTests
         fixture = WorkflowExecutionTests()
