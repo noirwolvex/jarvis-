@@ -35,6 +35,19 @@ def _norm(value: Any) -> str:
     return _clean(value).casefold()
 
 
+def _boolish(value: Any) -> bool | None:
+    if isinstance(value, bool):
+        return value
+    if value is None:
+        return None
+    text = _norm(value)
+    if text in {"true", "1", "yes", "on"}:
+        return True
+    if text in {"false", "0", "no", "off"}:
+        return False
+    return None
+
+
 def _rect_browser(bounds: dict[str, Any] | None) -> list[int]:
     if not isinstance(bounds, dict):
         return []
@@ -82,10 +95,10 @@ def _browser_nodes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "rect": _rect_browser(row.get("bounds")),
             "enabled": not bool(row.get("disabled")),
             "visible": True,
-            "selected": row.get("selected"),
+            "selected": _boolish(row.get("selected")),
             "focused": bool(row.get("focused")),
-            "checked": row.get("checked"),
-            "expanded": row.get("expanded"),
+            "checked": _boolish(row.get("checked")),
+            "expanded": _boolish(row.get("expanded")),
             "actionable": role.casefold() in _ACTIONABLE_BROWSER_ROLES,
             "target": {
                 "surface": "browser",
@@ -186,6 +199,10 @@ class SceneTracker:
 _SCENES = SceneTracker()
 
 
+def reset_interaction_scenes() -> None:
+    _SCENES.reset()
+
+
 def _capture(
     registry: ToolRegistry,
     *,
@@ -210,10 +227,16 @@ def _capture(
     snapshot = wrapped["snapshot"]
     if actual == "browser":
         nodes = _browser_nodes(snapshot)
-        context = f"browser:{snapshot.get('url', '')}:{frame_selector}"
+        context = (
+            f"browser:{snapshot.get('url', '')}:{frame_selector}"
+            f":q={_norm(query)}:limit={int(max_controls)}"
+        )
     else:
         nodes = _desktop_nodes(snapshot)
-        context = f"desktop:{snapshot.get('hwnd', '')}:{title}"
+        context = (
+            f"desktop:{snapshot.get('hwnd', '')}:{title}"
+            f":q={_norm(query)}:limit={int(max_controls)}"
+        )
     return actual, snapshot, nodes, context
 
 
