@@ -75,6 +75,10 @@ class DiscordToolsTests(unittest.TestCase):
         self.assertFalse(schema["additionalProperties"])
         self.assertIn("server", schema["properties"])
 
+    def test_dm_accessibility_suffix_normalizes_to_composer_destination(self):
+        self.assertEqual(discord._channel_name("Alice (direct message), Pinned,"), "alice")
+        self.assertEqual(discord._channel_name("Project Team (group message),"), "project team")
+
     def test_context_pushes_relevant_types_into_one_uia_query(self):
         win = Window(Control("general", selected=True), Control("Message #general", "Edit"),
                      Control("decorative noise", "Text"))
