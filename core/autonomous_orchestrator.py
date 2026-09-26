@@ -67,6 +67,7 @@ class ExecutionPlanStep(PlanStep):
     execution_backend: str = ""
     resolution_backend: str = ""
     verification_result: str = ""
+    mutation_delivered: bool = False
 
 
 @dataclass
@@ -294,6 +295,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             execution_backend=str(raw.get("execution_backend") or ""),
             resolution_backend=str(raw.get("resolution_backend") or ""),
             verification_result=str(raw.get("verification_result") or ""),
+            mutation_delivered=bool(raw.get("mutation_delivered", False)),
         )
 
     @_atomic_checkpoint
@@ -392,6 +394,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                 if not step.fallback_strategy:
                     step.fallback_strategy = list(route.fallback_chain)
                 if mutation and tool_succeeded(result):
+                    step.mutation_delivered = True
                     step.phase = "DELIVERED"
         self._persist(self.current)
 
@@ -503,6 +506,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
             step.execution_backend = ""
             step.resolution_backend = ""
             step.verification_result = ""
+            step.mutation_delivered = False
             inserted.append(step)
             previous_id = step.id
 
@@ -534,8 +538,22 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         self._persist(self.current)
         return inserted
 
+    @staticmethod
+    def step_requires_mutation(step: PlanStep) -> bool:
+        text = " ".join(
+            str(value or "") for value in (
+                getattr(step, "action", ""),
+                getattr(step, "description", ""),
+            )
+        ).casefold()
+        return bool(re.search(
+            r"\b(?:click|press|tap|select|choose|open|launch|activate|navigate|focus|"
+            r"type|write|enter|send|submit|post|save|delete|close|scroll|drag|drop|move)\b",
+            text,
+        ))
+
     def step_is_resolved(self, step: PlanStep) -> bool:
-        """Return true when a required node completed directly or via its recovery tail."""
+        """Return true when a required node completed directly or via a verified recovery path."""
         if step.status == "completed":
             return True
         if not isinstance(self.current, AutonomousTaskRun):
@@ -543,9 +561,20 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         for rewrite in reversed(self.current.graph_rewrites):
             if rewrite.failed_step_id != step.id or not rewrite.inserted_step_ids:
                 continue
+            recovery_nodes = [
+                item for item in self.current.plan
+                if item.id in set(rewrite.inserted_step_ids)
+            ]
             tail_id = rewrite.inserted_step_ids[-1]
-            tail = next((item for item in self.current.plan if item.id == tail_id), None)
-            return bool(tail and tail.status == "completed")
+            tail = next((item for item in recovery_nodes if item.id == tail_id), None)
+            if not tail or tail.status != "completed":
+                return False
+            if self.step_requires_mutation(step):
+                return any(
+                    isinstance(item, ExecutionPlanStep) and item.mutation_delivered
+                    for item in recovery_nodes
+                )
+            return True
         return False
 
     def live_task_graph(self) -> list[dict[str, Any]]:
@@ -586,6 +615,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
                     "expected_result": item.expected_result,
                     "verification_method": item.verification_method,
                     "verification_result": projected_verification,
+                    "mutation_delivered": item.mutation_delivered,
                     "fallback_strategy": list(item.fallback_strategy),
                     "retry_policy": dict(item.retry_policy),
                     "status": "COMPLETED" if recovered else item.phase,
