@@ -119,7 +119,7 @@ def _desktop_nodes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "actionable": kind in _ACTIONABLE_DESKTOP_TYPES,
             "target": {
                 "surface": "desktop",
-                "target": name,
+                "target": name or _clean(row.get("automation_id")),
                 "control_type": kind,
             },
         }
@@ -366,6 +366,28 @@ def interaction_resolve(
                 "name": selected_node["name"],
             },
         }
+    elif actual == "desktop":
+        exact_token = _clean(selected_node.get("name")) or _clean(selected_node.get("automation_id"))
+        if ordinal is not None:
+            selector: dict[str, Any] = {"ordinal": ordinal}
+            if selected is not None:
+                selector["selected"] = selected
+            if focused is not None:
+                selector["focused"] = focused
+            target = {
+                "surface": "desktop",
+                "target": query or exact_token,
+                "control_type": role or selected_node.get("role", ""),
+                "selector": selector,
+            }
+        elif exact_token:
+            target = {
+                "surface": "desktop",
+                "target": exact_token,
+                "control_type": selected_node.get("role", ""),
+            }
+        else:
+            target = {}
 
     confidence = 1.0 if match_kind == "exact" else 0.97 if match_kind.startswith("ordinal_exact") else 0.93
     return "VERIFIED: " + json.dumps({
