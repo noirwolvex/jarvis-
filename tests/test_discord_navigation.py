@@ -296,6 +296,8 @@ class DiscordNavigationTests(unittest.TestCase):
             [trace.name for trace in fixture.agent.orchestrator.current.traces],
             ["launch_installed_app", "discord_select_chat", "discord_send_message"],
         )
+        send_trace = fixture.agent.orchestrator.current.traces[-1]
+        self.assertEqual(send_trace.arguments["destination"], destination)
         fixture.agent.client.chat.completions.create.assert_not_called()
         self.assertFalse(self.first.selected)
         self.assertTrue(all(step.status == "completed" for step in fixture.agent.orchestrator.current.plan))
