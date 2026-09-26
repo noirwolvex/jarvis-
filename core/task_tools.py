@@ -61,12 +61,31 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             raise ValueError(f"Unsupported step status: {status}")
 
         verified_evidence = None
+        target_step = None
+        mutation_required = False
+        recent_mutation_attempt = False
         if normalized == "completed" and orchestrator.current is not None:
+            target_step = next((step for step in orchestrator.current.plan if step.id == step_id), None)
+            requires_mutation = getattr(orchestrator, "step_requires_mutation", None)
+            mutation_required = bool(
+                target_step is not None
+                and requires_mutation is not None
+                and requires_mutation(target_step)
+            )
             recent = []
             for trace in reversed(orchestrator.current.traces):
                 if trace.name == "task_update_step":
                     break
                 recent.append(trace)
+            recent_start = len(orchestrator.current.traces) - len(recent)
+            mutation_index = orchestrator.current.last_mutation_index
+            recent_mutation_attempt = recent_start <= mutation_index < len(orchestrator.current.traces)
+            if mutation_required and not recent_mutation_attempt:
+                raise ValueError(
+                    "Cannot complete a mutating plan step from observation-only evidence; "
+                    "execute or attempt the requested click/select/open/type/send action first, "
+                    "then verify its observed outcome without replaying uncertain side effects"
+                )
             evidence = [
                 trace for trace in recent
                 if trace.success and not trace.name.startswith(("task_", "workflow_"))
@@ -90,6 +109,18 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             )
             if verified_evidence is None and not independently_verified:
                 raise ValueError("Cannot complete a step from delivery alone; observe the outcome and verify it first")
+
+        if (
+            normalized == "completed"
+            and mutation_required
+            and recent_mutation_attempt
+            and target_step is not None
+            and hasattr(target_step, "mutation_delivered")
+        ):
+            # A successful mutation or an uncertain mutation whose postcondition was
+            # independently verified both establish that the requested state change
+            # happened. This does not authorize replay.
+            target_step.mutation_delivered = True
 
         orchestrator.update_step(step_id, normalized, result)
         if normalized == "completed" and verified_evidence is not None:
