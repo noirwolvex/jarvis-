@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 from dataclasses import dataclass
 from functools import partial
 from typing import Any, Callable
@@ -44,8 +45,9 @@ def _normalized(value: str) -> str:
 
 
 def _channel_name(value: str) -> str:
-    # Strip only explicit channel markers, never fuzzy/subsequence-match a name.
+    # Strip only explicit accessibility-role metadata, never fuzzy/subsequence-match a name.
     result = _normalized(value)
+    result = re.sub(r"\s+\((?:direct|group) message\)(?:,.*)?$", "", result)
     for suffix in (" (text channel)", ", text channel"):
         if result.endswith(suffix):
             result = result[:-len(suffix)]
