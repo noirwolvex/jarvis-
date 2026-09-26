@@ -18,6 +18,15 @@ class AdaptiveExecutionRouterTests(unittest.TestCase):
         self.assertEqual(route.fallback_chain, ("UIA", "RUST_NATIVE", "VISION", "COORDINATE"))
 
 
+    def test_universal_interaction_route_tracks_requested_surface(self) -> None:
+        browser = ExecutionRouter.classify("interaction_scene", {"surface": "browser"})
+        desktop = ExecutionRouter.classify("interaction_click", {"surface": "desktop"})
+        automatic = ExecutionRouter.classify("interaction_resolve", {"surface": "auto"})
+        self.assertEqual((browser.execution_backend, browser.resolution_backend), ("CDP_DOM", "DOM"))
+        self.assertEqual((desktop.execution_backend, desktop.resolution_backend), ("UIA", "UIA"))
+        self.assertEqual((automatic.execution_backend, automatic.resolution_backend), ("DIRECT", "SEMANTIC_AUTO"))
+
+
 class DynamicDagRewriteTests(unittest.TestCase):
     def test_failed_step_is_preserved_and_downstream_is_rewired(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
