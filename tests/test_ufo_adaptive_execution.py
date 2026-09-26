@@ -145,6 +145,29 @@ class DynamicDagRewriteTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "observation-only evidence"):
                 handler("click-dm", "completed", "First DM located")
 
+    def test_recovery_cannot_add_write_or_send_to_failed_selection_step(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = AutonomousTaskOrchestrator(tmp)
+            orchestrator.begin("Select chat then send")
+            orchestrator.set_plan([
+                {"id": "select", "description": "Select the first Discord chat"},
+                {"id": "send", "description": "Write and send FDD", "depends_on": ["select"]},
+            ])
+            orchestrator.update_step("select", "running")
+            orchestrator.update_step("select", "failed", "UIA selection did not verify")
+            with self.assertRaisesRegex(ValueError, "broadens"):
+                orchestrator.rewrite_failed_step(
+                    "select",
+                    [
+                        {"description": "Click the first Discord chat visually"},
+                        {"description": "Write FDD into the composer without sending"},
+                    ],
+                    "Recover selector",
+                )
+            send = next(step for step in orchestrator.current.plan if step.id == "send")
+            self.assertEqual(send.depends_on, ["select"])
+            self.assertEqual(len(orchestrator.current.plan), 2)
+
     def test_rewrite_refuses_completed_node_and_duplicate_ids(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             orchestrator = AutonomousTaskOrchestrator(tmp)
