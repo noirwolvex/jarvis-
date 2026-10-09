@@ -17,6 +17,7 @@ _DESKTOP_FAST_EXPLICIT = {
     "control_guide", "list_skills", "load_skill",
     "find_installed_app",
     "launch_installed_app",
+    "open_known_folder",
     "open_application",
     "open_application_and_type",
     "list_windows",
