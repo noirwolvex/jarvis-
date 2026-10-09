@@ -91,6 +91,37 @@ class DurableExecutionTests(unittest.TestCase):
             state.verify("saved", True, "fixed and read back")
             self.assertTrue(state.all_required_verifications_passed())
 
+    def test_failed_or_empty_review_does_not_release_followup_mutations(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = TaskOrchestrator(tmp)
+            state.begin("type and verify before submitting")
+            state.record_tool("ui_type", {"text": "draft"}, "DELIVERED: draft", 1, 1, mutation=True)
+            state.record_tool("ui_inspect", {}, "Current editor value is unchanged", 1, 2)
+            self.assertTrue(state.needs_action_review())
+
+            state.verify("draft was entered", False, "readback did not match")
+            self.assertTrue(state.needs_action_review(), "Failed review must not authorize the next write")
+            state.verify("draft was entered", True, "")
+            self.assertTrue(state.needs_action_review(), "An empty verification is not supporting evidence")
+
+            state.verify("draft was entered", True, "exact editor readback matched")
+            self.assertFalse(state.needs_action_review())
+
+    def test_later_failed_review_invalidates_earlier_successful_review(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            state = TaskOrchestrator(tmp)
+            state.begin("verify selected target before typing")
+            state.record_tool("ui_activate", {}, "DELIVERED: activated", 1, 1, mutation=True)
+            state.record_tool("ui_inspect", {}, "VERIFIED: selected chat", 1, 2)
+            state.verify("correct chat selected", True, "first inspection")
+            self.assertFalse(state.needs_action_review())
+
+            state.record_tool("ui_inspect", {}, "VERIFIED: selection changed", 1, 3)
+            state.verify("correct chat still selected", False, "window focus changed")
+            self.assertTrue(state.needs_action_review(), "Latest failed review must supersede stale success")
+            state.verify("correct chat selected again", True, "fresh independent readback")
+            self.assertFalse(state.needs_action_review())
+
     def test_failed_process_and_browser_guard_are_not_success(self):
         for result in ("exit_code=1\nfailed", "cwd=x\nexit_code=-9", "BROWSER_ACTION_BLOCKED: captcha", "CANCELLED: stop"):
             self.assertFalse(tool_succeeded(result))
