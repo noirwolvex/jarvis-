@@ -505,11 +505,11 @@ def compile_fast_mission(goal: str) -> list[FastStep] | None:
     # An explicit File Explorer → Downloads request is a local OS operation.
     # Match the whole goal: never drop a trailing instruction or guess a folder.
     downloads = re.fullmatch(
-        r"(?:please\\s+)?(?:open|launch|start)\\s+(?:the\\s+)?"
-        r"(?:file\\s+explor(?:er|e)|windows\\s+explorer|explorer)"
-        r"\\s+(?:and(?:\\s+then)?|then)\\s+"
-        r"(?:(?:go|navigate)\\s+to|open|press|click)\\s+"
-        r"(?:the\\s+)?downloads(?:\\s+(?:folder|section))?",
+        r"(?:please\s+)?(?:open|launch|start)\s+(?:the\s+)?"
+        r"(?:file\s+explor(?:er|e)|windows\s+explorer|explorer)"
+        r"\s+(?:and(?:\s+then)?|then)\s+"
+        r"(?:(?:go|navigate)\s+to|open|press|click)\s+"
+        r"(?:the\s+)?downloads(?:\s+(?:folder|section))?",
         text, re.I,
     )
     if downloads:
