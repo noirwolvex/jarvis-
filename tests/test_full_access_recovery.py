@@ -91,6 +91,20 @@ class DesktopRecoveryTests(unittest.TestCase):
         self.assertEqual(metrics["ordered_action_repair_requests"], 1)
         self.assertTrue(any("unexecuted original clauses" in str(item) for item in self.agent.messages))
 
+    def test_two_typing_tools_cannot_substitute_for_click_then_type(self):
+        self.agent._chat_completion.side_effect = [
+            response(("ui_type", {"text": "first"}), ("ui_type", {"text": "second"})),
+            response(),
+            response(),
+        ]
+        result = self.agent.run("click editor then type hello")
+        self.assertIn("INCOMPLETE:", result)
+        self.assertEqual(self.agent.orchestrator.current.status, "incomplete")
+        self.assertEqual(self.type_text.call_count, 2)
+        self.assertEqual(self.agent.orchestrator.current.metrics["ordered_actions_required"], 2)
+        self.assertEqual(self.agent.orchestrator.current.metrics["ordered_actions_evidenced"], 0)
+        self.assertEqual(self.agent._chat_completion.call_count, 3)
+
     def test_explicit_multi_step_goal_completes_after_both_verified_actions(self):
         self.agent._chat_completion.side_effect = [
             response(("ui_type", {"text": "hello"}), ("ui_type", {"text": "world"})),
