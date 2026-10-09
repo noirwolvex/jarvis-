@@ -74,6 +74,49 @@ class DesktopRecoveryTests(unittest.TestCase):
             mock.start()
             self.addCleanup(mock.stop)
 
+    def test_explicit_multi_step_goal_cannot_finish_with_a_missing_action(self):
+        self.agent._chat_completion.side_effect = [
+            response(("ui_type", {"text": "hello"})),
+            response(),
+            response(),
+        ]
+        result = self.agent.run("type hello and then press enter")
+        self.assertTrue(result.startswith("INCOMPLETE:"), result)
+        self.assertEqual(self.agent.orchestrator.current.status, "incomplete")
+        self.type_text.assert_called_once_with(text="hello")
+        self.assertEqual(self.agent._chat_completion.call_count, 3)
+        metrics = self.agent.orchestrator.current.metrics
+        self.assertEqual(metrics["ordered_actions_required"], 2)
+        self.assertEqual(metrics["ordered_actions_evidenced"], 1)
+        self.assertEqual(metrics["ordered_action_repair_requests"], 1)
+        self.assertTrue(any("unexecuted original clauses" in str(item) for item in self.agent.messages))
+
+    def test_two_typing_tools_cannot_substitute_for_click_then_type(self):
+        self.agent._chat_completion.side_effect = [
+            response(("ui_type", {"text": "first"}), ("ui_type", {"text": "second"})),
+            response(),
+            response(),
+        ]
+        result = self.agent.run("click editor then type hello")
+        self.assertIn("INCOMPLETE:", result)
+        self.assertEqual(self.agent.orchestrator.current.status, "incomplete")
+        self.assertEqual(self.type_text.call_count, 2)
+        self.assertEqual(self.agent.orchestrator.current.metrics["ordered_actions_required"], 2)
+        self.assertEqual(self.agent.orchestrator.current.metrics["ordered_actions_evidenced"], 0)
+        self.assertEqual(self.agent._chat_completion.call_count, 3)
+
+    def test_explicit_multi_step_goal_completes_after_both_verified_actions(self):
+        self.agent._chat_completion.side_effect = [
+            response(("ui_type", {"text": "hello"}), ("ui_type", {"text": "world"})),
+            response(),
+        ]
+        result = self.agent.run("type hello and then write world")
+        self.assertEqual(result, "Done")
+        self.assertEqual(self.agent.orchestrator.current.status, "completed")
+        self.assertEqual(self.type_text.call_count, 2)
+        self.assertEqual(self.agent.orchestrator.current.metrics["ordered_actions_evidenced"], 2)
+        self.assertEqual(self.agent._chat_completion.call_count, 2)
+
     def test_provider_rate_limit_pauses_with_checkpoint_instead_of_crashing(self):
         self.agent._chat_completion.side_effect = RuntimeError(
             "AI_PROVIDER_RATE_LIMITED: quota exhausted"
