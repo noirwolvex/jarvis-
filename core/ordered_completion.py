@@ -8,7 +8,6 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
-from .execution_telemetry import input_not_dispatched
 
 
 _ACTIONS = (
@@ -63,7 +62,7 @@ def verified_action_count(current: Any, is_mutation: Callable[[str], bool]) -> i
         name = str(getattr(trace, "name", ""))
         result = str(getattr(trace, "result", ""))
         if (not is_mutation(name) or name.startswith(("task_", "workflow_"))
-                or input_not_dispatched(result)
+                or getattr(trace, "execution_backend", "") == "not_dispatched"
                 or result.startswith(("PERMISSION_DENIED", "CANCELLED", "BROWSER_ACTION_BLOCKED"))):
             continue
         direct = getattr(trace, "success", False) and result.startswith("VERIFIED:")
@@ -168,7 +167,7 @@ def verified_ordered_stage_count(
     for index, trace in enumerate(getattr(current, "traces", []) or []):
         name = str(getattr(trace, "name", ""))
         result = str(getattr(trace, "result", ""))
-        if (not is_mutation(name) or input_not_dispatched(result)
+        if (not is_mutation(name) or getattr(trace, "execution_backend", "") == "not_dispatched"
                 or result.startswith(("PERMISSION_DENIED", "CANCELLED", "BROWSER_ACTION_BLOCKED"))):
             continue
         stages = _KNOWN_TOOL_STAGES.get(name)
