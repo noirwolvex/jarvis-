@@ -389,7 +389,10 @@ class DesktopRecoveryTests(unittest.TestCase):
             response(("task_verify", {"claim": "input outcome", "verified": False, "evidence": "Fresh screen shows no requested text"})),
             response(),
         ]
-        self.agent.run("type h")
+        result = self.agent.run("type h")
+        self.assertIn("Verification failed", result)
+        self.assertEqual(self.agent.orchestrator.current.status, "incomplete")
+        self.assertEqual(self.agent._chat_completion.call_count, 3)
         self.observe.assert_called_once()
         self.type_text.assert_called_once_with(text="h")
         traces = self.agent.orchestrator.current.traces
