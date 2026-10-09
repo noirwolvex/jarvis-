@@ -663,6 +663,38 @@ Full Access execution profile:
                         if pending:
                             self.messages.append({"role": "user", "content": "Required plan steps remain: " + ", ".join(step.id for step in pending) + ". Continue in order using observed evidence; do not silently skip these steps."})
                             continue
+
+                    # A model may omit a requested clause from its own plan, then
+                    # report "Done" after verifying only the work it remembered.
+                    # Independently enforce a conservative lower bound for goals
+                    # with clearly separated imperative actions. Never infer that
+                    # an unmatched read-only tool delivered a missing mutation.
+                    from .ordered_completion import explicit_action_count, verified_action_count
+                    required_actions = explicit_action_count(user_text)
+                    if required_actions:
+                        current = self.orchestrator.current
+                        completed_actions = verified_action_count(current, self._is_mutation)
+                        current.metrics["ordered_actions_required"] = required_actions
+                        current.metrics["ordered_actions_evidenced"] = completed_actions
+                        if completed_actions < required_actions:
+                            retries = current.metrics.get("ordered_action_repair_requests", 0)
+                            issue = (
+                                f"The objective contains at least {required_actions} separately "
+                                f"requested actions, but only {completed_actions} have execution "
+                                "evidence. Do not claim completion or repeat verified effects."
+                            )
+                            if retries < 1:
+                                current.metrics["ordered_action_repair_requests"] = retries + 1
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": issue + " Inspect the checkpoint and finish only the "
+                                    "unexecuted original clauses in order; verify each outcome."
+                                })
+                                continue
+                            result = "INCOMPLETE: " + issue + " Checkpoint preserved for safe recovery."
+                            self.memory.add("assistant", result)
+                            self.orchestrator.finish("incomplete", result)
+                            return result
                     self.memory.add("assistant", result)
                     self.orchestrator.finish("completed", result)
                     return result
