@@ -67,8 +67,8 @@ class VerifiedKnownFolderTests(unittest.TestCase):
         known.register_known_folder_tools(registry)
         spec = registry._tools["open_known_folder"]
         self.assertEqual(spec.risk, Risk.MEDIUM)
-        self.assertEqual(spec.schema["properties"]["folder"]["enum"], ["Downloads"])
-        self.assertEqual(spec.schema["required"], ["folder"])
+        self.assertEqual(spec.input_schema["properties"]["folder"]["enum"], ["Downloads"])
+        self.assertEqual(spec.input_schema["required"], ["folder"])
 
 
 if __name__ == "__main__":
