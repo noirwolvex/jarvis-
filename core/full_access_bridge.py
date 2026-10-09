@@ -49,6 +49,8 @@ def build_full_access_agent():
     agent.tools.permissions.set_access_mode("full")
     agent.require_action_confirmation = True
     register_app_tools(agent.tools)
+    from .known_folder_tools import register_known_folder_tools
+    register_known_folder_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
     register_browser_fast_tools(agent.tools)

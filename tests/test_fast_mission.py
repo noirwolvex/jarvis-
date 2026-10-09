@@ -9,6 +9,26 @@ from core.fast_mission import compile_fast_mission, execute_fast_mission
 
 
 class FastMissionCompilerTests(unittest.TestCase):
+    def test_explorer_downloads_compiles_without_a_model(self):
+        for command in (
+            "OPEN FILE EXPLORER AND GO TO DOWNLOADS",
+            "OPEN FILE EXPLORE AND GO TO THE DOWNLOADS SECTION",
+            "please open Windows Explorer then navigate to Downloads folder",
+            "open explorer and click Downloads",
+        ):
+            with self.subTest(command=command):
+                steps = compile_fast_mission(command)
+                self.assertIsNotNone(steps)
+                self.assertEqual([step.tool for step in steps], ["open_known_folder"])
+                self.assertEqual(steps[0].arguments["folder"], "Downloads")
+        for command in (
+            "open file explorer and go to downloads and delete a file",
+            "open file explorer and go to documents",
+            "open file explorer and go to downloads then send a message",
+        ):
+            with self.subTest(command=command):
+                self.assertIsNone(compile_fast_mission(command))
+
     def test_reported_google_search_suffix_is_not_part_of_query(self):
         for command in ("SEARCH FOR A CAT IN GOOGLE", "search for A CAT on Google",
                         "search for A CAT using Google Chrome"):
