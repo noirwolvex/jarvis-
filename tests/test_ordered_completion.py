@@ -23,6 +23,31 @@ class OrderedCompletionContractTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertEqual(explicit_action_count(text), expected)
 
+    def test_two_types_cannot_satisfy_click_then_type(self):
+        from core.ordered_completion import verified_ordered_stage_count
+        with tempfile.TemporaryDirectory() as tmp:
+            state = TaskOrchestrator(tmp)
+            state.begin("click confirm then type hello")
+            for word in ("first", "second"):
+                state.record_tool("ui_type", {"text": word}, "VERIFIED: exact value", 1, 1, mutation=True)
+            self.assertEqual(verified_action_count(state.current, lambda name: name == "ui_type"), 2)
+            self.assertEqual(
+                verified_ordered_stage_count("click confirm then type hello", state.current, lambda _: True),
+                0,
+            )
+
+    def test_verified_mouse_then_keyboard_satisfies_explicit_order(self):
+        from core.ordered_completion import verified_ordered_stage_count
+        with tempfile.TemporaryDirectory() as tmp:
+            state = TaskOrchestrator(tmp)
+            state.begin("click editor then type hello")
+            state.record_tool("interaction_click", {}, "VERIFIED: editor selected", 1, 1, mutation=True)
+            state.record_tool("interaction_type", {"text": "hello"}, "VERIFIED: exact value", 1, 1, mutation=True)
+            self.assertEqual(
+                verified_ordered_stage_count("click editor then type hello", state.current, lambda _: True),
+                2,
+            )
+
     def test_plain_read_only_evidence_does_not_cover_missing_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = TaskOrchestrator(tmp)
