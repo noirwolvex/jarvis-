@@ -9,6 +9,8 @@ import json
 import time
 from typing import Any, Callable
 
+from .desktop_input import InputNotDispatchedError
+
 
 _CHALLENGE_JS = r"""() => {
   if (!document.documentElement || !document.body) throw new Error('Page inspection unavailable');
@@ -41,35 +43,68 @@ _SNAPSHOT_JS = r"""({force, max_nodes}) => {
       && performance.now() - s.cache.created < 500)
     return {...s.cache.result, cached:true};
   const text = value => String(value || '').replace(/\s+/g,' ').trim().slice(0,180);
-  const visible = el => {
-    const r = el.getBoundingClientRect(); const st = getComputedStyle(el);
-    return r.width > 0 && r.height > 0 && st.display !== 'none' && st.visibility !== 'hidden'
-      && !el.closest('[aria-hidden="true"],[inert]') && r.bottom > 0 && r.right > 0
-      && r.top < innerHeight && r.left < innerWidth;
+  const composedParent = el => el.assignedSlot || el.parentElement || el.getRootNode()?.host || null;
+  const composedClosest = (el, selector) => {
+    for (let parent = el; parent; parent = composedParent(parent))
+      if (parent.matches(selector)) return parent;
+    return null;
+  };
+  const styles = new Map();
+  const style = el => {
+    if (!styles.has(el)) styles.set(el, getComputedStyle(el));
+    return styles.get(el);
+  };
+  const visible = (el, r) => {
+    if (r.width <= 0 || r.height <= 0 || r.bottom <= 0 || r.right <= 0
+        || r.top >= innerHeight || r.left >= innerWidth) return false;
+    const st = style(el);
+    return st.display !== 'none' && !['hidden','collapse'].includes(st.visibility)
+      && !composedClosest(el, '[aria-hidden="true"],[inert]');
   };
   const role = el => el.getAttribute('role') || ({A:'link',BUTTON:'button',TEXTAREA:'textbox',
-    SELECT:'combobox',NAV:'navigation',MAIN:'main',DIALOG:'dialog',FORM:'form',H1:'heading',
-    H2:'heading',H3:'heading',IFRAME:'iframe'}[el.tagName]) || (el.tagName === 'INPUT'
-      ? ({checkbox:'checkbox',radio:'radio',range:'slider',button:'button',submit:'button'}[el.type] || 'textbox')
+    NAV:'navigation',MAIN:'main',DIALOG:'dialog',FORM:'form',H1:'heading',
+    H2:'heading',H3:'heading',H4:'heading',H5:'heading',H6:'heading',PROGRESS:'progressbar',
+    SUMMARY:'button',IFRAME:'iframe'}[el.tagName]) || (el.tagName === 'INPUT'
+      ? ({checkbox:'checkbox',radio:'radio',range:'slider',button:'button',submit:'button',
+          reset:'button',image:'button',search:'searchbox',number:'spinbutton',
+          text:'textbox',email:'textbox',tel:'textbox',url:'textbox'}[el.type] || 'generic')
+      : el.tagName === 'SELECT' ? (el.multiple || el.size > 1 ? 'listbox' : 'combobox')
       : (el.isContentEditable ? 'textbox' : 'generic'));
   const name = el => {
     const ids = (el.getAttribute('aria-labelledby') || '').split(/\s+/).filter(Boolean);
-    const labelled = ids.map(id => document.getElementById(id)?.textContent || '').join(' ');
-    return text(el.getAttribute('aria-label') || labelled ||
+    const labelled = ids.map(id => el.getRootNode().getElementById?.(id)?.textContent || '').join(' ').trim();
+    return text(labelled || el.getAttribute('aria-label') ||
       (el.labels ? [...el.labels].map(l => l.textContent).join(' ') : '') ||
-      el.getAttribute('alt') || el.getAttribute('title') || el.getAttribute('placeholder') ||
-      (el.matches('input,textarea,main,nav,form,dialog') || el.isContentEditable ? '' : safeText(el)));
+      el.getAttribute('alt') ||
+      (el.matches('input[type="button"],input[type="submit"],input[type="reset"]') ? el.value : '') ||
+      (el.matches('input,textarea,main,nav,form,dialog') || el.isContentEditable ? '' : safeText(el)) ||
+      el.getAttribute('title') || el.getAttribute('placeholder'));
   };
   const safeText = el => {
-    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT); let value = '', visited = 0;
+    // Ignore hidden/decorative subtrees and editors; drafts never become labels.
+    // Include inline image labels so icon/text buttons resolve by their actual name.
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT | NodeFilter.SHOW_ELEMENT, {
+      acceptNode(node) {
+        if (node.nodeType === Node.TEXT_NODE) return NodeFilter.FILTER_ACCEPT;
+        if (node.matches('input,textarea,[contenteditable],script,style,[aria-hidden="true"],[inert]'))
+          return NodeFilter.FILTER_REJECT;
+        const st = style(node);
+        return st.display === 'none' || ['hidden','collapse'].includes(st.visibility)
+          ? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT;
+      }
+    }); let value = '', visited = 0;
     for (let node = walker.nextNode(); node && visited++ < 200; node = walker.nextNode()) {
-      if (!node.parentElement?.closest('input,textarea,[contenteditable]')) value += ' ' + node.textContent;
+      if (node.nodeType === Node.TEXT_NODE) value += ' ' + node.textContent;
+      else if (node.matches('img[alt]')) value += ' ' + node.getAttribute('alt');
       if (value.length >= 180) break;
     }
     return value;
   };
-  const selector = 'a[href],button,input:not([type="hidden"]),textarea,select,[role],[contenteditable]:not([contenteditable="false"]),nav,main,form,dialog,h1,h2,h3,iframe';
-  const candidates = []; const roots = [document]; let scanned = 0;
+  const selector = 'a[href],button,input:not([type="hidden"]),textarea,select,summary,[role],[contenteditable]:not([contenteditable="false"]),[tabindex],[onclick],nav,main,form,dialog,h1,h2,h3,h4,h5,h6,progress,iframe,canvas';
+  const interactive = el => el.matches('a[href],button,input:not([type="hidden"]),textarea,select,summary,[onclick]')
+    || el.isContentEditable || el.tabIndex >= 0;
+  const candidates = []; const geometry = new Map(); const modal = new Map();
+  const roots = [document]; let scanned = 0;
   while (roots.length && scanned < 3000) {
     const root = roots.shift();
     const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT);
@@ -82,24 +117,39 @@ _SNAPSHOT_JS = r"""({force, max_nodes}) => {
         }
         roots.push(el.shadowRoot);
       }
-      if (el.matches(selector) && visible(el)) candidates.push(el);
+      if (el.matches(selector)) {
+        const r = el.getBoundingClientRect();
+        if (visible(el, r)) {
+          candidates.push(el); geometry.set(el, r);
+          modal.set(el, !!composedClosest(el, 'dialog,[role="dialog"],[aria-modal="true"]'));
+        }
+      }
     }
   }
-  // Modal and focused controls come first so bounded snapshots retain immediate context.
-  candidates.sort((a,b) => Number(!!b.closest('dialog,[role="dialog"],[aria-modal="true"]'))
-    - Number(!!a.closest('dialog,[role="dialog"],[aria-modal="true"]')));
   let active = document.activeElement;
   while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+  // Keep the current editor and modal controls even in a small bounded snapshot.
+  candidates.sort((a,b) => Number(b === active) - Number(a === active)
+    || Number(modal.get(b)) - Number(modal.get(a)));
   const selected = candidates.slice(0,max_nodes); const ids = new Map(); s.nodes.clear();
   for (const el of selected) {
     const id = s.ids.get(el) || 'n' + s.next++; s.ids.set(el,id); ids.set(el,id); s.nodes.set(id,el);
   }
   const nodes = selected.map(el => {
-    let parent = el.parentElement; while (parent && !ids.has(parent)) parent = parent.parentElement;
-    const r = el.getBoundingClientRect();
-    return {node_id:ids.get(el), parent:ids.get(parent) || null, role:role(el), name:name(el),
-      tag:el.tagName.toLowerCase(), id:text(el.id), disabled:!!el.disabled || el.getAttribute('aria-disabled') === 'true',
-      focused:el === active, expanded:el.getAttribute('aria-expanded'),
+    let parent = composedParent(el); while (parent && !ids.has(parent)) parent = composedParent(parent);
+    const r = geometry.get(el);
+    const accessibleName = name(el);
+    return {node_id:ids.get(el), parent:ids.get(parent) || null, role:role(el), name:accessibleName,
+      tag:el.tagName.toLowerCase(), id:text(el.id), disabled:el.matches(':disabled')
+        || composedClosest(el, '[aria-disabled]')?.getAttribute('aria-disabled') === 'true',
+      focused:el === active, interactive:interactive(el), editable:el.isContentEditable,
+      input_kind:el.tagName === 'SELECT' ? 'select' : (el.tagName === 'TEXTAREA' || el.isContentEditable
+        || (el.tagName === 'INPUT' && ['text','search','email','password','tel','url','number','date','datetime-local','month','time','week'].includes(el.type)) ? 'text' : ''),
+      // A bounded display label may be shorter than its real accessible name.
+      // Keep its pinned node identity instead of emitting an inexact name locator.
+      role_resolvable:accessibleName.length < 180 && (!!el.getAttribute('role')
+        || (!el.isContentEditable && el.tagName !== 'SUMMARY' && role(el) !== 'generic')),
+      expanded:el.getAttribute('aria-expanded'),
       selected:el.getAttribute('aria-selected'), checked:el.getAttribute('aria-checked') ?? (el.type === 'checkbox' ? !!el.checked : null),
       bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)},
       href:el.tagName === 'A' ? String(el.href).slice(0,1024) : undefined,
@@ -107,11 +157,19 @@ _SNAPSHOT_JS = r"""({force, max_nodes}) => {
   });
   const result = {version,url:location.href,title:document.title,ready_state:document.readyState,
     viewport:{width:innerWidth,height:innerHeight,scroll_x:scrollX,scroll_y:scrollY},
-    focused_node:ids.get(active) || null, nodes,
+    focused_node:ids.get(active) || null, has_focus:document.hasFocus(), nodes,
     truncated:candidates.length > selected.length || scanned > 3000,
+    coverage_gaps:[...(candidates.some(el => el.tagName === 'IFRAME') ? ['uninspected_embedded_content'] : []),
+      ...(candidates.some(el => el.tagName === 'CANVAS') ? ['visual_only_regions'] : [])],
     note:'Viewport controls only; field values omitted. Inspect a selected iframe separately.',cached:false};
   s.cache = {limit:max_nodes,url:location.href,created:performance.now(),result}; return result;
 }"""
+
+# Both are read-only and run in the same browser turn. A top-level observation
+# needs one CDP evaluation instead of a challenge round-trip followed by a scan.
+# Never build the scene if the human-verification guard is active.
+_OBSERVATION_JS = "args => { const challenge = (" + _CHALLENGE_JS + ")(); return {challenge, snapshot: " \
+    + "challenge.challenge_detected ? null : (" + _SNAPSHOT_JS + ")(args)}; }"
 
 _NODE_JS = r"""({node_id, version}) => {
   const s = window.__jarvisSemanticV1;
@@ -137,6 +195,23 @@ _ACTION_READBACK_JS = r"""(el, {action, value}) => {
   if (action === 'check' || action === 'uncheck') return el.checked === (action === 'check');
   if (action === 'focus') return el === el.getRootNode().activeElement;
   return false;
+}"""
+
+# Read selection on the pinned editor; never alter selection to manufacture proof.
+# Draft text stays local to this adapter and is not returned in tool evidence.
+_EDITOR_SELECTION_JS = r"""el => {
+  if (!el.isConnected) return null;
+  const root = el.getRootNode(), doc = el.ownerDocument;
+  const focused = root.activeElement === el && doc.hasFocus();
+  if (el.matches('input,textarea') && typeof el.selectionStart === 'number')
+    return {value:el.value, focused, all:el.selectionStart === 0 && el.selectionEnd === el.value.length};
+  if (!el.isContentEditable) return null;
+  const selection = root.getSelection?.() || doc.getSelection();
+  const full = doc.createRange(); full.selectNodeContents(el);
+  const inside = node => node === el || el.contains(node);
+  const all = !!selection && selection.rangeCount === 1 && inside(selection.anchorNode)
+    && inside(selection.focusNode) && selection.getRangeAt(0).toString() === full.toString();
+  return {value:el.innerText, focused, all};
 }"""
 
 _VIDEO_STATE_JS = r"""() => {
@@ -173,12 +248,15 @@ class BrowserChallengeBlocked(RuntimeError):
     pass
 
 
+def _validated_challenge(result: Any) -> dict[str, Any]:
+    if not isinstance(result, dict) or result.get("inspection_available") is not True or not isinstance(result.get("challenge_detected"), bool):
+        raise ValueError("Invalid challenge inspection")
+    return result
+
+
 def challenge_state(page: Any) -> dict[str, Any]:
     try:
-        result = page.evaluate(_CHALLENGE_JS)
-        if not isinstance(result, dict) or result.get("inspection_available") is not True or not isinstance(result.get("challenge_detected"), bool):
-            raise ValueError("Invalid challenge inspection")
-        return result
+        return _validated_challenge(page.evaluate(_CHALLENGE_JS))
     except Exception as exc:
         raise BrowserChallengeBlocked("BROWSER_ACTION_BLOCKED: Challenge inspection unavailable; observe before continuing") from exc
 
@@ -245,7 +323,7 @@ def _release_target(target: Any) -> None:
 def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], outer_page: Any = None,
                 timeout_limit_ms: int = 30000) -> dict[str, Any]:
     state = args.get("state", "visible")
-    if state not in {"visible", "hidden", "enabled", "text"}:
+    if state not in {"visible", "hidden", "enabled", "text", "focused"}:
         raise ValueError("Unsupported wait state")
     target = args["target"]
     if target.get("node_id"):
@@ -271,8 +349,20 @@ def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], oute
                 matched = not locator.is_visible()
             elif state == "enabled":
                 matched = locator.is_visible() and locator.is_enabled()
+            elif state == "focused":
+                matched = locator.is_visible() and locator.evaluate(
+                    "el => el.isConnected && el.matches(':focus') && el.ownerDocument.hasFocus()",
+                    timeout=500)
             else:
-                matched = locator.is_visible() and locator.inner_text(timeout=500).strip() == str(args.get("text", "")).strip()
+                # Inputs have no innerText. Compare editor values exactly (including
+                # whitespace); only rendered labels use trimmed display text. Return
+                # a boolean so private draft contents do not enter tool results.
+                matched = locator.is_visible() and locator.evaluate("""(el, expected) => {
+                    if (!el.isConnected) return false;
+                    if (el.matches('input,textarea,select')) return el.value === expected;
+                    if (el.isContentEditable) return el.innerText === expected;
+                    return el.innerText.trim() === expected.trim();
+                }""", str(args.get("text", "")), timeout=500)
         if matched:
             check()
             return {"matched": True, "state": state, "polls": polls}
@@ -281,16 +371,123 @@ def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], oute
         time.sleep(min(0.05, max(0, deadline - time.monotonic())))
 
 
+def _semantic_action(page: Any, args: dict[str, Any], check: Callable[[], None]) -> dict[str, Any]:
+    target = None
+    input_started = False
+    try:
+        action = args["action"]
+        if action not in {"click", "fill", "append", "press", "select", "check", "uncheck", "focus"}:
+            raise ValueError("Unsupported semantic action")
+        selected = _frame(page, str(args.get("frame_selector", "")))
+        target = _target(selected, args["target"], str(args.get("expected_version", "")))
+        check()
+        # Pinning a target only reads the DOM; inspect once immediately before input.
+        require_clear_page(page)
+        if selected is not page:
+            require_clear_page(selected)
+        if args.get("expected_version"):
+            if selected.evaluate(_VERSION_JS) != args["expected_version"]:
+                raise RuntimeError("STALE_UI: Interface changed during action preflight; observe again")
+        if not target.is_visible() or not target.is_enabled():
+            raise RuntimeError("Target is not currently visible and enabled; wait or re-observe")
+        value = str(args.get("value", ""))
+        if len(value) > 4096 or "\0" in value:
+            raise ValueError("Semantic action value must be at most 4096 characters without NUL")
+        readback_value = value
+        if action in {"fill", "append"} and target.evaluate("""el => !el.readOnly &&
+            (el.isContentEditable || el.matches('textarea') || (el.tagName === 'INPUT' &&
+             ['text','search','email','password','tel','url','number','date','datetime-local','month','time','week'].includes(el.type)))""") is False:
+            raise RuntimeError("Target is not a writable text editor. For a native dropdown use browser_semantic_action(action=select, target=observed target, value=option value)")
+        if action == "select" and target.evaluate("el => el.tagName === 'SELECT'") is False:
+            raise RuntimeError("Target is not a native select control; inspect its options before choosing an action")
+        if action == "append":
+            # Read the existing text locally; never include private draft values in results.
+            before = target.evaluate("""el => ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null))""")
+            if not isinstance(before, str):
+                raise RuntimeError("Target does not expose an appendable text value")
+            readback_value = before + value
+        selection_before = target.evaluate(_EDITOR_SELECTION_JS) if action == "press" and value.casefold() == "control+a" else None
+        check()
+        # This is the delivery boundary. Even a Playwright timeout can follow input,
+        # so no failure from the mutation or its readback is safe to replay automatically.
+        input_started = True
+        if action in {"fill", "append"}:
+            target.fill(readback_value, timeout=1500)
+        elif action == "select":
+            target.select_option(value=value, timeout=1500)
+        elif action in {"check", "uncheck"}:
+            getattr(target, action)(timeout=1500)
+        elif action == "press":
+            target.press(value, timeout=1500)
+        elif action == "focus":
+            target.focus()  # All targets are pinned ElementHandles.
+        else:
+            target.click(timeout=1500)
+        check()
+        verified = action in {"fill", "append", "select", "check", "uncheck", "focus"} and bool(
+            target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": readback_value}))
+        selection_verified = False
+        if isinstance(selection_before, dict):
+            selection_after = target.evaluate(_EDITOR_SELECTION_JS)
+            selection_verified = bool(isinstance(selection_after, dict)
+                and selection_after.get("focused") is True and selection_after.get("all") is True
+                and selection_after.get("value") == selection_before.get("value"))
+            if not selection_verified:
+                raise RuntimeError("Select-all readback did not match the focused unchanged editor; observe before any retry")
+            verified = True
+        require_clear_page(page)
+        if selected is not page:
+            require_clear_page(selected)
+        check()
+        if action in {"fill", "append", "select", "check", "uncheck", "focus"} and not verified:
+            raise RuntimeError("Semantic action readback did not match; observe before any retry")
+        return {"action": action, "executed": True, "verified": verified,
+                **({"verification": "editor_selection_all"} if selection_verified else {}),
+                "requires_result_verification": not verified, "url": page.url}
+    except BrowserChallengeBlocked:
+        # Preserve the human-verification stop, including challenges detected after input.
+        raise
+    except Exception as exc:
+        if not input_started:
+            raise InputNotDispatchedError(str(exc)) from exc
+        raise
+    finally:
+        if target is not None:
+            _release_target(target)
+
+
 def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check: Callable[[], None], *,
                           wait_timeout_limit_ms: int = 30000) -> Any:
     check()
     if operation == "challenge_state":
         return challenge_state(page)
+    if operation == "semantic_snapshot":
+        selected = _frame(page, str(args.get("frame_selector", "")))
+        if selected is not page:
+            require_clear_page(page)
+        try:
+            observation = selected.evaluate(_OBSERVATION_JS, {
+                "force": bool(args.get("force", False)),
+                "max_nodes": max(1, min(int(args.get("max_nodes", 160)), 250)),
+            })
+            challenge = _validated_challenge(observation["challenge"])
+        except Exception as exc:
+            raise BrowserChallengeBlocked("BROWSER_ACTION_BLOCKED: Page observation unavailable; observe before continuing") from exc
+        if challenge["challenge_detected"]:
+            raise BrowserChallengeBlocked("BROWSER_ACTION_BLOCKED: Human verification requires the user; " + json.dumps(challenge))
+        result = observation.get("snapshot")
+        if not isinstance(result, dict) or not isinstance(result.get("nodes"), list):
+            raise RuntimeError("Semantic snapshot is unavailable")
+        check()
+        result["frame_selector"] = args.get("frame_selector", "")
+        return result
     if operation == "wait_state":
         # The polling loop owns inspection. Avoid checking the same document twice
         # before a ready-state probe, and keep its parent protected on every poll.
         selected = _frame(page, str(args.get("frame_selector", "")))
         return _wait_state(selected, args, check, outer_page=page, timeout_limit_ms=wait_timeout_limit_ms)
+    if operation == "semantic_action":
+        return _semantic_action(page, args, check)
     require_clear_page(page)
     selected = _frame(page, str(args.get("frame_selector", "")))
     if selected is not page:
@@ -314,65 +511,6 @@ def run_browser_operation(page: Any, operation: str, args: dict[str, Any], check
         changed = result.get("before") != result.get("after")
         return {**result, "delta_x": dx, "delta_y": dy, "executed": True,
                 "verified": changed, "at_boundary_or_not_scrollable": not changed}
-    if operation == "semantic_snapshot":
-        result = selected.evaluate(_SNAPSHOT_JS, {"force": bool(args.get("force", False)), "max_nodes": max(1, min(int(args.get("max_nodes", 160)), 250))})
-        result["frame_selector"] = args.get("frame_selector", "")
-        return result
-    if operation == "semantic_action":
-        action = args["action"]
-        if action not in {"click", "fill", "append", "press", "select", "check", "uncheck", "focus"}:
-            raise ValueError("Unsupported semantic action")
-        target = _target(selected, args["target"], str(args.get("expected_version", "")))
-        try:
-            check()
-            require_clear_page(page)
-            if selected is not page:
-                require_clear_page(selected)
-            if args.get("expected_version"):
-                if selected.evaluate(_VERSION_JS) != args["expected_version"]:
-                    raise RuntimeError("STALE_UI: Interface changed during action preflight; observe again")
-            if not target.is_visible() or not target.is_enabled():
-                raise RuntimeError("Target is not currently visible and enabled; wait or re-observe")
-            value = str(args.get("value", ""))
-            if len(value) > 4096 or "\0" in value:
-                raise ValueError("Semantic action value must be at most 4096 characters without NUL")
-            check()
-            # A single bounded action attempt. Timeouts may have side effects: never replay here.
-            readback_value = value
-            if action == "fill":
-                target.fill(value, timeout=1500)
-            elif action == "append":
-                # Read the live field value only inside the trusted local action. Never
-                # expose it in the semantic snapshot or result. Re-fill exact old+new
-                # content so append is deterministic regardless of caret position.
-                before = target.evaluate("""el => ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null))""")
-                if not isinstance(before, str):
-                    raise RuntimeError("Target does not expose an appendable text value")
-                readback_value = before + value
-                target.fill(readback_value, timeout=1500)
-            elif action == "select":
-                target.select_option(value=value, timeout=1500)
-            elif action in {"check", "uncheck"}:
-                getattr(target, action)(timeout=1500)
-            elif action == "press":
-                target.press(value, timeout=1500)
-            elif action == "focus":
-                target.focus()  # All targets are pinned ElementHandles.
-            else:
-                target.click(timeout=1500)
-            check()
-            verified = action in {"fill", "append", "select", "check", "uncheck", "focus"} and bool(
-                target.evaluate(_ACTION_READBACK_JS, {"action": action, "value": readback_value}))
-            require_clear_page(page)
-            if selected is not page:
-                require_clear_page(selected)
-            check()
-            if action in {"fill", "append", "select", "check", "uncheck", "focus"} and not verified:
-                raise RuntimeError("Semantic action readback did not match; observe before any retry")
-            return {"action": action, "executed": True, "verified": verified,
-                    "requires_result_verification": not verified, "url": page.url}
-        finally:
-            _release_target(target)
     if operation == "youtube_state":
         return selected.evaluate(_VIDEO_STATE_JS)
     if operation == "youtube_results":
@@ -461,4 +599,4 @@ def register_browser_semantic_tools(registry: Any) -> None:
     registry.register(ToolSpec("browser_semantic_scroll", "Scroll the selected page/frame viewport by a bounded delta through the managed browser. Human-verification guards run before and after; reports whether the viewport actually moved.", Risk.MEDIUM,
         {"type": "object", "properties": {"delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000}, "delta_x": {"type": "integer", "minimum": -5000, "maximum": 5000}, "frame_selector": frame}, "required": ["delta_y"], "additionalProperties": False}, browser_semantic_scroll))
     registry.register(ToolSpec("browser_wait_state", "Wait for an exact unique DOM target state with bounded 50ms polling and cancellation. Returns immediately when true; no fixed loading delay or action retries.", Risk.LOW,
-        {"type": "object", "properties": {"target": target, "state": {"enum": ["visible", "hidden", "enabled", "text"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 1000}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))
+        {"type": "object", "properties": {"target": target, "state": {"enum": ["visible", "hidden", "enabled", "text", "focused"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 4096}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))

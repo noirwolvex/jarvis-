@@ -105,9 +105,9 @@ def execute_whatsapp_ordinal_mission(
         return None
 
     agent.orchestrator.begin(goal)
-    from .full_access_agent import _chrome_tab_rows
-
-    agent._mission_initial_tab_count = len(_chrome_tab_rows())
+    # The compiler accepts WhatsApp-only missions. No browser observation is
+    # needed to begin or recover this deterministic desktop sequence.
+    agent._mission_initial_tab_count = 0
     agent.orchestrator.current.metrics["fast_compiled_steps"] = len(steps)
     agent.orchestrator.current.metrics["whatsapp_ordinal_fast_path"] = 1
     agent.workspace_context.save_snapshot()

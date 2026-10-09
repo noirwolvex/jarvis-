@@ -82,6 +82,59 @@ class ExecutionTelemetryTests(unittest.TestCase):
             results = list(pool.map(call, ["windows_uia", "chrome_cdp"]))
         self.assertEqual([item["backend"] for item in results], ["windows_uia", "chrome_cdp"])
 
+    def test_schema_rejection_is_concise_and_does_not_expose_input(self):
+        from core.execution_telemetry import input_not_dispatched
+        handler = Mock()
+        self.registry.register(ToolSpec("fixture_type", "fixture", Risk.MEDIUM, {
+            "type": "object", "properties": {"text": {"type": "string"}},
+            "required": ["text"], "additionalProperties": False,
+        }, handler))
+        result = self.registry.execute("fixture_type", {"value": "private draft content"})
+        self.assertIn("missing required fields: text", result)
+        self.assertNotIn("private draft content", result)
+        self.assertLess(len(result), 180)
+        self.assertTrue(input_not_dispatched(result))
+        handler.assert_not_called()
+
+    def test_unknown_tool_suggests_existing_names_without_dispatch(self):
+        from core.execution_telemetry import input_not_dispatched
+        handler = Mock()
+        self.register("browser_semantic_action", handler)
+        result = self.registry.execute("interaction_semantic_action", {})
+        self.assertIn("browser_semantic_action", result)
+        self.assertTrue(input_not_dispatched(result))
+        handler.assert_not_called()
+
+    def test_mixed_browser_target_explains_exclusive_shapes_without_input(self):
+        from core.execution_telemetry import input_not_dispatched
+        from core.universal_interaction import _BROWSER_TARGET_SCHEMA
+        handler = Mock()
+        self.registry.register(ToolSpec("fixture_click", "fixture", Risk.MEDIUM, {
+            "type": "object", "properties": {"target": _BROWSER_TARGET_SCHEMA},
+            "required": ["target"], "additionalProperties": False,
+        }, handler))
+        result = self.registry.execute("fixture_click", {"target": {
+            "node_id": "n2", "role": "textbox", "name": "private editor label",
+        }})
+        self.assertIn("{node_id} OR {selector} OR {role, name}", result)
+        self.assertIn("do not combine", result)
+        self.assertNotIn("private editor label", result)
+        self.assertLess(len(result), 250)
+        self.assertTrue(input_not_dispatched(result))
+        handler.assert_not_called()
+
+    def test_validation_error_from_inside_handler_remains_uncertain(self):
+        from core.execution_telemetry import input_not_dispatched
+        from jsonschema import Draft202012Validator
+        def delivered_then_validate():
+            record_backend("chrome_cdp", detail="click")
+            Draft202012Validator({"type": "string"}).validate(42)
+        self.register("late_validation", delivered_then_validate)
+        result = self.registry.execute("late_validation", {})
+        self.assertIn("ValidationError", result)
+        self.assertFalse(input_not_dispatched(result))
+        self.assertEqual(result.execution["backend"], "chrome_cdp")
+
     def test_cdp_owner_thread_preserves_caller_telemetry(self):
         from core.chrome_cdp import _ChromeRuntime
         from core.process_control import set_cancellation

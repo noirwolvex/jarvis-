@@ -12,6 +12,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
+from .desktop_input import InputNotDispatchedError
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
 
@@ -272,8 +273,7 @@ class RustDaemonClient:
                 try:
                     before_dispatch()
                 except RustEngineUnavailable as exc:
-                    from .desktop_input import InputDeliveryError
-                    raise InputDeliveryError(
+                    raise InputNotDispatchedError(
                         f"Native input precondition failed before dispatch; automatic fallback refused: {exc}"
                     ) from exc
             request_id = str(uuid.uuid4())
@@ -411,10 +411,17 @@ class RustDaemonClient:
         display_id: int,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         foreground = self._foreground(state)
+        started = time.monotonic()
         capture = self.capture(display_id)
         frame = capture.get("frame")
-        if not isinstance(frame, dict) or not isinstance(frame.get("id"), str):
-            raise RustEngineExecutionError("Rust daemon capture did not return a usable frame")
+        if not isinstance(frame, dict) or not isinstance(frame.get("id"), str) or not frame["id"]:
+            raise InputNotDispatchedError("Rust daemon capture did not return a usable frame; no input dispatched")
+        # A mouse action already paid for a fresh authorized frame. A following
+        # keyboard/wheel action can reuse it within the existing 750 ms bound;
+        # mouse actions themselves still capture afresh. No target/focus state
+        # is cached: UIA dispatch guards and daemon HWND/PID checks remain live.
+        self._keyboard_frame_cache = (display_id, int(foreground["hwnd"]),
+                                      int(foreground["process_id"]), frame, started)
         return foreground, frame
 
     def _keyboard_input_context(
@@ -825,15 +832,28 @@ def register_rust_engine_tools(registry: ToolRegistry) -> None:
         return original.handler(**kwargs)
 
     def run_atomic(name: str, invoke, **fallback_args: Any) -> str:
-        client, status = _preflight()
+        try:
+            client, status = _preflight()
+        except RustEngineUnavailable as exc:
+            # _preflight already makes the allowed auto-mode fallback decision.
+            # Exceptions (including an emergency latch) must remain fail-closed.
+            raise InputNotDispatchedError(str(exc)) from exc
         if client is None:
             return fallback(name, **fallback_args)
         try:
             result = invoke(client, status)
-        except RustEngineUnavailable:
+        except RustEngineUnavailable as exc:
             if native_engine_mode() == "auto":
                 return fallback(name, **fallback_args)
-            raise
+            # No mutation was dispatched. Do not strand the mission behind an
+            # action-review barrier for a daemon/precondition failure.
+            raise InputNotDispatchedError(str(exc)) from exc
+        if not isinstance(result, dict) or result.get("executed") is not True or result.get("simulation") is not False:
+            # An RPC success alone does not establish native input delivery.
+            # The request may have reached the daemon, so never replay it here.
+            raise RustEngineExecutionError(
+                "Rust daemon did not confirm native input execution; inspect before retrying"
+            )
         return (
             "RUST_EXECUTED: native input dispatched with fresh frame + foreground binding; "
             "independent application verification required. "

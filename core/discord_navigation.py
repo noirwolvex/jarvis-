@@ -28,7 +28,8 @@ def _dm_route(value: str | None) -> str | None:
     return url.path
 
 
-_DISCOVERY_TYPES = ("List", "TreeItem", "Document", "Edit", "Hyperlink")
+_ROW_TYPES = ("Hyperlink", "ListItem", "TreeItem", "Button", "TabItem")
+_DISCOVERY_TYPES = ("List", "Document", "Edit", *_ROW_TYPES)
 _VERIFICATION_TYPES = ("Document", "Edit")
 
 
@@ -39,11 +40,11 @@ def _snapshot(win: Any) -> list[Any]:
                            control_types=_DISCOVERY_TYPES, visible_only=True)
 
 
-def _verification_snapshot(win: Any) -> list[Any]:
+def _verification_snapshot(win: Any, *, include_rows: bool = False) -> list[Any]:
     # After a delivered navigation only route + composer can prove completion.
     # Do not re-enumerate the sidebar while waiting for that postcondition.
-    return ui._descendants(win, require_complete=True,
-                           control_types=_VERIFICATION_TYPES, visible_only=True)
+    kinds = (*_VERIFICATION_TYPES, *_ROW_TYPES) if include_rows else _VERIFICATION_TYPES
+    return ui._descendants(win, require_complete=True, control_types=kinds, visible_only=True)
 
 
 def _dm_scope(controls: list[Any]):
@@ -52,31 +53,72 @@ def _dm_scope(controls: list[Any]):
                            "Direct Messages list", missing_ok=True)
 
 
-def _conversation_links(win: Any, scope: Any, controls: list[Any] | None = None) -> list[tuple[Any, str]]:
-    bounds = ui._rect(scope)
-    if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
-        raise InputNotDispatchedError("Discord Direct Messages scope geometry is unavailable")
-    links = []
+def _conversation_links(win: Any, scope: Any | None, controls: list[Any] | None = None) -> list[tuple[Any, str | None]]:
+    """Resolve visible DM rows across Discord accessibility-provider variants.
+
+    Current Electron builds do not always expose sidebar rows as Hyperlink controls.
+    A row is accepted only when its accessible name explicitly identifies a direct/group
+    message. URL routes remain preferred when available, but route-less semantic rows
+    are allowed and are verified after activation by selected-row + matching composer.
+    """
+    bounds: list[int] | None = None
+    if scope is not None:
+        bounds = ui._rect(scope)
+        if len(bounds) != 4 or bounds[2] <= bounds[0] or bounds[3] <= bounds[1]:
+            raise InputNotDispatchedError("Discord Direct Messages scope geometry is unavailable")
+
     source = controls if controls is not None else ui._descendants(
-        scope, require_complete=True, control_types=("Hyperlink",), visible_only=True)
+        scope if scope is not None else win,
+        require_complete=True,
+        control_types=_ROW_TYPES,
+        visible_only=True,
+    )
+    candidates: list[tuple[Any, str | None, str, list[int]]] = []
     for control in source:
-        if ui._control_type(control) != "Hyperlink":
+        if ui._control_type(control) not in _ROW_TYPES or not discord._visible(control):
             continue
-        route = _dm_route(ui._control_value(control))
-        if not route or not discord._visible(control):
+        try:
+            destination = _destination_name(control)
+        except InputNotDispatchedError:
+            continue
+        value = ui._control_value(control)
+        route = _dm_route(value)
+        if value and route is None:
+            # An explicit non-DM destination cannot be downgraded to a route-less
+            # row merely because its accessible label resembles a conversation.
             continue
         rect = ui._rect(control)
         if len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1]:
             raise InputNotDispatchedError("Discord chat geometry is unavailable; no chat input delivered")
-        x, y = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
-        if not (bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]):
-            continue
-        links.append((control, route))
-    links.sort(key=lambda row: (ui._rect(row[0])[1], ui._rect(row[0])[0]))
-    positions = [tuple(ui._rect(control)[:2]) for control, _ in links]
-    if len(set(positions)) != len(positions) or len({route for _, route in links}) != len(links):
-        raise InputNotDispatchedError("Discord chat links are ambiguous; inspect the current list")
-    return links
+        if bounds is not None:
+            x, y = (rect[0] + rect[2]) / 2, (rect[1] + rect[3]) / 2
+            if not (bounds[0] <= x < bounds[2] and bounds[1] <= y < bounds[3]):
+                continue
+        candidates.append((control, route, destination, rect))
+
+    # Chromium/UIA can expose both a row and a nested anchor for the same conversation.
+    # Collapse only same-destination rows occupying the same vertical slot; identical
+    # display names at different positions remain separate ordinal conversations.
+    candidates.sort(key=lambda row: (row[3][1], row[3][0], 0 if row[1] else 1))
+    deduped: list[tuple[Any, str | None, str, list[int]]] = []
+    for candidate in candidates:
+        _, route, destination, rect = candidate
+        duplicate_index = next((
+            index for index, existing in enumerate(deduped)
+            if discord._normalized(existing[2]) == discord._normalized(destination)
+            and abs(existing[3][1] - rect[1]) <= 3
+        ), None)
+        if duplicate_index is None:
+            deduped.append(candidate)
+        elif route and deduped[duplicate_index][1] and route != deduped[duplicate_index][1]:
+            raise InputNotDispatchedError("Discord overlapping chat rows identify different routes; inspect the current list")
+        elif route and not deduped[duplicate_index][1]:
+            deduped[duplicate_index] = candidate
+
+    routes = [route for _, route, _, _ in deduped if route]
+    if len(set(routes)) != len(routes):
+        raise InputNotDispatchedError("Discord chat routes are ambiguous; inspect the current list")
+    return [(control, route) for control, route, _, _ in deduped]
 
 
 def _destination_name(control: Any) -> str:
@@ -84,17 +126,55 @@ def _destination_name(control: Any) -> str:
     # metadata, not part of the recipient. Friends/Shop links have no DM route.
     name = ui._control_name(control)
     match = re.fullmatch(r"(.+) \((?:direct|group) message\)(?:,.*)?", name, re.IGNORECASE)
-    if not match:
-        raise InputNotDispatchedError("Discord chat link has no unambiguous conversation label")
-    return match.group(1)
+    if match:
+        return match.group(1)
+    if name.strip() and _dm_route(ui._control_value(control)) is not None:
+        # Some providers omit the role suffix. An exact Discord DM route still
+        # identifies the row; verification must independently match the composer.
+        return name.strip()
+    raise InputNotDispatchedError("Discord chat link has no unambiguous conversation label")
 
 
-def _opened(controls: list[Any], route: str, destination: str) -> bool:
-    documents = [c for c in controls if ui._control_type(c) == "Document"
-                 and ui._automation_id(c) == "RootWebArea"]
-    document = discord._unique(documents, "application document", missing_ok=True)
-    return bool(document is not None and _dm_route(ui._control_value(document)) == route
-                and discord._composer(controls, destination) is not None)
+def _opened(win: Any, controls: list[Any], route: str | None, destination: str) -> bool:
+    composer = discord._composer(controls, destination)
+    if composer is None:
+        return False
+
+    if route is not None:
+        # For route-bearing rows, exact document route + exact composer are two
+        # independent postconditions. Discord may omit SelectionItem state entirely.
+        documents = [
+            c for c in controls
+            if ui._control_type(c) == "Document" and ui._automation_id(c) == "RootWebArea"
+        ]
+        document = discord._unique(documents, "application document", missing_ok=True)
+        return bool(document is not None and _dm_route(ui._control_value(document)) == route)
+
+    selected = []
+    matching_rows = []
+    for control in controls:
+        if ui._control_type(control) not in _ROW_TYPES:
+            continue
+        try:
+            current = _destination_name(control)
+        except InputNotDispatchedError:
+            continue
+        if discord._normalized(current) != discord._normalized(destination):
+            continue
+        matching_rows.append(control)
+        if discord._selected(control):
+            selected.append(control)
+    if discord._unique(selected, "selected conversation", missing_ok=True) is not None:
+        return True
+
+    # Route-less Electron builds can omit UIA selected state. Accept the active DM
+    # only when the row is unique and the native title independently agrees with
+    # the already-matched composer.
+    row = discord._unique(matching_rows, "active DM conversation", missing_ok=True)
+    return bool(
+        row is not None
+        and discord._window_dm_destination(win) == discord._channel_name(destination)
+    )
 
 
 def _activate(win: Any, control: Any, guard: Callable[[], None], route: str | None = None) -> str:
@@ -126,7 +206,8 @@ def _activate(win: Any, control: Any, guard: Callable[[], None], route: str | No
     return "rust_native_click"
 
 
-def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | None = None) -> str:
+def _select_chat(position: int, activate: Callable[..., str],
+                 _policy_guard: Callable[[], None] | None = None) -> str:
     if type(position) is not int or not 1 <= position <= 20:
         raise ValueError("Discord chat position must be an integer between 1 and 20")
     if _policy_guard:
@@ -142,18 +223,35 @@ def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | No
     record_backend("windows_uia", phase="resolve", detail="Resolve Discord Direct Messages list and conversation links")
     controls = _snapshot(win)
     scope = _dm_scope(controls)
-    if scope is None:
-        home = discord._unique([c for c in controls if ui._control_type(c) == "TreeItem"
-                                and discord._normalized(ui._control_name(c)) == "direct messages"], "Direct Messages navigation")
-        _activate(win, home, guard)
-        def list_ready():
-            nonlocal controls
-            guard()
-            controls = _snapshot(win)
-            return _dm_scope(controls)
-        scope = wait_until(list_ready, timeout=3, description="Discord Direct Messages list")
+    links = _conversation_links(win, scope, controls) if scope is not None else _conversation_links(win, None, controls)
+    if scope is None and len(links) < position:
+        home = discord._unique(
+            [
+                c for c in controls
+                if ui._control_type(c) == "TreeItem"
+                and discord._normalized(ui._control_name(c)) == "direct messages"
+            ],
+            "Direct Messages navigation",
+            missing_ok=True,
+        )
+        if home is not None:
+            activate(win, home, guard)
+            def list_ready():
+                nonlocal controls
+                guard()
+                controls = _snapshot(win)
+                discovered_scope = _dm_scope(controls)
+                if discovered_scope is not None:
+                    return discovered_scope
+                discovered_links = _conversation_links(win, None, controls)
+                return True if len(discovered_links) >= position else None
+            try:
+                wait_until(list_ready, timeout=3, description="Discord Direct Messages conversations")
+            except TimeoutError as exc:
+                raise InputDeliveryError("Discord Home navigation was attempted but the conversations did not verify; inspect before retrying") from exc
+            scope = _dm_scope(controls)
+            links = _conversation_links(win, scope, controls) if scope is not None else _conversation_links(win, None, controls)
     guard()
-    links = _conversation_links(win, scope, controls)
     if len(links) < position:
         raise RuntimeError(f"Discord exposes {len(links)} visible conversation links; cannot select chat {position}")
     control, route = links[position - 1]
@@ -161,23 +259,62 @@ def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | No
     guard()
     # Independent current route + matching composer also make repeated requests
     # idempotent when Discord is already showing the requested conversation.
-    already_open = _opened(controls, route, destination)
+    already_open = _opened(win, controls, route, destination)
     method = "already_open"
     if not already_open:
-        method = _activate(win, control, guard, route)
+        method = activate(win, control, guard, route)
         def opened():
             guard()
             record_backend("windows_uia", phase="verify", detail="Exact Discord document route and matching composer")
-            return _opened(_verification_snapshot(win), route, destination)
+            return _opened(win, _verification_snapshot(win, include_rows=route is None), route, destination)
         try:
             wait_until(opened, timeout=3, description="exact Discord conversation route and composer")
         except TimeoutError as exc:
             raise InputDeliveryError("Discord navigation was attempted but the requested conversation did not verify; inspect before retrying") from exc
     else:
         record_backend("windows_uia", phase="verify", detail="Requested Discord route and composer already open")
-    return "VERIFIED: " + json.dumps({"action": "discord_select_chat", "position": position,
-        "window_hwnd": identity[0], "route": route, "destination": destination, "method": method,
-        "already_open": already_open, "selected": True, "route_verified": True, "composer_verified": True}, ensure_ascii=False)
+    return "VERIFIED: " + json.dumps({
+        "action": "discord_select_chat",
+        "position": position,
+        "window_hwnd": identity[0],
+        "route": route or "",
+        "destination": destination,
+        "method": method,
+        "already_open": already_open,
+        "selected": True,
+        "route_verified": route is not None,
+        "selection_verified": True,
+        "composer_verified": True,
+    }, ensure_ascii=False)
+
+
+def discord_select_chat(position: int, *, _policy_guard: Callable[[], None] | None = None) -> str:
+    navigation_attempted = False
+
+    def activate(*args):
+        nonlocal navigation_attempted
+        try:
+            method = _activate(*args)
+        except InputNotDispatchedError:
+            raise
+        except Exception:
+            navigation_attempted = True
+            raise
+        navigation_attempted = True
+        return method
+
+    try:
+        return _select_chat(position, activate, _policy_guard)
+    except InputNotDispatchedError as exc:
+        if navigation_attempted:
+            raise InputDeliveryError(f"Discord navigation partially executed; inspect before retrying: {exc}") from exc
+        raise
+    except InputDeliveryError:
+        raise
+    except RuntimeError as exc:
+        if navigation_attempted:
+            raise InputDeliveryError(f"Discord navigation was attempted; inspect before retrying: {exc}") from exc
+        raise InputNotDispatchedError(f"Discord chat could not be resolved before activation; no chat input delivered: {exc}") from exc
 
 
 def register_discord_navigation_tools(registry) -> None:

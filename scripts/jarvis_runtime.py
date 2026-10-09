@@ -1,14 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import csv
+import io
 import json
 import os
 import queue
+import re
 import secrets
 import shutil
 import socket
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import urllib.parse
@@ -289,12 +293,30 @@ def _stop_process(process: subprocess.Popen[Any] | None) -> None:
         process.wait(timeout=3)
 
 
-def _tls_status(session_dir: Path, process: subprocess.Popen[Any], timeout_s: float = 20.0) -> dict[str, Any]:
+def _available_daemon_port(preferred: int = 7443) -> int:
+    """Respect Windows excluded port ranges without modifying system networking."""
+    if type(preferred) is not int or not 1 <= preferred <= 65535:
+        raise ValueError("JARVIS_DAEMON_PORT must be between 1 and 65535")
+    for candidate in (preferred, 0):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            if hasattr(socket, "SO_EXCLUSIVEADDRUSE"):
+                probe.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+            try:
+                probe.bind(("127.0.0.1", candidate))
+            except OSError:
+                if candidate == 0:
+                    raise
+                continue
+            return int(probe.getsockname()[1])
+    raise RuntimeError("No local Rust daemon port is available")
+
+
+def _tls_status(session_dir: Path, process: subprocess.Popen[Any], timeout_s: float = 20.0, *, port: int = 7443) -> dict[str, Any]:
     from core.rust_engine import RustDaemonClient, RustEngineConfig
 
     config = RustEngineConfig(
         host="127.0.0.1",
-        port=7443,
+        port=port,
         server_name="localhost",
         ca_path=session_dir / "ca.pem",
         client_cert_path=session_dir / "client.pem",
@@ -355,7 +377,7 @@ def _rewrite_capabilities(config_path: Path, display_ids: list[int]) -> tuple[di
     return observe, input_caps
 
 
-def _runtime_env(session_dir: Path, observe: dict[str, str], input_caps: dict[str, str]) -> dict[str, str]:
+def _runtime_env(session_dir: Path, observe: dict[str, str], input_caps: dict[str, str], *, port: int = 7443) -> dict[str, str]:
     env = dict(os.environ)
     env.update(
         {
@@ -366,7 +388,7 @@ def _runtime_env(session_dir: Path, observe: dict[str, str], input_caps: dict[st
             "JARVIS_CONTROL_PAIRING_TOKEN": secrets.token_urlsafe(32),
             "JARVIS_NATIVE_ENGINE": "rust",
             "JARVIS_DAEMON_HOST": "127.0.0.1",
-            "JARVIS_DAEMON_PORT": "7443",
+            "JARVIS_DAEMON_PORT": str(port),
             "JARVIS_DAEMON_SERVER_NAME": "localhost",
             "JARVIS_DAEMON_CA": str(session_dir / "ca.pem"),
             "JARVIS_DAEMON_CLIENT_CERT": str(session_dir / "client.pem"),
@@ -437,9 +459,13 @@ def bootstrap() -> tuple[subprocess.Popen[Any], Any, Path, dict[str, str], dict[
         raise RuntimeError(f"Rust daemon executable was not produced: {executable}")
 
     config_path = session_dir / "config.json"
+    daemon_port = _available_daemon_port(int(os.getenv("JARVIS_DAEMON_PORT", "7443")))
+    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config["listen"] = f"127.0.0.1:{daemon_port}"
+    config_path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
     first, first_log = _start_daemon(executable, config_path, session_dir / "daemon-discovery.log")
     try:
-        status = _tls_status(session_dir, first)
+        status = _tls_status(session_dir, first, port=daemon_port)
     finally:
         _stop_process(first)
         first_log.close()
@@ -460,8 +486,8 @@ def bootstrap() -> tuple[subprocess.Popen[Any], Any, Path, dict[str, str], dict[
     observe, input_caps = _rewrite_capabilities(config_path, display_ids)
     daemon, daemon_log = _start_daemon(executable, config_path, session_dir / "daemon.log")
     try:
-        _tls_status(session_dir, daemon)
-        env = _runtime_env(session_dir, observe, input_caps)
+        _tls_status(session_dir, daemon, port=daemon_port)
+        env = _runtime_env(session_dir, observe, input_caps, port=daemon_port)
         engine = _strict_engine_status(env)
     except Exception:
         _stop_process(daemon)
@@ -473,6 +499,7 @@ def bootstrap() -> tuple[subprocess.Popen[Any], Any, Path, dict[str, str], dict[
         + json.dumps(
             {
                 "pid": daemon.pid,
+                "port": daemon_port,
                 "display_ids": display_ids,
                 "backend": engine.get("backend"),
                 "rust_input_ready": engine.get("rust_input_ready"),
@@ -503,10 +530,59 @@ def _wait_dashboard(process: subprocess.Popen[Any]) -> None:
     raise RuntimeError(f"Dashboard did not become reachable: {last_error}")
 
 
-def _open_paired_dashboard(env: dict[str, str]) -> None:
+def _restrict_pairing_file(path: Path) -> None:
+    """Remove inherited Windows access before placing any credential in the file."""
+    if os.name != "nt":
+        path.chmod(0o600)
+        return
+    options = {"capture_output": True, "text": True, "creationflags": subprocess.CREATE_NO_WINDOW}
+    identity = subprocess.run(["whoami.exe", "/user", "/fo", "csv", "/nh"], **options)
+    rows = list(csv.reader(io.StringIO(identity.stdout)))
+    sid = rows[0][-1].strip() if identity.returncode == 0 and len(rows) == 1 and rows[0] else ""
+    if not re.fullmatch(r"S-1-(?:\d+-)*\d+", sid):
+        raise RuntimeError("Cannot determine the local user for browser pairing permissions")
+    secured = subprocess.run(["icacls.exe", str(path), "/inheritance:r", "/grant:r", f"*{sid}:(F)"], **options)
+    if secured.returncode != 0:
+        raise RuntimeError("Cannot protect the local browser pairing file")
+
+
+def _write_control_pairing_file(env: dict[str, str]) -> Path:
+    """Export the current runtime's credential for explicit pairing in another browser.
+
+    This file is never web-served. The empty temporary file gets private permissions
+    before the token is written; replacement keeps a failed write from corrupting
+    the previous file. Restarting still rotates the runtime token and cookies.
+    """
+    token = env.get("JARVIS_CONTROL_PAIRING_TOKEN", "").strip()
+    if not 32 <= len(token) <= 256:
+        raise RuntimeError("Managed Control Center pairing token is unavailable")
+    directory = RUNTIME_ROOT.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    descriptor, name = tempfile.mkstemp(prefix="control-session-", suffix=".tmp", dir=directory)
+    os.close(descriptor)
+    temporary = Path(name)
+    destination = directory / "control-session.json"
+    try:
+        _restrict_pairing_file(temporary)
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump({"version": 1, "url": DASHBOARD_URL, "token": token}, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
+    return destination
+
+
+def _open_paired_dashboard(env: dict[str, str], *, open_browser: bool = True) -> None:
     token = env.get("JARVIS_CONTROL_PAIRING_TOKEN", "").strip()
     if len(token) < 32:
         raise RuntimeError("Managed Control Center pairing token is unavailable")
+    pairing_file = _write_control_pairing_file(env)
+    print(f"JARVIS_CONTROL_PAIRING_FILE {pairing_file}", flush=True)
+    if not open_browser:
+        print("JARVIS_CONTROL_SESSION_READY Choose the pairing file in your dashboard browser.", flush=True)
+        return
     pair_url = DASHBOARD_URL + "api/pair?token=" + urllib.parse.quote(token, safe="")
     # The secret is sent directly to the local browser but never printed to stdout/stderr.
     # /api/pair immediately redirects to / and stores only a signed HttpOnly session cookie.
@@ -554,6 +630,18 @@ def _pump_tk_events(root: Any) -> None:
     root.update()
 
 
+def _wait_tk_condition(root: Any, predicate: Any, timeout_s: float = 1.0) -> bool:
+    """Wait for the target to consume queued native input, without a fixed delay."""
+    deadline = time.monotonic() + timeout_s
+    while True:
+        _pump_tk_events(root)
+        if predicate():
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.005)
+
+
 def _qualify_virtual_key_delivery(root: Any, entry: Any, tk: Any, worker: subprocess.Popen[str],
                                   worker_reader: "_WorkerProtocolReader", display_id: int,
                                   token: str) -> str:
@@ -561,22 +649,23 @@ def _qualify_virtual_key_delivery(root: Any, entry: Any, tk: Any, worker: subpro
     # queueing input, while Tk processes that queue only when its event loop is pumped.
     replacement = f"HOTKEY-{display_id}-{uuid.uuid4().hex[:8]}"
     _worker_probe(worker, worker_reader, {"kind": "hotkey", "keys": ["ctrl", "a"]})
-    _pump_tk_events(root)
-    try:
-        selected_all = bool(entry.selection_present()) \
-            and int(entry.index(tk.SEL_FIRST)) == 0 \
-            and int(entry.index(tk.SEL_LAST)) == len(token)
-    except Exception:
-        selected_all = False
+    def has_selection():
+        try:
+            return bool(entry.selection_present()) \
+                and int(entry.index(tk.SEL_FIRST)) == 0 \
+                and int(entry.index(tk.SEL_LAST)) == len(token)
+        except Exception:
+            return False
+    selected_all = _wait_tk_condition(root, has_selection)
     if not selected_all:
         raise RuntimeError(
             f"Independent hotkey verification failed on display {display_id}: "
-            "Ctrl+A did not select the complete prior text"
+            f"Ctrl+A did not select the complete prior text (selection={entry.selection_present()}, "
+            f"caret={entry.index(tk.INSERT)}, key_events={getattr(root, '_probe_keys', [])})"
         )
 
     _worker_probe(worker, worker_reader, {"kind": "type_text", "text": replacement})
-    _pump_tk_events(root)
-    if entry.get() != replacement:
+    if not _wait_tk_condition(root, lambda: entry.get() == replacement):
         raise RuntimeError(
             f"Independent hotkey replacement failed on display {display_id}: "
             f"expected {replacement!r}, got {entry.get()!r}"
@@ -586,18 +675,13 @@ def _qualify_virtual_key_delivery(root: Any, entry: Any, tk: Any, worker: subpro
     # UI must consume the VK message before the next Unicode input is dispatched.
     prefix = "VK-"
     _worker_probe(worker, worker_reader, {"kind": "press_key", "key": "home"})
-    _pump_tk_events(root)
-    try:
-        home_verified = int(entry.index(tk.INSERT)) == 0
-    except Exception:
-        home_verified = False
+    home_verified = _wait_tk_condition(root, lambda: int(entry.index(tk.INSERT)) == 0)
     if not home_verified:
         raise RuntimeError(
             f"Independent key verification failed on display {display_id}: Home did not move the caret to the start"
         )
     _worker_probe(worker, worker_reader, {"kind": "type_text", "text": prefix})
-    _pump_tk_events(root)
-    if entry.get() != prefix + replacement:
+    if not _wait_tk_condition(root, lambda: entry.get() == prefix + replacement):
         raise RuntimeError(
             f"Independent key text verification failed on display {display_id}: "
             f"got {entry.get()!r}"
@@ -605,15 +689,15 @@ def _qualify_virtual_key_delivery(root: Any, entry: Any, tk: Any, worker: subpro
     return replacement
 
 
-def run_dashboard(kind: str) -> int:
+def run_dashboard(kind: str, *, open_browser: bool = True) -> int:
     _require_windows()
     command = _dashboard_command(kind)
     with _runtime_lock():
         _assert_dashboard_port_available()
-        return _run_dashboard(command)
+        return _run_dashboard(command, open_browser=open_browser)
 
 
-def _run_dashboard(command: list[str]) -> int:
+def _run_dashboard(command: list[str], *, open_browser: bool = True) -> int:
     # Capture the npm/cmd lifecycle parent before any bootstrap work. If that wrapper
     # is terminated by Windows' "Terminate batch job" path, this process can otherwise
     # be orphaned while still holding the repository runtime lock.
@@ -626,7 +710,7 @@ def _run_dashboard(command: list[str]) -> int:
         dashboard = subprocess.Popen(command, cwd=ROOT / "apps" / "control-center", env=env,
                                      creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
         _wait_dashboard(dashboard)
-        _open_paired_dashboard(env)
+        _open_paired_dashboard(env, open_browser=open_browser)
         print("JARVIS_RUNTIME_RUST_ACTIVE Python worker missions are configured fail-closed through Rust.", flush=True)
         return _wait_dashboard_or_parent_exit(dashboard, parent_identity)
     except KeyboardInterrupt:
@@ -655,6 +739,9 @@ class _WorkerProtocolReader:
         self._lock = threading.Lock()
         self._failure = ""
         self._stderr = ""
+        self.idle_callback = None
+        self.expected_window: dict[str, int] | None = None
+        self.probe_timings: list[dict[str, Any]] = []
         self._threads = [
             threading.Thread(target=self._read_stdout, name="jarvis-probe-stdout", daemon=True),
             threading.Thread(target=self._read_stderr, name="jarvis-probe-stderr", daemon=True),
@@ -704,6 +791,11 @@ class _WorkerProtocolReader:
     def read_message(self, request_id: str | None = None, timeout_s: float = 15.0) -> dict[str, Any]:
         deadline = time.monotonic() + timeout_s
         while True:
+            # The qualification window runs on this thread. Keep its Win32 event
+            # loop responsive while Rust hit-tests and delivers input; a blocked
+            # GUI thread can itself make WindowFromPhysicalPoint miss the target.
+            if self.idle_callback is not None:
+                self.idle_callback()
             with self._lock:
                 failure = self._failure
             if failure:
@@ -751,8 +843,10 @@ def _read_worker_message(reader: _WorkerProtocolReader, request_id: str | None =
 
 def _worker_probe(process: subprocess.Popen[str], reader: _WorkerProtocolReader, probe: dict[str, Any]) -> dict[str, Any]:
     assert process.stdin is not None
+    started = time.perf_counter()
     request_id = uuid.uuid4().hex
-    process.stdin.write(json.dumps({"protocol": 1, "id": request_id, "action": "native_input_probe", "probe": probe}) + "\n")
+    bound_probe = {**probe, "expected_window": reader.expected_window}
+    process.stdin.write(json.dumps({"protocol": 1, "id": request_id, "action": "native_input_probe", "probe": bound_probe}) + "\n")
     process.stdin.flush()
     result = _read_worker_message(reader, request_id)
     if result.get("ok") is not True:
@@ -761,8 +855,24 @@ def _worker_probe(process: subprocess.Popen[str], reader: _WorkerProtocolReader,
     if not isinstance(payload, dict) or payload.get("backend") != "rust":
         raise RuntimeError(f"Python worker did not report Rust execution: {result}")
     rust_result = payload.get("result")
+    if probe.get("kind") == "capture":
+        import base64
+        import struct
+        frame = rust_result.get("frame", {}) if isinstance(rust_result, dict) else {}
+        preview = rust_result.get("preview", {}) if isinstance(rust_result, dict) else {}
+        if frame.get("simulation") is not False or frame.get("display", {}).get("id") != probe["display_id"]:
+            raise RuntimeError("Rust capture did not return a native frame for the requested display")
+        pixels = base64.b64decode(preview.get("base64", ""), validate=True)
+        if preview.get("mime") != "image/bmp" or len(pixels) < 54 or pixels[:2] != b"BM":
+            raise RuntimeError("Rust capture did not return a usable screen preview")
+        width, height = struct.unpack_from("<ii", pixels, 18)
+        if width != preview.get("width") or abs(height) != preview.get("height") or not (0 < width <= 320 and 0 < abs(height) <= 180):
+            raise RuntimeError("Rust screen preview dimensions did not verify")
+        reader.probe_timings.append({"kind": "capture", "duration_ms": round((time.perf_counter() - started) * 1000, 2)})
+        return result
     if not isinstance(rust_result, dict) or rust_result.get("executed") is not True or rust_result.get("simulation") is not False:
         raise RuntimeError(f"Rust daemon did not confirm native execution: {result}")
+    reader.probe_timings.append({"kind": probe["kind"], "duration_ms": round((time.perf_counter() - started) * 1000, 2)})
     return result
 
 
@@ -778,6 +888,7 @@ def _live_qualify() -> int:
     worker: subprocess.Popen[str] | None = None
     worker_reader: _WorkerProtocolReader | None = None
     daemon_log = None
+    root = None
     try:
         daemon, daemon_log, _session, env, engine = bootstrap()
         env["JARVIS_RUST_LIVE_PROBE"] = "1"
@@ -820,6 +931,19 @@ def _live_qualify() -> int:
         tk.Label(root, text="JARVIS X — supervised Rust native input qualification", font=("Segoe UI", 13)).pack(pady=(24, 14))
         entry = tk.Entry(root, width=48, font=("Consolas", 12))
         entry.pack(pady=10)
+        root._probe_keys = []
+        def on_probe_key(event):
+            root._probe_keys[:] = [*root._probe_keys[-7:],
+                {"key": event.keysym, "code": event.keycode, "state": event.state}]
+            # Tk's Ctrl+A class binding depends on its locale/keysym mapping. The
+            # fixture defines Select All by the delivered Windows VK + Ctrl state
+            # so qualification tests actual shortcut delivery on Arabic layouts too.
+            if event.keycode == 0x41 and event.state & 0x4:
+                entry.selection_range(0, tk.END)
+                entry.icursor(tk.END)
+                return "break"
+            return None
+        entry.bind("<KeyPress>", on_probe_key, add="+")
         clicked = {"value": False}
 
         def mark_clicked() -> None:
@@ -835,6 +959,8 @@ def _live_qualify() -> int:
         SWP_SHOWWINDOW = 0x0040
         raw_hwnd = int(root.winfo_id())
         root_hwnd = int(user32.GetAncestor(raw_hwnd, GA_ROOT) or raw_hwnd)
+        worker_reader.expected_window = {"hwnd": root_hwnd, "process_id": os.getpid()}
+        worker_reader.idle_callback = lambda: _pump_tk_events(root)
         qualified: list[dict[str, Any]] = []
 
         for row in displays:
@@ -867,11 +993,14 @@ def _live_qualify() -> int:
             root.lift()
             root.focus_force()
             root.update()
-            time.sleep(0.12)
-            root.update()
+            if int(user32.GetForegroundWindow()) != root_hwnd:
+                print("LIVE_QUALIFICATION_WAITING_FOCUS Select the temporary JARVIS qualification window.", flush=True)
+            if not _wait_tk_condition(root, lambda: int(user32.GetForegroundWindow()) == root_hwnd, 30.0):
+                raise RuntimeError("Qualification window is not foreground; no test input dispatched")
 
             entry.delete(0, tk.END)
             clicked["value"] = False
+            _worker_probe(worker, worker_reader, {"kind": "capture", "display_id": display_id})
             ex = entry.winfo_rootx() + entry.winfo_width() // 2
             ey = entry.winfo_rooty() + entry.winfo_height() // 2
             if not (left <= ex < left + width and top <= ey < top + height):
@@ -881,16 +1010,15 @@ def _live_qualify() -> int:
                 )
 
             _worker_probe(worker, worker_reader, {"kind": "click", "x": ex, "y": ey})
-            root.update()
-            if root.focus_get() is not entry:
+            if not _wait_tk_condition(root, lambda: root.focus_get() is entry):
                 raise RuntimeError(
-                    f"Independent mouse verification failed on display {display_id}: Rust click did not focus the target entry"
+                    f"Independent mouse verification failed on display {display_id}: Rust click did not focus the target entry "
+                    f"(target={ex},{ey}, focus={root.focus_get()}, containing={root.winfo_containing(ex, ey)})"
                 )
 
-            token = f"RUST-LIVE-{display_id}-{uuid.uuid4().hex[:8]}"
+            token = f"RUST-LIVE-{display_id}-{uuid.uuid4().hex[:8]} \u0645\u0631\u062d\u0628\u0627"
             _worker_probe(worker, worker_reader, {"kind": "type_text", "text": token})
-            root.update()
-            if entry.get() != token:
+            if not _wait_tk_condition(root, lambda: entry.get() == token):
                 raise RuntimeError(
                     f"Independent keyboard verification failed on display {display_id}: expected {token!r}, got {entry.get()!r}"
                 )
@@ -906,8 +1034,7 @@ def _live_qualify() -> int:
             bx = button.winfo_rootx() + button.winfo_width() // 2
             by = button.winfo_rooty() + button.winfo_height() // 2
             _worker_probe(worker, worker_reader, {"kind": "click", "x": bx, "y": by})
-            root.update()
-            if not clicked["value"]:
+            if not _wait_tk_condition(root, lambda: clicked["value"]):
                 raise RuntimeError(
                     f"Independent mouse verification failed on display {display_id}: Rust click did not invoke the target button"
                 )
@@ -930,14 +1057,22 @@ def _live_qualify() -> int:
                     "keyboard_virtual_key_verified": True,
                     "mouse_focus_verified": True,
                     "mouse_button_verified": True,
+                    "screen_capture_verified": True,
+                    "probe_timings": worker_reader.probe_timings,
                     "qualified_displays": qualified,
                 }
             ),
             flush=True,
         )
-        root.destroy()
         return 0
     finally:
+        if worker_reader is not None:
+            worker_reader.idle_callback = None
+        if root is not None:
+            try:
+                root.destroy()
+            except Exception:
+                pass
         if worker is not None:
             try:
                 if worker.stdin:
@@ -957,11 +1092,12 @@ def _live_qualify() -> int:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Start JARVIS X with strict Rust native execution")
     parser.add_argument("command", choices=("dev", "start", "verify-live"))
+    parser.add_argument("--no-open-browser", action="store_true", help="Create the pairing file without opening the default browser")
     args = parser.parse_args()
     try:
         if args.command == "verify-live":
             return live_qualify()
-        return run_dashboard(args.command)
+        return run_dashboard(args.command, open_browser=not args.no_open_browser)
     except (RuntimeError, ValueError, OSError) as exc:
         print(f"JARVIS_STARTUP_ERROR: {exc}", file=sys.stderr, flush=True)
         return 1

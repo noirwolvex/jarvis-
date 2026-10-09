@@ -47,6 +47,7 @@ def build_full_access_agent():
         agent.tools._validators.pop(legacy_name, None)
     agent.tools.permissions.full_access_require_approval = True
     agent.tools.permissions.set_access_mode("full")
+    agent.require_action_confirmation = True
     register_app_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
@@ -73,6 +74,10 @@ def build_full_access_agent():
     register_browser_semantic_tools(agent.tools)
     from .universal_interaction import register_universal_interaction_tools
     register_universal_interaction_tools(agent.tools)
+    from .interaction_scene import register_interaction_scene_tools
+    register_interaction_scene_tools(agent.tools)
+    from .computer_perception import register_perception_tools
+    register_perception_tools(agent.tools)
     from .workflow_tools import register_workflow_tools
 
     register_workflow_tools(agent)
@@ -85,7 +90,9 @@ def build_full_access_agent():
             return False
         if tool_name == "run_powershell":
             return bool(getattr(agent, "allow_shell", False))
-        return spec.risk <= Risk.MEDIUM
+        # Dashboard missions have an out-of-band, one-action confirmation surface.
+        # Without it, legacy callers retain the previous high-risk fail-closed rule.
+        return spec.risk <= Risk.MEDIUM or getattr(agent, "mission_control", None) is not None
 
     agent.approval = approve
     return agent
@@ -99,6 +106,7 @@ def run_agent_mission(
     allow_shell: bool = False,
     observation_emit=None,
     task_graph_emit=None,
+    mission_control=None,
 ) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
@@ -109,6 +117,7 @@ def run_agent_mission(
     # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
     # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
     agent.reset()
+    agent.mission_control = mission_control
     agent.cancel_event = cancel_event
     agent.allow_shell = allow_shell
     from .process_control import set_cancellation
@@ -153,10 +162,14 @@ def run_agent_mission(
                         live_changes=monitor.changes,
                         live_capture_errors=monitor.errors,
                     )
-                    agent.orchestrator._persist(agent.orchestrator.current)
+            if agent.orchestrator.current and (monitor or mission_control is not None):
+                if mission_control is not None:
+                    agent.orchestrator.current.operator_controls = mission_control.history()
+                agent.orchestrator._persist(agent.orchestrator.current)
         finally:
             agent.orchestrator.on_task_graph = previous_graph_callback
             agent.live_monitor = None
+            agent.mission_control = None
             # Cleanup still runs if capture or checkpoint persistence fails.
             release_held_inputs()
 
@@ -171,7 +184,11 @@ def run_agent_mission(
     observation_verified = read_only_observation_verified(goal, current)
 
     if current is not None and current.plan:
-        incomplete = [step.id for step in current.plan if step.status != "completed"]
+        resolver = getattr(agent.orchestrator, "step_is_resolved", None)
+        incomplete = [
+            step.id for step in current.plan
+            if not (resolver(step) if resolver is not None else step.status == "completed")
+        ]
     else:
         incomplete = []
     if current is not None:

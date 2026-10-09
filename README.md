@@ -4,6 +4,18 @@ A Windows-first desktop AI agent powered by Claude.
 
 ## Autonomous desktop upgrade
 
+See the [October 9 mission-history repair](docs/mission-history-repair-2026-10-09.md) for the saved-trace diagnosis, stale-worker reload protection, resilient control-reference loading, Google command parsing, and Chrome readiness recovery.
+
+See the [October 9 control-knowledge update](docs/control-knowledge-2026-10-09.md) for 17 contextual control procedures, task-specific tool schemas, stronger reference/evidence separation, and the app-discovery cache integration repair.
+
+See the [October 9 control-speed update](docs/control-speed-2026-10-09.md) for faster app discovery, existing executable-window reuse, focused browser typing without a model round-trip, and reduced native typing/capture overhead.
+
+See the [October 8 interface-control audit](docs/interface-control-audit-2026-10-08.md) for recognition fixes, exact typing and click verification, 14 live browser scenarios, measured deterministic workflow timing, and the remaining native/vision qualification limits.
+
+See the [October 8 provider recovery retest](docs/provider-recovery-retest-2026-10-08.md) for bounded transient-error recovery, optional reasoning-effort settings, and the larger mission's current provider-availability blocker. The [browser typing repair](docs/typing-selection-repair-2026-10-08.md) records a completed real-model draft test and exact selection/readback checks.
+
+See the [October 3 speed and browser reconnection update](docs/control-speed-session-2026-10-03.md) for faster semantic target queries, broader page-control recognition, measured work reduction, and the fix for missing runtime sessions.
+
 See the [September 25 Discord navigation repair](docs/discord-navigation-2026-09-25.md) for the first-chat command completed live in 4.157 seconds with no model calls, using scoped conversation links and semantic verification.
 
 See the [September 25 end-to-end typing repair](docs/typing-mission-2026-09-25.md) for the verified dashboard → Python → Rust WhatsApp draft test, caret-provider fix, read-only recovery, and exact completion checks.
@@ -33,6 +45,8 @@ rtk proxy npm.cmd run dev
 Open [Mission Control](http://127.0.0.1:3000). Use **Run simulation** to follow four verified actions through the task graph, timeline and memory. Ctrl+K opens the command palette. The UI includes pause/resume, a simulation stop latch, JSON event export, dark/light themes and responsive monitoring. Node 22.12+ is required; use `npm` in non-Windows shells.
 
 Run one managed instance at a time. Stop the terminal's existing `npm run dev` or `npm start` with **Ctrl+C** before switching modes. The launcher checks for an occupied port before changing Rust and blocks duplicate launches, including `verify:rust-live`. It starts Next.js directly through Node, so executable paths with spaces do not pass through a batch shell. See the [startup repair and validation](docs/runtime-startup-2026-09-25.md).
+
+Each browser needs its own runtime session. If the dashboard shows **Connect this browser**, choose the current `.jarvis/control-session.json` file with **Choose pairing file**. The launcher refreshes this private file on startup; old files and cookies become invalid after restart. Pairing does not enable Full Access or terminal permissions. To reuse an already-open browser without opening another, run `rtk proxy npm.cmd run dev -- --no-open-browser`.
 
 - [Complete 28-section engineering architecture](docs/architecture.md): topology, trust boundaries, all matrices, resource budgets, security and deployment decisions.
 - [Implementation map and limitations](docs/requirements-traceability.md).
@@ -99,6 +113,8 @@ PySide6 Desktop UI
 
 ## Advanced behavior
 
+The web Control Center supports live mission pause/resume, cooperative cancellation, and one-time confirmations for consequential actions. **Enable voice** opts into brief spoken status updates. `computer_observe` combines semantic UI/DOM metadata with screen vision when semantic coverage is incomplete, while retaining the existing Rust input and workflow engines. See the [computer-use integration and validation report](docs/computer-use-upgrade-2026-10-01.md) for tested behavior and limits.
+
 JARVIS treats each user request as a tracked task with an identifier, turn count, tool history, failure count, recovery count, elapsed time, final status, and a durable JSON trace. Failed tool calls produce recovery guidance rather than blind repetition.
 
 JARVIS also supports specialized Skills. Skills are procedural guidance layered above permissions, so adding a new skill does not bypass the safety model.
@@ -147,4 +163,4 @@ Browser human-verification challenges are detected before interactive browser ac
 
 ## Status
 
-The foundation now includes Claude tool calling, Windows automation, UI inspection, dialog control, specialized skills, persistent memory, task orchestration, recovery handling, durable traces, browser challenge protection, and optional real-Chrome CDP integration. Voice, remote control, broader device agents, and deeper service integrations remain modular next-stage capabilities.
+The foundation now includes Claude tool calling, Windows automation, UI inspection, dialog control, specialized skills, persistent memory, task orchestration, recovery handling, durable traces, browser challenge protection, and optional real-Chrome CDP integration. The web Control Center includes optional spoken status feedback; speech recognition, remote control, broader device agents, and deeper service integrations remain next-stage capabilities.

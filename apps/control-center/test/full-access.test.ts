@@ -5,7 +5,7 @@ import childProcess from "node:child_process";
 import { syncBuiltinESMExports } from "node:module";
 import { emergencyStopHybrid, resetHybridStop, hybridSnapshot, setHybridAccessMode, submitHybridMission } from "../src/lib/hybrid-control.ts";
 import { parseControlBody, readControlObject } from "../src/lib/control-service.ts";
-import { FULL_ACCESS_WORKER_REVISION, validateMissionResult, validateTaskGraph, runFullAccessMission } from "../src/lib/full-access-bridge.ts";
+import { workerSourceFingerprint, FULL_ACCESS_WORKER_REVISION, validateMissionResult, validateTaskGraph, runFullAccessMission } from "../src/lib/full-access-bridge.ts";
 import { POST as accessPost } from "../src/app/api/full-access/route.ts";
 import { CONTROL_SESSION_COOKIE, issueControlSession } from "../src/lib/control-session.ts";
 
@@ -18,7 +18,7 @@ test("emergency stop revokes access, cancels active worker and stays latched", {
   child.killed = false;
   child.stdin = { write: (data: string, callback: () => void) => { writes.push(data); callback?.(); } };
   child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
-  state.jarvisFullAccessWorkerV1 = { revision: FULL_ACCESS_WORKER_REVISION, child, pending: new Map(), buffer: "", stderr: "" };
+  state.jarvisFullAccessWorkerV1 = { revision: FULL_ACCESS_WORKER_REVISION, sourceFingerprint: workerSourceFingerprint(), child, pending: new Map(), buffer: "", stderr: "" };
   try {
     setHybridAccessMode("full");
     submitHybridMission("A fixture that must never touch the desktop");
@@ -63,7 +63,7 @@ test("live previews replace the frame without flooding events or surviving revoc
   child.killed = false;
   child.stdin = { write: (_data: string, callback: () => void) => callback?.() };
   child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
-  const worker = { revision: FULL_ACCESS_WORKER_REVISION, child, pending: new Map(), buffer: "", stderr: "" };
+  const worker = { revision: FULL_ACCESS_WORKER_REVISION, sourceFingerprint: workerSourceFingerprint(), child, pending: new Map(), buffer: "", stderr: "" };
   globals.jarvisFullAccessWorkerV1 = worker;
   try {
     setHybridAccessMode("full");
@@ -220,7 +220,7 @@ test("live execution graph updates before completion and rejects stale updates a
   child.killed = false;
   child.stdin = { write: (_data: string, callback: () => void) => callback?.() };
   child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
-  const worker = { revision: FULL_ACCESS_WORKER_REVISION, child, pending: new Map(), buffer: "", stderr: "" };
+  const worker = { revision: FULL_ACCESS_WORKER_REVISION, sourceFingerprint: workerSourceFingerprint(), child, pending: new Map(), buffer: "", stderr: "" };
   globals.jarvisFullAccessWorkerV1 = worker;
   try {
     setHybridAccessMode("full");

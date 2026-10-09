@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ctypes
 import ctypes.wintypes
+import difflib
 import json
 import os
 import subprocess
@@ -10,7 +11,7 @@ import webbrowser
 from dataclasses import dataclass
 from pathlib import Path, PureWindowsPath
 from typing import Any, Callable
-from jsonschema import Draft202012Validator
+from jsonschema import Draft202012Validator, ValidationError
 
 from .desktop_input import InputNotDispatchedError, paste_text
 from .execution_telemetry import record_backend
@@ -18,6 +19,31 @@ from .permissions import PermissionEngine, Risk
 
 _BROWSER = None
 _PAGE = None
+
+
+def argument_error(exc: ValidationError) -> str:
+    """Describe the invalid field without dumping arguments or the whole schema."""
+    path = ".".join(map(str, exc.absolute_path)) or "arguments"
+    rule = exc.validator
+    if rule == "required":
+        missing = [key for key in exc.validator_value if key not in exc.instance]
+        detail = "missing required fields: " + ", ".join(missing)
+    elif rule == "additionalProperties":
+        detail = "unsupported fields; allowed: " + ", ".join(exc.schema.get("properties", {}))
+    elif rule in {"type", "enum", "minimum", "maximum", "minLength", "maxLength", "maxItems"}:
+        detail = f"expected {rule}={json.dumps(exc.validator_value, ensure_ascii=False)}"
+    elif rule == "oneOf" and all(
+        isinstance(branch, dict) and branch.get("required")
+        and branch.get("maxProperties") == len(branch["required"])
+        for branch in exc.validator_value
+    ):
+        # Exclusive target shapes are easy to accidentally merge from a snapshot.
+        # Explain the correction without echoing user text or relaxing validation.
+        shapes = ["{" + ", ".join(branch["required"]) + "}" for branch in exc.validator_value]
+        detail = "use exactly one field set: " + " OR ".join(shapes) + "; do not combine them"
+    else:
+        detail = f"does not satisfy {rule}; use the tool's declared argument schema"
+    return f"{path}: {detail}"
 
 
 @dataclass(frozen=True)
@@ -56,7 +82,10 @@ class ToolRegistry:
         try:
             spec = self._tools.get(name)
             if not spec:
-                result = f"ERROR: Unknown tool: {name}"
+                matches = difflib.get_close_matches(name, self._tools, n=3, cutoff=0.45)
+                result = f"ERROR: Unknown tool: {name}. No action was dispatched."
+                if matches:
+                    result += " Available names to inspect: " + ", ".join(matches) + ". Use their declared arguments."
             else:
                 ok, reason = self.permissions.check(name, spec.risk, approved)
                 if not ok:
@@ -68,6 +97,8 @@ class ToolRegistry:
                     self._validators[name].validate(arguments)
                     dispatched = True
                     result = spec.handler(**arguments)
+        except ValidationError as exc:
+            result = f"ERROR executing {name}: ValidationError: {argument_error(exc)}"
         except InputNotDispatchedError as exc:
             input_rejected = True
             result = f"ERROR executing {name}: {type(exc).__name__}: {exc}"
@@ -75,7 +106,7 @@ class ToolRegistry:
             result = f"ERROR executing {name}: {type(exc).__name__}: {exc}"
         finally:
             outcome = finish_execution(span, token, result, dispatched=dispatched)
-            if input_rejected:
+            if input_rejected or not dispatched:
                 outcome.execution["input_delivery"] = "not_dispatched"
         return outcome
 

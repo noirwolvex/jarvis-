@@ -7,7 +7,10 @@ from unittest.mock import Mock, patch
 from core import semantic_ui_tools as ui
 from core.native_ui_input import _append_caret, ui_type_native
 from core.desktop_input import InputDeliveryError, InputNotDispatchedError
-from test_semantic_ui_tools import _Editor, _Window
+if __package__:
+    from .test_semantic_ui_tools import _Editor, _Window
+else:
+    from test_semantic_ui_tools import _Editor, _Window
 
 
 class TextRange:
@@ -134,7 +137,7 @@ class NativeEditorCaretTests(unittest.TestCase):
                     self.editor.iface_value.SetValue.assert_not_called()
 
     def test_existing_text_is_preserved_and_caret_moves_before_terminal_marker(self):
-        for before, after in (("draft", "draftCAT"), ("draft\n", "draftCAT\n")):
+        for before, after in (("draft", "draftCAT"), ("draft\n", "draftCAT\n"), ("draft\r\n", "draftCAT\r\n")):
             with self.subTest(before=before):
                 self.editor.value = before
                 def deliver(text, status, *, before_dispatch):
@@ -145,6 +148,29 @@ class NativeEditorCaretTests(unittest.TestCase):
                 self.client.type_text.side_effect = deliver
                 self.assertTrue(ui_type_native("CAT").startswith("VERIFIED:"))
                 self.assertEqual(self.editor.value, after)
+
+    def test_crlf_as_one_text_unit_is_not_moved_twice(self):
+        self.editor.value = "draft\r\n"
+        original_move = TextRange.MoveEndpointByUnit
+        moves = []
+        def provider_move(text_range, endpoint, unit, count):
+            moves.append(count)
+            return original_move(text_range, endpoint, unit, count * 2)
+        with patch.object(TextRange, "MoveEndpointByUnit", provider_move):
+            prefix, suffix, guard = _append_caret(self.editor, self.editor.value)
+        self.assertEqual((prefix, suffix), ("draft", "\r\n"))
+        self.assertEqual(moves, [-1])
+        guard()
+
+    def test_unmovable_terminal_break_cannot_dispatch_or_reselect(self):
+        self.editor.value = "draft\r\n"
+        with patch.object(TextRange, "MoveEndpointByUnit", return_value=0) as move, \
+             patch.object(TextRange, "Select") as select:
+            with self.assertRaises(InputNotDispatchedError):
+                ui_type_native("CAT")
+        self.assertEqual(move.call_count, 2)
+        select.assert_not_called()
+        self.client.type_text.assert_not_called()
 
     def test_caret_change_during_capture_prevents_native_dispatch(self):
         self.editor.value = "draft"
@@ -158,6 +184,39 @@ class NativeEditorCaretTests(unittest.TestCase):
             ui_type_native("CAT")
         self.assertEqual(delivered, [])
         self.assertEqual(self.editor.value, "draft")
+
+    def test_already_positioned_caret_is_read_once_before_capture_and_again_before_delivery(self):
+        self.editor.value = "draft"
+        pattern = self.editor.iface_text
+        pattern.selection = TextRange(pattern, 5, 5)
+        with patch.object(pattern, "GetSelection", wraps=pattern.GetSelection) as read_selection, \
+             patch.object(TextRange, "Select", side_effect=AssertionError("Caret is already at append position")):
+            def deliver(text, status, *, before_dispatch):
+                # Do not repeat expensive provider/range reads before capture.
+                self.assertEqual(read_selection.call_count, 1)
+                before_dispatch()
+                # The dispatch guard must obtain a new selection, not reuse it.
+                self.assertEqual(read_selection.call_count, 2)
+                self.editor.value += text
+                return {"executed": True, "simulation": False}
+            self.client.type_text.side_effect = deliver
+            self.assertTrue(ui_type_native("CAT").startswith("VERIFIED:"))
+        self.assertEqual(self.editor.value, "draftCAT")
+        self.client.type_text.assert_called_once()
+
+    def test_moving_caret_still_requires_readback_before_capture(self):
+        self.editor.value = "draft"
+        pattern = self.editor.iface_text
+        pattern.selection = TextRange(pattern, 0, 0)
+        with patch.object(pattern, "GetSelection", wraps=pattern.GetSelection) as read_selection:
+            _, _, guard = _append_caret(self.editor, "draft")
+            self.assertEqual(read_selection.call_count, 2)
+            self.assertEqual((pattern.selection.start, pattern.selection.end), (5, 5))
+            pattern.selection = TextRange(pattern, 2, 2)
+            with self.assertRaises(InputNotDispatchedError):
+                guard()
+            self.assertEqual(read_selection.call_count, 3)
+        self.client.type_text.assert_not_called()
 
     def test_webview_caret_beyond_document_end_appends_without_reselecting(self):
         self.editor.value = "draft"

@@ -6,7 +6,9 @@ import os
 import re
 import shutil
 import subprocess
+import threading
 import time
+from collections import OrderedDict
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -60,6 +62,29 @@ _BLOCKED_EXECUTABLE_STEMS = {
     "net",
     "netsh",
 }
+
+_RESOLUTION_TTL_SECONDS = 60.0
+_RESOLUTION_CACHE_LIMIT = 32
+_RESOLUTION_CACHE: OrderedDict[tuple[str, ...], tuple[float, dict[str, Any]]] = OrderedDict()
+_RESOLUTION_LOCK = threading.Lock()
+
+
+def _resolution_key(query: str) -> tuple[str, ...]:
+    # PATH/install locations can change within one worker lifetime. Cached launch
+    # metadata is never cached window state, foreground evidence or authorization.
+    cleaned = _clean_query(query)
+    expanded = os.path.expandvars(os.path.expanduser(cleaned.strip('"')))
+    return (
+        cleaned.casefold(), expanded.casefold(), os.getcwd(),
+        *(os.environ.get(name, "") for name in (
+            "PATH", "APPDATA", "LOCALAPPDATA", "PROGRAMDATA", "ProgramFiles", "ProgramFiles(x86)",
+        )),
+    )
+
+
+def _forget_resolution(query: str) -> None:
+    with _RESOLUTION_LOCK:
+        _RESOLUTION_CACHE.pop(_resolution_key(query), None)
 
 
 def _clean_query(value: str) -> str:
@@ -139,7 +164,12 @@ def _rank_candidates(query: str, candidates: list[dict[str, str]]) -> list[dict[
         names = [row["name"]]
         if row["launch_type"] in {"executable", "shortcut"}:
             names.append(Path(row["launch_value"]).stem)
-        best_name_score = max(_score(query, value) for value in names if value)
+        # An explicit path was already checked for existence and allowed type.
+        # Its basename need not resemble the full query for it to be an exact match.
+        best_name_score = (
+            100.0 if row["source"] == "explicit_path"
+            else max(_score(query, value) for value in names if value)
+        )
         total = min(120.0, best_name_score + _SOURCE_BONUS.get(row["source"], 0.0))
         ranked.append({**row, "score": round(total, 2)})
 
@@ -572,13 +602,15 @@ def _common_install_candidates(query: str) -> list[dict[str, str]]:
     return result
 
 
-def _discover_candidates(query: str) -> list[dict[str, Any]]:
+def _discover_candidates(query: str, *, stop_when_exact: bool = False) -> list[dict[str, Any]]:
     if os.name != "nt":
         raise RuntimeError("Installed-app discovery is supported on Windows only")
 
     cleaned = _clean_query(query)
     candidates: list[dict[str, str]] = []
     candidates.extend(_explicit_path_candidates(cleaned))
+    if stop_when_exact and candidates:
+        return _rank_candidates(cleaned, candidates)
 
     sources = (
         _start_apps,
@@ -589,16 +621,37 @@ def _discover_candidates(query: str) -> list[dict[str, Any]]:
         _common_install_candidates,
     )
     for source in sources:
+        from .process_control import check_cancelled
+        check_cancelled()
         try:
             candidates.extend(source(cleaned))
         except (OSError, RuntimeError, ValueError, json.JSONDecodeError):
             continue
+        if stop_when_exact and source is _start_apps:
+            ranked = _rank_candidates(cleaned, candidates)
+            exact = [row for row in ranked if row["source"] == "start_apps"
+                     and _score(cleaned, row["name"]) == 100.0]
+            # A unique exact Start Apps match outranks every remaining source.
+            # Discovery/listing still enumerates all sources; uncertain names do too.
+            if len(exact) == 1 and ranked[0] is exact[0]:
+                return ranked
 
     return _rank_candidates(cleaned, candidates)
 
 
 def _resolve(query: str) -> dict[str, Any]:
-    ranked = _discover_candidates(query)
+    key = _resolution_key(query)
+    now = time.monotonic()
+    with _RESOLUTION_LOCK:
+        cached = _RESOLUTION_CACHE.get(key)
+        if cached is not None:
+            created, app = cached
+            exists = (app["launch_type"] == "apps_folder" or Path(app["launch_value"]).is_file())
+            if now - created < _RESOLUTION_TTL_SECONDS and exists:
+                _RESOLUTION_CACHE.move_to_end(key)
+                return dict(app)
+            _RESOLUTION_CACHE.pop(key, None)
+    ranked = _discover_candidates(query, stop_when_exact=True)
     if not ranked:
         raise FileNotFoundError(f"No installed application matched: {query}")
     best = ranked[0]
@@ -617,7 +670,12 @@ def _resolve(query: str) -> dict[str, Any]:
             raise RuntimeError(
                 f"Application name is ambiguous. Top matches: {choices}"
             )
-    return best
+    with _RESOLUTION_LOCK:
+        _RESOLUTION_CACHE[key] = (time.monotonic(), dict(best))
+        _RESOLUTION_CACHE.move_to_end(key)
+        while len(_RESOLUTION_CACHE) > _RESOLUTION_CACHE_LIMIT:
+            _RESOLUTION_CACHE.popitem(last=False)
+    return dict(best)
 
 
 def find_installed_app(query: str) -> str:
@@ -731,18 +789,73 @@ def _process_score(
     return best
 
 
+def _same_installed_process(app: dict[str, Any], process: dict[str, Any]) -> bool:
+    """Conservative identity evidence for reusing a window without relaunching."""
+    if app.get("launch_type") == "executable":
+        expected, actual = app.get("launch_value"), process.get("exe")
+        return bool(expected and actual and os.path.normcase(os.path.abspath(str(expected)))
+                    == os.path.normcase(os.path.abspath(str(actual))))
+    # A shortcut's friendly name and a Store display name do not establish its
+    # process identity. Preserve normal activation until their target can be bound.
+    return False
+
+
+def _read_process_identity(pid: int) -> dict[str, Any] | None:
+    try:
+        import psutil
+    except ImportError:
+        return None
+    try:
+        process = psutil.Process(pid)
+        return {"pid": pid, "name": process.name(), "exe": process.exe()}
+    except (OSError, psutil.Error):
+        return None
+
+
+def _focus_via_uia(hwnd: int) -> None:
+    """Ask the exact window's provider for focus without synthesizing input."""
+    from pywinauto import Desktop
+    from .execution_telemetry import record_backend
+    from .process_control import check_cancelled
+
+    check_cancelled()
+    window = Desktop(backend="uia").window(handle=hwnd).wrapper_object()
+    if int(window.handle) != hwnd:
+        raise RuntimeError("Resolved focus window identity changed")
+    record_backend("windows_uia", detail="SetFocus on exact target window")
+    check_cancelled()
+    window.element_info.element.SetFocus()
+
+
 def _focus(hwnd: int) -> bool:
-    """Bring a verified visible window forward without paying a fixed sleep when Windows responds quickly."""
+    """Try native activation once, then semantic focus; independently verify the result."""
+    from .execution_telemetry import record_backend
     from .process_control import check_cancelled
     from .ui_state import wait_until
 
     user32 = ctypes.windll.user32
+    hwnd = int(hwnd)
     check_cancelled()
-    user32.ShowWindow(hwnd, 9)
+    if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
+        return False
+    if int(user32.GetForegroundWindow()) == hwnd:
+        return True
+    # Restoring every visible window also unmaximizes it. Restore only minimized windows.
+    record_backend("windows_api", detail="Activate exact target window")
+    if user32.IsIconic(hwnd):
+        user32.ShowWindow(hwnd, 9)
     user32.SetForegroundWindow(hwnd)
+    check_cancelled()
+    if int(user32.GetForegroundWindow()) != hwnd:
+        # Windows can deny SetForegroundWindow to a background worker. Retrying the
+        # same call for the entire launch deadline cannot resolve that restriction.
+        try:
+            _focus_via_uia(hwnd)
+        except Exception:
+            pass  # A provider exception is not evidence of failure or success; read back.
     try:
         wait_until(
-            lambda: int(user32.GetForegroundWindow()) == int(hwnd),
+            lambda: int(user32.GetForegroundWindow()) == hwnd,
             timeout=0.8,
             interval=0.025,
             description="launched application foreground",
@@ -797,7 +910,8 @@ def launch_installed_app(
     """Launch an installed GUI app and distinguish process-started from interaction-ready.
 
     A background process alone is not enough evidence for a chained desktop action. We keep
-    polling for a matching visible window and foreground binding; only that state is VERIFIED.
+    polling for a matching visible window, then attempt bounded foreground activation.
+    Only an independently verified foreground window is VERIFIED.
     """
     if os.name != "nt":
         raise RuntimeError("Installed-app launch is supported on Windows only")
@@ -805,20 +919,51 @@ def launch_installed_app(
     from .process_control import check_cancelled
     from .ui_state import cancellable_delay
 
+    check_cancelled()
     app = _resolve(query)
-    before_windows = {row["hwnd"] for row in _visible_windows()}
-    before_pids = {row["pid"] for row in _processes()}
-    launcher_pid = _launch_candidate(app)
+    initial_windows = _visible_windows()
+    initial_processes = _processes()
+    before_windows = {row["hwnd"] for row in initial_windows}
+    before_pids = {row["pid"] for row in initial_processes}
+    by_pid = {row["pid"]: row for row in initial_processes}
+    existing = [row for row in initial_windows
+                if _same_installed_process(app, by_pid.get(row["pid"], {}))]
+    if len(existing) > 1:
+        raise RuntimeError("Application has multiple matching visible windows; choose the intended window instead of launching another instance")
+    best_window: dict[str, Any] | None = None
+    best_process: dict[str, Any] | None = None
+    focused = False
+    reused_existing = bool(existing)
+    if existing:
+        best_window = existing[0]
+        check_cancelled()
+        focused = _focus(int(best_window["hwnd"]))
+        # An HWND may be recycled while focus is pending. Verify both the same
+        # visible HWND/PID and the installed-process identity after activation.
+        best_process = _read_process_identity(int(best_window["pid"]))
+        if (not any(row["hwnd"] == best_window["hwnd"] and row["pid"] == best_window["pid"]
+                    for row in _visible_windows())
+                or best_process is None or not _same_installed_process(app, best_process)):
+            raise RuntimeError("Existing application identity changed during focus; inspect before another launch")
+        # Identity reads may take long enough for another window to receive focus.
+        # Read foreground again without replaying activation or trusting old evidence.
+        focused = focused and int(ctypes.windll.user32.GetForegroundWindow()) == int(best_window["hwnd"])
+        launcher_pid = None
+    else:
+        check_cancelled()
+        try:
+            launcher_pid = _launch_candidate(app)
+        except Exception:
+            # Invalidate stale install metadata, but never repeat a possibly
+            # dispatched launch automatically after an uncertain failure.
+            _forget_resolution(query)
+            raise
 
     deadline = time.monotonic() + max(
         2.0,
         min(float(timeout_seconds), 25.0),
     )
-    best_window: dict[str, Any] | None = None
-    best_process: dict[str, Any] | None = None
-    focused = False
-
-    while time.monotonic() < deadline:
+    while best_window is None and time.monotonic() < deadline:
         check_cancelled()
         windows = _visible_windows()
         ranked_windows = sorted(
@@ -844,8 +989,10 @@ def launch_installed_app(
         ):
             best_window = ranked_windows[0]
             focused = _focus(int(best_window["hwnd"]))
-            if focused:
-                break
+            # _focus already performs bounded recovery and independent verification.
+            # Once the window exists, a failed foreground request is not a loading
+            # delay. Return its evidence instead of replaying focus for 15 seconds.
+            break
 
         processes = _processes()
         ranked_processes = sorted(
@@ -867,19 +1014,21 @@ def launch_installed_app(
         cancellable_delay(0.08)
 
     if best_window is None and best_process is None:
+        _forget_resolution(query)
         raise RuntimeError(
             f"Launched '{app['name']}' from {app['source']} but could not verify a matching window or process within the timeout"
         )
 
     process_id = (
-        int(best_process["pid"])
-        if best_process
-        else int(best_window["pid"])
+        int(best_window["pid"])
         if best_window
+        else int(best_process["pid"])
+        if best_process
         else 0
     )
     process_name = (
-        str(best_process.get("name") or "") if best_process else ""
+        str(best_process.get("name") or "")
+        if best_process and int(best_process["pid"]) == process_id else ""
     )
     if not process_name and process_id:
         try:
@@ -897,6 +1046,7 @@ def launch_installed_app(
         "launch_type": app["launch_type"],
         "match_score": app["score"],
         "launcher_pid": launcher_pid,
+        "reused_existing": reused_existing,
         "window_title": best_window["title"] if best_window else "",
         "window_handle": best_window["hwnd"] if best_window else 0,
         "process_id": process_id,
@@ -906,6 +1056,11 @@ def launch_installed_app(
         "process_verified": best_process is not None or process_id > 0,
         "interaction_ready": interaction_ready,
     }
+    if best_window is not None and not focused:
+        payload.update(
+            failure_reason="The application window exists but foreground activation was not verified",
+            recovery_action="Inspect the current foreground and any blocking dialog before retrying focus; do not relaunch the application",
+        )
     prefix = "VERIFIED: " if interaction_ready else "DELIVERED: "
     return prefix + json.dumps(payload, ensure_ascii=False)
 

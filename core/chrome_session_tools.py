@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import threading
 import time
 import urllib.parse
@@ -10,8 +11,43 @@ from typing import Any
 from .chrome_cdp import _cdp_url, _runtime, chrome_start_managed as _start_managed_chrome
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
+from .chrome_user_browser import existing_chrome_connection
 
 _START_LOCK = threading.Lock()
+
+
+def cdp_owns_window(window: dict[str, Any]) -> bool:
+    """Bind the configured local listener to a fresh, exact Chrome process identity."""
+    try:
+        import psutil
+        endpoint = urllib.parse.urlparse(_cdp_url())
+        host = endpoint.hostname
+        if endpoint.scheme not in {"http", "https"} or host not in {"127.0.0.1", "localhost", "::1"}:
+            return False
+        if endpoint.username is not None or endpoint.password is not None:
+            return False
+        port = endpoint.port or (443 if endpoint.scheme == "https" else 80)
+        hwnd, pid = window.get("hwnd"), window.get("process_id")
+        created = window.get("process_created")
+        if type(hwnd) is not int or hwnd <= 0 or type(pid) is not int or pid <= 0:
+            return False
+        if type(created) not in {int, float} or not math.isfinite(created) or created <= 0:
+            return False
+        process = psutil.Process(pid)
+        if not process.is_running() or process.create_time() != created:
+            return False
+        if process.name().casefold() not in {"chrome.exe", "chrome", "chromium.exe", "chromium", "google-chrome", "google-chrome-stable"}:
+            return False
+        allowed_addresses = {"127.0.0.1", "::1"} if host == "localhost" else {host}
+        owners = set()
+        for connection in psutil.net_connections(kind="tcp"):
+            address = connection.laddr
+            if connection.status == psutil.CONN_LISTEN and address and address.port == port and address.ip in allowed_addresses:
+                owners.add(connection.pid)
+        # Unknown owners and split IPv4/IPv6 ownership are not a safe binding.
+        return owners == {pid} and process.is_running() and process.create_time() == created
+    except Exception:
+        return False
 
 
 def _loopback_port() -> int | None:
@@ -135,6 +171,9 @@ def _dedupe_startup_blank_targets(targets: list[dict[str, Any]]) -> tuple[list[d
 
 def ensure_managed_chrome() -> str:
     """Ensure one managed Chrome/CDP session exists instead of opening another about:blank window."""
+    current = existing_chrome_connection()
+    if current is not None:
+        return json.dumps(current, ensure_ascii=False)
     existing = _probe_cdp()
     if existing is not None:
         return json.dumps(
@@ -150,6 +189,9 @@ def ensure_managed_chrome() -> str:
         )
 
     with _START_LOCK:
+        current = existing_chrome_connection()
+        if current is not None:
+            return json.dumps(current, ensure_ascii=False)
         existing = _probe_cdp()
         if existing is not None:
             return json.dumps(
@@ -172,6 +214,9 @@ def ensure_managed_chrome() -> str:
 
 def ensure_chrome_connection() -> str:
     """Connect after Chrome's startup targets stabilize, keeping one managed blank page."""
+    current = existing_chrome_connection()
+    if current is not None:
+        return json.dumps(current, ensure_ascii=False)
     endpoint = _cdp_url()
     existed_before = _probe_cdp() is not None
     startup: dict[str, Any] = {}
@@ -179,15 +224,19 @@ def ensure_chrome_connection() -> str:
 
     if not existed_before:
         startup = json.loads(ensure_managed_chrome())
+        if startup.get("session_type") == "existing-window":
+            return json.dumps(startup, ensure_ascii=False)
 
-    targets = _wait_for_page_target(timeout=5.0 if not existed_before else 1.5)
-    if not existed_before and not targets:
+    started_here = startup.get("started") is True
+
+    targets = _wait_for_page_target(timeout=5.0 if started_here else 1.5)
+    if started_here and not targets:
         raise RuntimeError(
             "Managed Chrome CDP became available but its startup page target did not appear; "
             "refusing to create a second fallback about:blank page."
         )
 
-    if not existed_before:
+    if started_here:
         # Chrome can publish a second about:blank shortly after the first even from one
         # managed startup invocation. Let the target list settle, then close only extra
         # about:blank targets in this fresh isolated JARVIS session before Playwright attaches.
@@ -205,11 +254,11 @@ def ensure_chrome_connection() -> str:
                 "refusing to attach until the session is unambiguous."
             )
 
-    session_type = "managed" if not existed_before else "real"
+    session_type = "managed" if started_here else "real"
     result = _runtime().call("connect", endpoint=endpoint, session_type=session_type)
     result.update(
         {
-            "reused": existed_before,
+            "reused": not started_here,
             "startup_guard": True,
             "page_target_ready": bool(targets),
             "startup_target_count": len(targets),
@@ -227,7 +276,7 @@ def register_chrome_session_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "chrome_start_managed",
-            "Ensure the dedicated JARVIS Chrome/CDP session is running. This operation is idempotent: if Chrome CDP is already available it reuses the existing session and MUST NOT open another about:blank window.",
+            "Reuse the user's open Chrome window before considering startup. This operation is idempotent: matching CDP or guarded Windows toolbar navigation uses the existing window. Start managed Chrome only when no browser window exists; do not open another about:blank window unnecessarily.",
             Risk.MEDIUM,
             {"type": "object", "properties": {}, "additionalProperties": False},
             ensure_managed_chrome,
@@ -236,7 +285,7 @@ def register_chrome_session_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "chrome_connect_cdp",
-            "Safely connect JARVIS to Chrome CDP. Fresh managed startup waits for page targets to stabilize, removes duplicate about:blank startup targets, and only then attaches Playwright.",
+            "Reuse the user's existing Chrome window, preferring its matching CDP connection. An existing-window result supports guarded navigation/search without CDP. Start managed Chrome only if needed; fresh startup removes duplicate about:blank startup targets before attaching Playwright.",
             Risk.MEDIUM,
             {"type": "object", "properties": {}, "additionalProperties": False},
             ensure_chrome_connection,

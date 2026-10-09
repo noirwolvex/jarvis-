@@ -12,6 +12,7 @@
     "start": "python scripts/jarvis_runtime.py start",
     "start:dashboard": "npm run start --workspace @jarvis/control-center",
     "verify:rust-live": "python scripts/jarvis_runtime.py verify-live",
+    "verify:browser-live": "python -m scripts.verify_browser_control",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "demo": "npm run simulate --workspace @jarvis/runtime",
@@ -21,7 +22,10 @@
   },
   "overrides": {
     "@prisma/config": { "deepmerge-ts": "8.0.2" },
-    "prisma": { "mysql2": "3.24.4" }
+    "prisma": { "mysql2": "3.24.4" },
+    "sharp": "0.35.5",
+    "fast-uri": "3.1.8",
+    "source-map-js": "1.2.2"
   },
   "devDependencies": {
     "@types/node": "^22.19.0",

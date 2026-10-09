@@ -29,6 +29,8 @@ def _configure_utf8_stdio() -> None:
 _AGENT = None
 _OUTPUT_LOCK = threading.Lock()
 _STOPPED = threading.Event()
+_ACTIVE_CONTROL = None
+_ACTIVE_REQUEST = ""
 
 
 def _write(payload: dict[str, Any]) -> None:
@@ -73,7 +75,27 @@ def _native_input_probe(message: dict[str, Any]) -> dict[str, Any]:
     probe = message.get("probe")
     if not isinstance(probe, dict):
         raise ValueError("Native input probe payload must be an object")
+    expected = probe.get("expected_window")
+    if not isinstance(expected, dict) or any(
+        type(expected.get(key)) is not int or expected[key] <= 0
+        for key in ("hwnd", "process_id")
+    ):
+        raise ValueError("Native input probe requires an exact qualification window binding")
+    foreground = status.get("foreground")
+    if not isinstance(foreground, dict) or any(
+        foreground.get(key) != expected[key] for key in ("hwnd", "process_id")
+    ):
+        actual = {key: foreground.get(key) for key in ("hwnd", "process_id")} if isinstance(foreground, dict) else None
+        raise RuntimeError(
+            f"Qualification window lost foreground; no test input dispatched "
+            f"(expected={expected}, actual={actual})"
+        )
     kind = str(probe.get("kind") or "")
+    if kind == "capture":
+        display_id = probe.get("display_id")
+        if type(display_id) is not int or display_id < 0:
+            raise ValueError("Native capture probe requires a display id")
+        return {"backend": "rust", "result": client.capture(display_id)}
     if kind == "click":
         x, y = probe.get("x"), probe.get("y")
         if not isinstance(x, int) or isinstance(x, bool) or not isinstance(y, int) or isinstance(y, bool):
@@ -100,7 +122,7 @@ def _native_input_probe(message: dict[str, Any]) -> dict[str, Any]:
             raise ValueError("Native hotkey probe requires 1-8 keys")
         result = client.hotkey(keys, status)
     else:
-        raise ValueError("Native input probe kind must be click, type_text, press_key, or hotkey")
+        raise ValueError("Native probe kind must be capture, click, type_text, press_key, or hotkey")
 
     if result.get("executed") is not True or result.get("simulation") is not False:
         raise RuntimeError("Rust daemon did not confirm native execution")
@@ -108,6 +130,7 @@ def _native_input_probe(message: dict[str, Any]) -> dict[str, Any]:
 
 
 def _handle(raw: str) -> dict[str, Any]:
+    global _ACTIVE_CONTROL, _ACTIVE_REQUEST
     try:
         message: Any = json.loads(raw)
     except json.JSONDecodeError as exc:
@@ -162,7 +185,7 @@ def _handle(raw: str) -> dict[str, Any]:
                     "message": redact_secrets(str(event.message))[:2000],
                 }
             )
-            if event.kind == "tool_result" and event.tool == "screen_observe":
+            if event.kind == "tool_result" and event.tool in {"screen_observe", "computer_observe"}:
                 from .vision_tools import _payload_from_result, vision_followup_message
 
                 frame = _payload_from_result(event.message)
@@ -192,18 +215,42 @@ def _handle(raw: str) -> dict[str, Any]:
                 _write({"type": "task_graph", "id": request_id, "nodes": compact})
                 last_graph = compact
 
+        from .mission_control import MissionControl
+        agent = _agent()
+        def control_update(value):
+            _write({"type": "progress", "id": request_id, "kind": "mission_control", "message": json.dumps(value)})
+        control = MissionControl(control_update)
+        _ACTIVE_CONTROL, _ACTIVE_REQUEST = control, request_id
         payload = run_agent_mission(
-            _agent(),
+            agent,
             title,
             emit=progress,
             cancel_event=_STOPPED,
             allow_shell=message.get("allow_shell") is True,
             observation_emit=observation,
             task_graph_emit=task_graph,
+            mission_control=control,
         )
         return {"type": "result", "id": request_id, "ok": True, "payload": payload}
     except Exception as exc:
         return {"type": "result", "id": request_id, "ok": False, "error": f"{type(exc).__name__}: {exc}"}
+    finally:
+        _ACTIVE_CONTROL, _ACTIVE_REQUEST = None, ""
+
+
+def _control_message(message: dict) -> bool:
+    """Handle operator commands on stdin while the model/tool thread is blocked."""
+    if message.get("protocol") != PROTOCOL or message.get("action") not in {"pause", "resume", "cancel", "confirm", "reject"}:
+        return False
+    try:
+        if _ACTIVE_CONTROL is None or message.get("id") != _ACTIVE_REQUEST:
+            raise ValueError("No matching active mission")
+        if set(message) - {"protocol", "action", "id", "confirmation_id"}:
+            raise ValueError("Unknown control property")
+        _ACTIVE_CONTROL.command(message["action"], str(message.get("confirmation_id", "")))
+    except Exception as exc:
+        _write({"type": "progress", "id": message.get("id", ""), "kind": "control_error", "message": str(exc)})
+    return True
 
 
 def main() -> int:
@@ -212,6 +259,8 @@ def main() -> int:
 
     def stop() -> None:
         _STOPPED.set()
+        if _ACTIVE_CONTROL is not None:
+            _ACTIVE_CONTROL.cancel()
         if _AGENT is not None:
             _AGENT.request_stop()
         # Stop both execution backends. The Rust daemon has an independent emergency
@@ -257,6 +306,8 @@ def main() -> int:
         if isinstance(message, dict) and message.get("protocol") == PROTOCOL and message.get("action") == "stop":
             stop()
             return 0
+        if isinstance(message, dict) and _control_message(message):
+            continue
         if active and active.is_alive():
             _write(
                 {

@@ -37,12 +37,16 @@ class _ChromeRuntime:
                 self._active_cancel = cancelled
                 if command == "shutdown":
                     try:
-                        if self._browser is not None:
-                            self._browser.close()
-                    finally:
-                        if self._playwright is not None:
-                            self._playwright.stop()
-                    reply.put(None)
+                        try:
+                            if self._browser is not None:
+                                self._browser.close()
+                        finally:
+                            if self._playwright is not None:
+                                self._playwright.stop()
+                    except Exception as exc:
+                        reply.put((False, exc))
+                    else:
+                        reply.put((True, None))
                     return
                 try:
                     self._check_cancelled()
@@ -100,6 +104,7 @@ class _ChromeRuntime:
         from playwright.sync_api import sync_playwright
 
         reused = bool(self._browser is not None and self._browser.is_connected() and self._endpoint == endpoint)
+        first_connection = self._endpoint != endpoint
         if not reused:
             if self._playwright is not None:
                 self._playwright.stop()
@@ -116,8 +121,10 @@ class _ChromeRuntime:
         pages: list[Any] = []
         for context in self._browser.contexts:
             pages.extend(context.pages)
-        if not reused:
-            self._page = pages[-1] if pages else None
+        if not reused and first_connection:
+            # Page order is creation order, not the user's foreground window.
+            # An ambiguous initial attachment remains unselected until resolved.
+            self._page = pages[0] if len(pages) == 1 else self._observed_current_page(pages)
         elif self._page not in pages:
             self._page = None
         self._pages = pages
@@ -136,6 +143,66 @@ class _ChromeRuntime:
         # A closed selected tab does not make a healthy browser connection disappear.
         # Callers must explicitly select or create a page, not reconnect and retarget.
         return bool(self._browser is not None and self._browser.is_connected())
+
+    def _observed_current_page(self, pages: list[Any]) -> Any:
+        focused: list[Any] = []
+        visible: list[Any] = []
+        for page in pages:
+            self._check_cancelled()
+            try:
+                state = page.evaluate("() => ({focused: document.hasFocus(), visible: document.visibilityState === 'visible'})")
+            except Exception:
+                self._check_cancelled()
+                # An unreadable page may own focus; never guess among the rest.
+                return None
+            if not isinstance(state, dict) or type(state.get("focused")) is not bool or type(state.get("visible")) is not bool:
+                return None
+            if state["focused"]:
+                focused.append(page)
+            if state["visible"]:
+                visible.append(page)
+        self._check_cancelled()
+        if len(focused) == 1:
+            return focused[0]
+        if not focused and len(visible) == 1:
+            return visible[0]
+        return None
+
+    def _cmd_clear_selection(self) -> None:
+        # Switching to a native browser invalidates any prior CDP target.
+        self._page = None
+
+    def _cmd_focus_selected(self) -> dict[str, Any]:
+        from .browser_semantic import require_clear_page
+        self._check_cancelled()
+        self._refresh_pages()
+        page = self._page
+        if page is None:
+            raise RuntimeError("No Chrome tab is selected; inspect before focusing")
+        require_clear_page(page)
+        page.bring_to_front()
+        self._check_cancelled()
+        state = page.evaluate("() => ({focused: document.hasFocus(), visible: document.visibilityState === 'visible'})")
+        if state.get("focused") is not True or state.get("visible") is not True:
+            raise RuntimeError("Chrome foreground could not be verified")
+        return {"focused": True, "verified": True, "url": page.url, "title": page.title()}
+
+    def _cmd_select_current_window(self) -> dict[str, Any]:
+        from .execution_telemetry import record_backend
+        self._check_cancelled()
+        self._page = None
+        pages = self._refresh_pages()
+        record_backend("chrome_cdp", phase="observe", detail="Resolve currently focused browser page")
+        selected = self._observed_current_page(pages)
+        fresh_pages = self._refresh_pages()
+        if selected is None or len(fresh_pages) != len(pages) or any(page not in fresh_pages for page in pages):
+            raise RuntimeError("Current Chrome window is ambiguous or changed; explicitly select the intended tab")
+        self._check_cancelled()
+        result = {"selected": fresh_pages.index(selected), "session_type": self._session_type,
+                  "title": selected.title(), "url": selected.url}
+        self._check_cancelled()
+        self._page = selected
+        return result
 
     def _refresh_pages(self) -> list[Any]:
         if self._browser is None:
@@ -164,9 +231,15 @@ class _ChromeRuntime:
                       and not selected.title().strip())
         self._check_cancelled()
         if not reused:
+            original_window = None
             contexts = self._browser.contexts
             if selected is not None:
                 context = selected.context
+                original_window = self._page_window_id(selected)
+                # Chromium creates a tab in the active window of this profile.
+                # Activate the already resolved page, then verify the new target's
+                # window before navigating; never guess from page creation order.
+                selected.bring_to_front()
             elif len(contexts) == 1:
                 context = contexts[0]
             else:
@@ -176,6 +249,8 @@ class _ChromeRuntime:
             # Retain this object even on navigation failure so recovery never creates
             # a duplicate or guesses the target from a changing list of tab indexes.
             self._page = selected
+            if original_window is not None and self._page_window_id(selected) != original_window:
+                raise RuntimeError("Chrome created the tab in a different window; inspect before continuing")
         self._check_cancelled()
         selected.bring_to_front()
         if target_url != "about:blank":
@@ -199,6 +274,18 @@ class _ChromeRuntime:
                 "selected": pages.index(selected), "requested_url": target_url,
                 "url": actual, "title": selected.title(), "session_type": self._session_type,
                 "target_id": "", "verified": True}
+
+    @staticmethod
+    def _page_window_id(page: Any) -> int:
+        session = page.context.new_cdp_session(page)
+        try:
+            result = session.send("Browser.getWindowForTarget")
+            window_id = result.get("windowId")
+            if type(window_id) is not int:
+                raise RuntimeError("Chrome window identity is unavailable")
+            return window_id
+        finally:
+            session.detach()
 
     def _cmd_tabs(self) -> list[dict[str, Any]]:
         from .execution_telemetry import record_backend
@@ -250,9 +337,9 @@ class _ChromeRuntime:
         page = self._page
         from .execution_telemetry import record_backend
         record_backend("chrome_cdp", phase="execute" if operation in {
-            "semantic_action", "goto", "click", "fill", "press", "youtube_playback"
+            "semantic_action", "semantic_scroll", "goto", "click", "fill", "press", "youtube_playback"
         } else "observe", detail=operation)
-        if operation in {"semantic_snapshot", "semantic_action", "wait_state", "challenge_state", "youtube_state", "youtube_playback", "youtube_results"}:
+        if operation in {"semantic_snapshot", "semantic_action", "semantic_scroll", "wait_state", "challenge_state", "youtube_state", "youtube_playback", "youtube_results"}:
             from .browser_semantic import run_browser_operation
             result = run_browser_operation(page, operation, args, self._check_cancelled)
             if operation == "semantic_snapshot":
@@ -266,7 +353,11 @@ class _ChromeRuntime:
         if operation == "current":
             return self._cmd_current()
         if operation == "goto":
+            self._guard_page_input(page)
+            page.bring_to_front()
+            self._check_cancelled()
             page.goto(args["url"], wait_until="domcontentloaded", timeout=30000)
+            self._guard_page_input(page)
             return {"title": page.title(), "url": page.url}
         if operation == "title":
             return page.title()
@@ -303,20 +394,18 @@ class _ChromeRuntime:
         if operation == "click":
             selector = args["selector"]
             locator = page.get_by_text(selector, exact=True)
-            if locator.count() == 0:
+            matches = locator.count()
+            if matches == 0:
                 locator = page.locator(selector)
-            if locator.count() != 1:
+                matches = locator.count()
+            if matches != 1:
                 raise RuntimeError("Browser click target is missing or ambiguous; observe and use an exact unique target")
-            self._guard_page_input(page)
-            locator.click(timeout=1500)
-            return True
+            return self._legacy_target_action(page, locator, operation)
         if operation == "fill":
             locator = page.locator(args["selector"])
             if locator.count() != 1:
                 raise RuntimeError("Browser fill target is missing or ambiguous; observe and use an exact unique target")
-            self._guard_page_input(page)
-            locator.fill(args["text"], timeout=1500)
-            return True
+            return self._legacy_target_action(page, locator, operation, args["text"])
         if operation == "wait":
             from .browser_semantic import run_browser_operation
             run_browser_operation(page, "wait_state", {"target": {"selector": args["selector"]}, "state": "visible", "timeout_ms": args.get("timeout_ms", 15000)}, self._check_cancelled, wait_timeout_limit_ms=60000)
@@ -329,6 +418,35 @@ class _ChromeRuntime:
             page.screenshot(path=args["path"], full_page=False)
             return True
         raise ValueError(f"Unsupported Chrome page operation: {operation}")
+
+    def _legacy_target_action(self, page: Any, locator: Any, action: str, text: str = "") -> bool:
+        # Pin the DOM object before the safety read. A Locator would silently
+        # resolve a replacement control if the page rerenders during that read.
+        handles = locator.element_handles()
+        if len(handles) != 1:
+            for handle in handles:
+                handle.dispose()
+            raise RuntimeError("Browser target changed or became ambiguous; observe again")
+        target = handles[0]
+        try:
+            self._guard_page_input(page)
+            if not target.is_visible() or not target.is_enabled():
+                raise RuntimeError("Browser target is no longer visible and enabled; observe again")
+            self._check_cancelled()
+            # Never replay a mutation after an uncertain timeout or readback.
+            if action == "click":
+                target.click(timeout=1500)
+            else:
+                target.fill(text, timeout=1500)
+                self._check_cancelled()
+                matched = target.evaluate("""(el, expected) => el.isConnected &&
+                    ('value' in el ? el.value : (el.isContentEditable ? el.innerText : null)) === expected""", text)
+                if matched is not True:
+                    raise RuntimeError("Browser fill readback did not match; observe before any retry")
+            self._check_cancelled()
+            return True
+        finally:
+            target.dispose()
 
     def _guard_page_input(self, page: Any) -> None:
         # Agent-level inspection occurs in an earlier command and can become stale.
@@ -460,25 +578,8 @@ def chrome_start_managed() -> str:
 
 
 def chrome_connect_cdp() -> str:
-    endpoint = _cdp_url()
-    runtime = _runtime()
-    try:
-        result = runtime.call("connect", endpoint=endpoint, session_type="real")
-        result["reused"] = False
-        return json.dumps(result, ensure_ascii=False)
-    except Exception as real_error:
-        managed = json.loads(chrome_start_managed())
-        result = runtime.call("connect", endpoint=endpoint, session_type="managed")
-        result.update({
-            "reused": False,
-            "fallback_from_real": True,
-            "real_error": str(real_error),
-            "managed_pid": managed.get("pid"),
-            "profile": managed.get("profile"),
-            "startup_log": managed.get("log"),
-            "note": "JARVIS could not attach to an existing remotely-debuggable Chrome, so it launched an isolated real Chrome profile.",
-        })
-        return json.dumps(result, ensure_ascii=False)
+    from .chrome_session_tools import ensure_chrome_connection
+    return ensure_chrome_connection()
 
 
 def chrome_tabs() -> str:

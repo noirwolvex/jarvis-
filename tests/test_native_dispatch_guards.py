@@ -4,7 +4,7 @@ from pathlib import Path
 from unittest.mock import Mock, patch
 
 from core import semantic_ui_tools as ui
-from core.desktop_input import InputDeliveryError
+from core.desktop_input import InputDeliveryError, InputNotDispatchedError
 from core.native_ui_input import ui_type_native
 from core.rust_engine import RustDaemonClient, RustEngineConfig, RustEngineUnavailable
 from test_semantic_ui_tools import _Editor, _Window
@@ -59,6 +59,42 @@ class NativeDispatchGuardTests(unittest.TestCase):
         requests = [json.loads(call.args[0][4:]) for call in self.socket.sendall.call_args_list]
         self.assertEqual([request["capability_id"] for request in requests], ["input-1", "input-1"])
         self.assertEqual([request["action"]["display_id"] for request in requests], [1, 1])
+
+    def test_semantic_preflight_rejection_does_not_create_false_mutation_review(self):
+        from core.execution_telemetry import input_not_dispatched
+        from core.tools import ToolRegistry
+        from test_semantic_ui_tools import _Control
+        registry = ToolRegistry()
+        registry.permissions.set_access_mode("full")
+        ui.register_semantic_ui_tools(registry)
+        for name, arguments in (("ui_type", {"text": "fixture"}),
+                                ("ui_hotkey", {"keys": ["ctrl", "a"]}),
+                                ("ui_activate", {"target": "Open"})):
+            with self.subTest(name=name):
+                editor = _Editor()
+                del editor.iface_value
+                control = _Control("Open", "Button") if name == "ui_activate" else editor
+                self.window._controls = [control]
+                control._owner = self.window
+                with patch("core.rust_engine._preflight", side_effect=RustEngineUnavailable("fixture unavailable")), \
+                     patch.object(ui, "paste_text") as paste:
+                    result = registry.execute(name, arguments, approved=True)
+                self.assertTrue(input_not_dispatched(result), result)
+                paste.assert_not_called()
+                self.socket.sendall.assert_not_called()
+
+    def test_submit_failure_after_value_write_remains_an_unverified_mutation(self):
+        from core.execution_telemetry import input_not_dispatched
+        from core.tools import ToolRegistry
+        registry = ToolRegistry()
+        registry.permissions.set_access_mode("full")
+        ui.register_semantic_ui_tools(registry)
+        with patch("core.rust_engine._preflight", side_effect=RustEngineUnavailable("fixture unavailable")):
+            result = registry.execute("ui_type", {"text": "fixture", "submit": True}, approved=True)
+        self.assertEqual(self.editor.value, "fixture")
+        self.assertFalse(input_not_dispatched(result), result)
+        self.assertIn("Text was entered but Enter delivery failed", result)
+        self.socket.sendall.assert_not_called()
 
     def test_scroll_refuses_missing_pointer_or_outside_display_before_capture(self):
         for pointer in (None, {}, {"x": True, "y": 100}, {"x": 5000, "y": 100}):
@@ -246,6 +282,23 @@ class NativeDispatchGuardTests(unittest.TestCase):
             self.client.type_text("fixture", self.status, before_dispatch=lambda: events.append("type guard"))
             self.client.hotkey(["enter"], self.status, before_dispatch=lambda: events.append("submit guard"))
         self.assertEqual(events, ["capture", "type guard", "send", "submit guard", "send"])
+
+    def test_pre_dispatch_unavailable_guard_is_not_uncertain_or_fallback_safe(self):
+        def guard():
+            raise RustEngineUnavailable("Target is no longer available")
+        with self.assertRaises(InputNotDispatchedError):
+            self.client._request({"kind": "type_text", "text": "fixture"},
+                                 mutating=True, before_dispatch=guard)
+        self.socket.sendall.assert_not_called()
+        self.assertEqual(self.client._sequence, 0)
+
+    def test_unusable_capture_rejects_typing_before_mutation_dispatch(self):
+        for response in ({}, {"frame": {}}, {"frame": {"id": ""}}):
+            with self.subTest(response=response), \
+                 patch.object(self.client, "capture", return_value=response):
+                with self.assertRaises(InputNotDispatchedError):
+                    self.client.type_text("fixture", self.status)
+            self.socket.sendall.assert_not_called()
 
 
 if __name__ == "__main__":

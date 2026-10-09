@@ -89,6 +89,18 @@ class NativeSemanticBindingTests(unittest.TestCase):
         self.assertTrue(result.startswith("VERIFIED:"))
         self.client.type_text.assert_called_once()
 
+    def test_native_unavailable_before_typing_records_no_delivery(self):
+        from core.execution_telemetry import input_not_dispatched
+        from core.native_ui_input import register_native_ui_input_tools
+        from core.rust_engine import RustEngineUnavailable
+        registry = ToolRegistry()
+        register_native_ui_input_tools(registry)
+        with patch("core.rust_engine._preflight", side_effect=RustEngineUnavailable("Daemon disconnected")):
+            result = registry.execute("ui_type_native", {"text": "fixture"}, approved=True)
+        self.assertTrue(input_not_dispatched(result), result)
+        self.client.type_text.assert_not_called()
+        self.editor.iface_value.SetValue.assert_not_called()
+
     def test_step_completion_rejects_delivery_and_stale_verified_evidence(self):
         with tempfile.TemporaryDirectory() as directory:
             orchestrator = TaskOrchestrator(directory)

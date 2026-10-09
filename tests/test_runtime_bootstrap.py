@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 import io
+import json
 import socket
 import subprocess
 import sys
@@ -9,12 +10,40 @@ import tempfile
 from contextlib import redirect_stdout
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 from scripts import jarvis_runtime as runtime
 
 
 class RuntimeBootstrapTests(unittest.TestCase):
+    def test_windows_reserved_port_uses_os_selected_port(self):
+        reserved, available = MagicMock(), MagicMock()
+        reserved.__enter__.return_value = reserved
+        available.__enter__.return_value = available
+        reserved.bind.side_effect = PermissionError("Windows excluded port")
+        available.getsockname.return_value = ("127.0.0.1", 49170)
+        with patch.object(runtime.socket, "socket", side_effect=[reserved, available]):
+            self.assertEqual(runtime._available_daemon_port(), 49170)
+        reserved.bind.assert_called_once_with(("127.0.0.1", 7443))
+        available.bind.assert_called_once_with(("127.0.0.1", 0))
+
+    def test_daemon_uses_an_available_loopback_port_when_default_is_occupied(self):
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as occupied:
+            occupied.bind(("127.0.0.1", 0))
+            occupied.listen()
+            preferred = occupied.getsockname()[1]
+            port = runtime._available_daemon_port(preferred)
+            self.assertNotEqual(port, preferred)
+            self.assertGreater(port, 0)
+            env = runtime._runtime_env(Path("session"), {}, {}, port=port)
+            self.assertEqual(env["JARVIS_DAEMON_PORT"], str(port))
+            self.assertEqual(env["JARVIS_DAEMON_HOST"], "127.0.0.1")
+
+    def test_daemon_rejects_invalid_configured_ports(self):
+        for value in (0, -1, 65536, True):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                runtime._available_daemon_port(value)
+
     def test_busy_dashboard_port_rejects_before_bootstrap_for_both_entrypoints(self):
         with tempfile.TemporaryDirectory() as directory, \
              socket.socket(socket.AF_INET, socket.SOCK_STREAM) as existing:
@@ -278,8 +307,10 @@ class RuntimeBootstrapTests(unittest.TestCase):
         token = "runtime-pairing-secret-that-must-not-appear-in-output"
         output = io.StringIO()
         with patch.object(runtime.webbrowser, "open", return_value=True) as open_browser, \
+             patch.object(runtime, "_write_control_pairing_file", return_value=Path("fixture/control-session.json")) as write_pairing, \
              redirect_stdout(output):
             runtime._open_paired_dashboard({"JARVIS_CONTROL_PAIRING_TOKEN": token})
+        write_pairing.assert_called_once_with({"JARVIS_CONTROL_PAIRING_TOKEN": token})
         opened = open_browser.call_args.args[0]
         self.assertIn("/api/pair?token=", opened)
         self.assertIn(token, opened)
@@ -287,9 +318,79 @@ class RuntimeBootstrapTests(unittest.TestCase):
         self.assertIn("JARVIS_CONTROL_SESSION_OPENED", output.getvalue())
 
     def test_pairing_fails_closed_when_browser_cannot_open(self):
-        with patch.object(runtime.webbrowser, "open", return_value=False):
+        with patch.object(runtime.webbrowser, "open", return_value=False), \
+             patch.object(runtime, "_write_control_pairing_file", return_value=Path("fixture/control-session.json")):
             with self.assertRaisesRegex(RuntimeError, "authenticated Control Center"):
                 runtime._open_paired_dashboard({"JARVIS_CONTROL_PAIRING_TOKEN": "x" * 40})
+
+    def test_pairing_can_prepare_existing_browser_without_opening_another(self):
+        token = "x" * 40
+        output = io.StringIO()
+        with patch.object(runtime.webbrowser, "open") as open_browser, \
+             patch.object(runtime, "_write_control_pairing_file", return_value=Path("fixture/control-session.json")) as write_pairing, \
+             redirect_stdout(output):
+            runtime._open_paired_dashboard({"JARVIS_CONTROL_PAIRING_TOKEN": token}, open_browser=False)
+        open_browser.assert_not_called()
+        write_pairing.assert_called_once()
+        self.assertIn("JARVIS_CONTROL_SESSION_READY", output.getvalue())
+        self.assertNotIn(token, output.getvalue())
+
+    def test_pairing_file_is_protected_before_writing_and_rotates_atomically(self):
+        output = io.StringIO()
+        protected = []
+        def secure_empty(path):
+            self.assertEqual(path.read_bytes(), b"")
+            protected.append(path)
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runtime, "RUNTIME_ROOT", Path(directory) / "rust-runtime"), \
+             patch.object(runtime, "_restrict_pairing_file", side_effect=secure_empty), redirect_stdout(output):
+            for token in ("a" * 40, "b" * 40):
+                destination = runtime._write_control_pairing_file({"JARVIS_CONTROL_PAIRING_TOKEN": token})
+                self.assertEqual(destination, Path(directory) / "control-session.json")
+                self.assertEqual(json.loads(destination.read_text()), {
+                    "version": 1, "url": runtime.DASHBOARD_URL, "token": token})
+                self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+                self.assertNotIn(token, output.getvalue())
+        self.assertEqual(len(protected), 2)
+        self.assertNotEqual(protected[0], protected[1])
+
+    def test_pairing_file_permission_and_replace_failures_preserve_previous_file(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(runtime, "RUNTIME_ROOT", Path(directory) / "rust-runtime"):
+            destination = Path(directory) / "control-session.json"
+            destination.write_text("previous credential")
+            for failure in ("permissions", "replace"):
+                with self.subTest(failure=failure), \
+                     patch.object(runtime, "_restrict_pairing_file", side_effect=OSError("permissions") if failure == "permissions" else None), \
+                     patch.object(runtime.os, "replace", side_effect=OSError("replace")):
+                    with self.assertRaises(OSError):
+                        runtime._write_control_pairing_file({"JARVIS_CONTROL_PAIRING_TOKEN": "a" * 40})
+                self.assertEqual(destination.read_text(), "previous credential")
+                self.assertEqual(list(Path(directory).glob("*.tmp")), [])
+
+    def test_pairing_file_rejects_invalid_token_before_creating_any_file(self):
+        with patch.object(runtime.tempfile, "mkstemp") as create:
+            for token in ("", "a" * 31, "a" * 257):
+                with self.assertRaises(RuntimeError):
+                    runtime._write_control_pairing_file({"JARVIS_CONTROL_PAIRING_TOKEN": token})
+            create.assert_not_called()
+
+    @unittest.skipUnless(runtime.os.name == "nt", "Windows ACL")
+    def test_pairing_acl_removes_inheritance_and_grants_only_current_user(self):
+        identity = SimpleNamespace(returncode=0, stdout='"fixture\\user","S-1-5-21-123-456-789-1001"\n')
+        with patch.object(runtime.subprocess, "run", side_effect=[identity, SimpleNamespace(returncode=0)]) as run:
+            runtime._restrict_pairing_file(Path("fixture"))
+        self.assertEqual(run.call_args_list[1].args[0], ["icacls.exe", "fixture", "/inheritance:r", "/grant:r", "*S-1-5-21-123-456-789-1001:(F)"])
+        self.assertFalse(run.call_args.kwargs.get("shell", False))
+
+    @unittest.skipUnless(runtime.os.name == "nt", "Windows ACL")
+    def test_pairing_acl_fails_closed_on_invalid_identity_or_permission_failure(self):
+        for identity, secured in ((SimpleNamespace(returncode=1, stdout=""), None),
+                                   (SimpleNamespace(returncode=0, stdout='"user","not-a-sid"\n'), None),
+                                   (SimpleNamespace(returncode=0, stdout='"user","S-1-5-21-1001"\n'), SimpleNamespace(returncode=1))):
+            with patch.object(runtime.subprocess, "run", side_effect=[identity, secured]):
+                with self.assertRaises(RuntimeError):
+                    runtime._restrict_pairing_file(Path("fixture"))
 
     def test_default_runtime_builds_and_selects_optimized_native_executable(self):
         with patch.dict(runtime.os.environ, {}, clear=True):

@@ -13,6 +13,10 @@ class _DeniedError(RuntimeError):
     status_code = 403
 
 
+class _RateLimitError(RuntimeError):
+    status_code = 429
+
+
 class AIProviderFailoverTests(unittest.TestCase):
     def _agent(self, openai_factory):
         memory = Mock()
@@ -55,6 +59,75 @@ class AIProviderFailoverTests(unittest.TestCase):
             agent._chat_completion(messages=[], tools=[], tool_choice="auto")
             self.assertEqual(primary.chat.completions.create.call_count, 1)
             self.assertEqual(fallback.chat.completions.create.call_count, 2)
+        finally:
+            agent.close()
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABITOKEN_API_KEY": "primary-secret",
+            "AI_PROVIDER": "primary",
+            "AI_BASE_URL": "https://primary.example/v1",
+            "AI_MODEL": "primary-model",
+            "AI_FALLBACK_PROVIDER": "backup",
+            "AI_FALLBACK_API_KEY": "fallback-secret",
+            "AI_FALLBACK_BASE_URL": "https://backup.example/v1",
+            "AI_FALLBACK_MODEL": "backup-model",
+        },
+        clear=False,
+    )
+    def test_429_switches_once_to_fallback_and_continues(self) -> None:
+        primary = Mock()
+        fallback = Mock()
+        primary.chat.completions.create.side_effect = _RateLimitError(
+            "Error code: 429 RESOURCE_EXHAUSTED quota exceeded"
+        )
+        response = SimpleNamespace(choices=[])
+        fallback.chat.completions.create.return_value = response
+
+        agent = self._agent([primary, fallback])
+        try:
+            result = agent._chat_completion(messages=[], tools=[], tool_choice="auto")
+            self.assertIs(result, response)
+            self.assertEqual(agent.provider, "backup")
+            self.assertEqual(agent.model, "backup-model")
+            notice = agent.pop_provider_failover_notice()
+            self.assertIn("429", notice)
+            self.assertIn("switched", notice)
+            agent._chat_completion(messages=[], tools=[], tool_choice="auto")
+            self.assertEqual(primary.chat.completions.create.call_count, 1)
+            self.assertEqual(fallback.chat.completions.create.call_count, 2)
+        finally:
+            agent.close()
+
+    @patch.dict(
+        os.environ,
+        {
+            "TABITOKEN_API_KEY": "primary-secret",
+            "AI_PROVIDER": "primary",
+            "AI_BASE_URL": "https://primary.example/v1",
+            "AI_MODEL": "primary-model",
+            "AI_FALLBACK_PROVIDER": "",
+            "AI_FALLBACK_API_KEY": "",
+            "AI_FALLBACK_BASE_URL": "",
+            "AI_FALLBACK_MODEL": "",
+        },
+        clear=False,
+    )
+    def test_429_without_fallback_preserves_clear_checkpoint_error(self) -> None:
+        primary = Mock()
+        primary.chat.completions.create.side_effect = _RateLimitError(
+            "Error code: 429 RESOURCE_EXHAUSTED quota exceeded"
+        )
+
+        agent = self._agent([primary])
+        try:
+            with self.assertRaisesRegex(RuntimeError, "AI_PROVIDER_RATE_LIMITED") as caught:
+                agent._chat_completion(messages=[], tools=[], tool_choice="auto")
+            message = str(caught.exception)
+            self.assertIn("quota", message.casefold())
+            self.assertIn("checkpoint", message.casefold())
+            self.assertNotIn("primary-secret", message)
         finally:
             agent.close()
 

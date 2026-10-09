@@ -69,6 +69,7 @@ class TaskRun:
     last_review_required_index: int = -1
     workflows: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, int] = field(default_factory=dict)
+    operator_controls: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def elapsed_ms(self) -> float:
@@ -287,18 +288,39 @@ class TaskOrchestrator:
             return ""
         self.current.recoveries += 1
         low = result.lower()
+        from .execution_telemetry import input_not_dispatched
+        if (input_not_dispatched(result) and ("unknown tool:" in low or "validationerror:" in low)
+                or "workflow preflight rejected" in low):
+            return ("Recovery guidance: Correct the tool name or arguments using the available tool definitions. "
+                    "This request was rejected before its action ran. Keep the current plan step pending; "
+                    "do not rewrite the mission or claim completion. A workflow preflight failure dispatched none of its actions.")
+        if "inputnotdispatchederror" in low and tool_name.startswith(("browser_", "interaction_click")):
+            return ("Recovery guidance: No input was dispatched. Resolve the target from a fresh browser observation "
+                    "or use its exact observed role/name. Snapshot IDs require the matching current expected_version. "
+                    "Correct the rejected action without task_verify; do not replay an earlier delivered action.")
         hints: list[str] = []
         if "screen_observe required" in low:
             hints.append("The coordinate input was not executed. Call screen_observe, inspect the returned image and coordinate mapping, and resolve the target again before any coordinate input. Do not repeat the rejected coordinates without fresh evidence.")
         if result.startswith("ERROR: Observe the last"):
             hints.append("Inspect the previous action with ui_inspect or screen_observe, then call task_verify with observed evidence (verified=false if it failed) before another mutation. Do not retry the blocked click.")
-        if "verification requires successful observation" in low:
+        if "no non-task action has succeeded yet" in low:
+            hints.append("Do not call task_verify again yet. Execute or observe the next pending mission step with a non-task tool first; task_verify cannot create evidence.")
+        elif "verification requires successful observation" in low:
             hints.append("Call ui_inspect or screen_observe and obtain a successful fresh observation before task_verify. Rewording the claim or evidence does not create an observation; do not repeat task_verify until that read succeeds.")
         if (
             ("no input delivered" in low or "inputnotdispatchederror" in low)
             and ("editor" in low or tool_name in {"ui_type_native", "ui_type", "interaction_type"})
         ):
             hints.append("The text input was rejected before dispatch, so there is no typed action to verify. Do not call task_verify for this rejection. Re-inspect the exact editor, then retry the requested unsent draft through interaction_type; preserve submit=false.")
+        if (
+            (tool_name == "discord_send_message" or "discord_send_message" in low)
+            and ("inputnotdispatchederror" in low or "no message was sent" in low or "no message input was dispatched" in low)
+        ):
+            hints.append(
+                "Discord rejected the send before any message input was dispatched. Do not call task_verify for this rejection. "
+                "Re-resolve the current Discord conversation/composer, then retry the original discord_send_message once; "
+                "do not insert a separate draft/write recovery step."
+            )
         if "exact visible enabled matches" in low:
             hints.append("The semantic target is ambiguous. Use ui_inspect to identify the intended editable control, then retry semantic typing with its unique selector or control identity. Do not guess a coordinate to bypass target resolution.")
         if "foreground" in low or "focus" in low:

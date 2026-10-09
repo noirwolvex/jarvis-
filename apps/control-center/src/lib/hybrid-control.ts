@@ -7,4 +7,5 @@ export {
   submitHybridMission,
   emergencyStopHybrid,
   resetHybridStop,
+  controlHybridMission,
 } from "./hybrid-control-v2";

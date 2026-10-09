@@ -67,6 +67,19 @@ h1 { font-size: 29px; letter-spacing: -.9px; font-weight: 500; line-height: 1.2;
 .button.primary { background: var(--accent); color: #182311; }
 .light .button.primary { color: #f2f8ed; }
 .button.primary:hover { filter: brightness(1.08); }
+.mission-controls { margin-bottom: 20px; padding: 14px; border: 1px solid var(--border); border-radius: 6px; background: var(--panel); }
+.mission-controls-row { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
+.mission-controls-row > span, .mission-controls > p { color: var(--subtle); font-size: 11px; line-height: 1.6; }
+.mission-confirmation { margin-top: 14px; padding-top: 14px; border-top: 1px solid var(--border); }
+.mission-confirmation > p { white-space: pre-wrap; overflow-wrap: anywhere; line-height: 1.6; }
+.mission-confirmation > .mono { display: block; color: var(--muted); margin-bottom: 12px; overflow-wrap: anywhere; }
+.mission-action-details { max-height: 280px; overflow: auto; white-space: pre-wrap; overflow-wrap: anywhere; padding: 12px; border: 1px solid var(--border); font-size: 12px; }
+.session-connect { min-height: 100vh; display: grid; place-items: center; padding: 24px; background: var(--bg); color: var(--text); }
+.session-connect section { max-width: 580px; padding: 32px; border: 1px solid var(--border); border-radius: 12px; background: var(--panel); }
+.session-connect h1 { font-size: 28px; margin: 16px 0; }
+.session-connect p { line-height: 1.6; margin: 14px 0; }
+.session-connect .button { margin: 6px 10px 6px 0; }
+.session-connect .session-note { color: var(--muted); font-size: 12px; }
 .stop-button { color: var(--danger); background: color-mix(in srgb, var(--danger) 5%, var(--bg)); border-color: color-mix(in srgb, var(--danger) 24%, var(--border)); }
 .stop-button:hover { background: var(--danger-bg); }
 .mission-launch { border: 1px solid var(--border); border-radius: 8px; background: var(--panel); display: grid; grid-template-columns: 1.65fr 1fr; overflow: hidden; }
