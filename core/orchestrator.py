@@ -280,8 +280,14 @@ class TaskOrchestrator:
     def needs_action_review(self) -> bool:
         if not self.current or self.current.last_review_required_index < 0:
             return False
-        reviewed = max((item.evidence_trace_index for item in self.current.verifications), default=-1)
-        return reviewed < self.current.last_review_required_index
+        # A failed or empty verification is not approval to execute another
+        # mutation. Use the most recent review since the guarded action so a
+        # later failed readback also invalidates an earlier successful check.
+        required_index = self.current.last_review_required_index
+        for record in reversed(self.current.verifications):
+            if record.evidence_trace_index >= required_index:
+                return not (record.verified and bool(record.evidence.strip()))
+        return True
 
     def recovery_hint(self, result: str, tool_name: str) -> str:
         if not self.current or tool_succeeded(result):
