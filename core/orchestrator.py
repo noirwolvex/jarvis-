@@ -69,6 +69,7 @@ class TaskRun:
     last_review_required_index: int = -1
     workflows: list[dict[str, Any]] = field(default_factory=list)
     metrics: dict[str, int] = field(default_factory=dict)
+    operator_controls: list[dict[str, Any]] = field(default_factory=list)
 
     @property
     def elapsed_ms(self) -> float:
@@ -287,6 +288,16 @@ class TaskOrchestrator:
             return ""
         self.current.recoveries += 1
         low = result.lower()
+        from .execution_telemetry import input_not_dispatched
+        if (input_not_dispatched(result) and ("unknown tool:" in low or "validationerror:" in low)
+                or "workflow preflight rejected" in low):
+            return ("Recovery guidance: Correct the tool name or arguments using the available tool definitions. "
+                    "This request was rejected before its action ran. Keep the current plan step pending; "
+                    "do not rewrite the mission or claim completion. A workflow preflight failure dispatched none of its actions.")
+        if "inputnotdispatchederror" in low and tool_name.startswith(("browser_", "interaction_click")):
+            return ("Recovery guidance: No input was dispatched. Resolve the target from a fresh browser observation "
+                    "or use its exact observed role/name. Snapshot IDs require the matching current expected_version. "
+                    "Correct the rejected action without task_verify; do not replay an earlier delivered action.")
         hints: list[str] = []
         if "screen_observe required" in low:
             hints.append("The coordinate input was not executed. Call screen_observe, inspect the returned image and coordinate mapping, and resolve the target again before any coordinate input. Do not repeat the rejected coordinates without fresh evidence.")

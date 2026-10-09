@@ -5,6 +5,7 @@ import json
 import socket
 import threading
 import unittest
+from dataclasses import replace
 from unittest.mock import Mock, patch
 from pathlib import Path
 
@@ -258,6 +259,53 @@ class RustEngineTests(unittest.TestCase):
             self.assertEqual(client._keyboard_input_context(second)[2]["id"], "frame-2")
         self.assertEqual(context.call_count, 2)
 
+    def test_mouse_then_keyboard_reuses_frame_without_skipping_dispatch_guards(self):
+        client = self.fixture_client()
+        client.config = replace(client.config, observe_capabilities={0: "observe"}, input_capabilities={0: "input"})
+        status = {"displays": [{"id": 0, "x": 0, "y": 0, "width": 1920, "height": 1080}],
+                  "foreground": {"hwnd": 1001, "process_id": 42, "title": "Fixture"}}
+        guard = Mock()
+        clock = [100.0]
+        with patch("core.rust_engine.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(client, "capture", return_value={"frame": {"id": "fresh"}}) as capture, \
+                patch.object(client, "_foreground_center", return_value=(300, 100)), \
+                patch.object(client, "status", return_value=status) as read_status, \
+                patch.object(client, "_request", return_value={"executed": True}) as request:
+            client.click(300, 100, before_dispatch=guard)
+            client.type_text("draft", before_dispatch=guard)
+            self.assertEqual(capture.call_count, 1)
+            self.assertEqual(read_status.call_count, 2)
+            self.assertEqual([item.kwargs["before_dispatch"] for item in request.call_args_list], [guard, guard])
+            # Every new mouse action still captures, even inside the same burst.
+            client.pointer_move(320, 100, status)
+            self.assertEqual(capture.call_count, 2)
+            client.type_text("more", status, before_dispatch=guard)
+            self.assertEqual(capture.call_count, 2)
+            clock[0] += 0.75
+            client.type_text("expired", status, before_dispatch=guard)
+            self.assertEqual(capture.call_count, 3)
+            changed = {**status, "foreground": {**status["foreground"], "process_id": 43}}
+            client.type_text("new process", changed, before_dispatch=guard)
+            self.assertEqual(capture.call_count, 4)
+            self.assertEqual(request.call_args.args[0]["foreground"]["process_id"], 43)
+
+    def test_slow_mouse_capture_does_not_extend_keyboard_cache_lifetime(self):
+        client = self.fixture_client()
+        client.config = replace(client.config, observe_capabilities={0: "observe"}, input_capabilities={0: "input"})
+        status = {"displays": [{"id": 0, "x": 0, "y": 0, "width": 100, "height": 100}],
+                  "foreground": {"hwnd": 1001, "process_id": 42, "title": "Fixture"}}
+        clock = [100.0]
+        def capture(_display):
+            clock[0] += 0.8
+            return {"frame": {"id": "fresh"}}
+        with patch("core.rust_engine.time.monotonic", side_effect=lambda: clock[0]), \
+                patch.object(client, "capture", side_effect=capture) as observed, \
+                patch.object(client, "_foreground_center", return_value=(10, 10)), \
+                patch.object(client, "_request", return_value={"executed": True}):
+            client.click(10, 10, status)
+            client.type_text("draft", status)
+        self.assertEqual(observed.call_count, 2)
+
     def test_expanded_client_actions_bind_fresh_frame_and_input_capability(self) -> None:
         config = RustEngineConfig(
             host="127.0.0.1",
@@ -346,6 +394,59 @@ class RustEngineTests(unittest.TestCase):
         with self.assertRaises(RustEngineExecutionError):
             client._request({"kind": "emergency_stop"}, mutating=True)
         self.assertTrue(socket.closed)
+
+    def test_atomic_overlay_requires_positive_native_delivery_acknowledgment(self) -> None:
+        from core.execution_telemetry import input_not_dispatched
+        from core.rust_engine import register_rust_engine_tools
+        from core.tools import ToolRegistry
+        registry = ToolRegistry()
+        original = Mock(return_value="PYTHON_EXECUTED")
+        registry.register(replace(registry._tools["desktop_type"], handler=original))
+        register_rust_engine_tools(registry)
+        client = Mock()
+        for payload in ({}, {"executed": False, "simulation": False},
+                        {"executed": True, "simulation": True}, {"executed": True}):
+            with self.subTest(payload=payload), \
+                 patch("core.rust_engine._preflight", return_value=(client, {})), \
+                 patch("core.rust_engine.native_engine_mode", return_value="auto"):
+                client.type_text.return_value = payload
+                result = registry.execute("desktop_type", {"text": "fixture"}, approved=True)
+            self.assertTrue(result.startswith("ERROR executing desktop_type:"), result)
+            self.assertIn("did not confirm", result)
+            self.assertFalse(input_not_dispatched(result))
+            original.assert_not_called()
+
+    def test_strict_atomic_preflight_failure_does_not_create_delivery_review(self) -> None:
+        from core.execution_telemetry import input_not_dispatched
+        from core.rust_engine import register_rust_engine_tools
+        from core.tools import ToolRegistry
+        registry = ToolRegistry()
+        original = Mock(return_value="PYTHON_EXECUTED")
+        registry.register(replace(registry._tools["desktop_type"], handler=original))
+        register_rust_engine_tools(registry)
+        with patch("core.rust_engine._preflight", side_effect=RustEngineUnavailable("Daemon disconnected")), \
+             patch("core.rust_engine.native_engine_mode", return_value="rust"):
+            result = registry.execute("desktop_type", {"text": "fixture"}, approved=True)
+        self.assertTrue(input_not_dispatched(result), result)
+        original.assert_not_called()
+
+    def test_auto_atomic_emergency_latch_cannot_fall_back_to_python(self) -> None:
+        from core.execution_telemetry import input_not_dispatched
+        from core.rust_engine import register_rust_engine_tools
+        from core.tools import ToolRegistry
+        registry = ToolRegistry()
+        original = Mock(return_value="PYTHON_EXECUTED")
+        registry.register(replace(registry._tools["desktop_type"], handler=original))
+        register_rust_engine_tools(registry)
+        client = Mock()
+        client.status.return_value = {"emergency_stopped": True}
+        with patch("core.rust_engine._client", return_value=client), \
+             patch("core.rust_engine.native_engine_mode", return_value="auto"):
+            result = registry.execute("desktop_type", {"text": "fixture"}, approved=True)
+        self.assertTrue(input_not_dispatched(result), result)
+        self.assertIn("emergency stop is latched", result)
+        original.assert_not_called()
+        client.type_text.assert_not_called()
 
     def test_read_only_transport_failure_can_be_treated_as_unavailable(self) -> None:
         config = RustEngineConfig(

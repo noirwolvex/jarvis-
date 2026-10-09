@@ -136,6 +136,62 @@ class DiscordNavigationTests(unittest.TestCase):
         self.assertEqual(rows[0][1], "/channels/@me/333")
         self.assertIs(rows[1][0], later)
 
+    def test_route_bearing_row_without_role_suffix_is_resolved_and_verified(self):
+        self.first.element_info.name = "Plain Name"
+        result = json.loads(nav.discord_select_chat(1)[len("VERIFIED: "):])
+        self.assertEqual(result["destination"], "Plain Name")
+        self.assertTrue(result["route_verified"] and result["composer_verified"])
+        self.invoke.assert_called_once_with(self.first, 42)
+
+    def test_matching_role_label_cannot_downgrade_an_invalid_route(self):
+        self.first.value = "https://discord.com/channels/123/456"
+        rows = nav._conversation_links(self.window, self.scope, [self.first, self.second])
+        self.assertEqual(rows, [(self.second, "/channels/@me/222")])
+
+    def test_overlapping_same_name_rows_with_different_routes_fail_before_input(self):
+        self.second.element_info.name = self.first.element_info.name
+        self.second.rect = self.first.rect
+        with self.assertRaisesRegex(InputNotDispatchedError, "different routes"):
+            nav.discord_select_chat(1)
+        self.invoke.assert_not_called()
+
+    def test_missing_conversation_has_no_false_delivery_review_barrier(self):
+        self.scope.children = [self.friends]
+        registry = ToolRegistry()
+        register_discord_tools(registry)
+        result = registry.execute("discord_select_chat", {"position": 1}, approved=True)
+        self.assertIn("0 visible conversation links", result)
+        self.assertEqual(result.execution.get("input_delivery"), "not_dispatched")
+        self.invoke.assert_not_called()
+
+    def test_missing_conversation_after_home_keeps_partial_delivery_guard(self):
+        self.window.children.remove(self.scope)
+        self.scope.children = [self.friends]
+        with self.assertRaises(InputDeliveryError) as raised:
+            nav.discord_select_chat(1)
+        self.assertNotIsInstance(raised.exception, InputNotDispatchedError)
+        self.invoke.assert_called_once_with(self.home, 42)
+
+    def test_home_navigation_timeout_is_uncertain_and_not_repeated(self):
+        self.window.children.remove(self.scope)
+        self.invoke.side_effect = lambda *args: "invoke"
+        with self.assertRaisesRegex(InputDeliveryError, "Home navigation") as raised:
+            nav.discord_select_chat(1)
+        self.assertNotIsInstance(raised.exception, InputNotDispatchedError)
+        self.invoke.assert_called_once_with(self.home, 42)
+
+    def test_post_home_pre_dispatch_failure_does_not_erase_prior_navigation(self):
+        self.window.children.remove(self.scope)
+        def navigate_then_reject(win, control, *args):
+            if control is self.home:
+                self.navigate(control)
+                return "uia_invoke"
+            raise InputNotDispatchedError("Target moved before click")
+        with patch.object(nav, "_activate", side_effect=navigate_then_reject), \
+             self.assertRaises(InputDeliveryError) as raised:
+            nav.discord_select_chat(1)
+        self.assertNotIsInstance(raised.exception, InputNotDispatchedError)
+
     def test_server_view_opens_dm_list_then_exact_chat(self):
         self.window.children.remove(self.scope)
         self.assertTrue(nav.discord_select_chat(2).startswith("VERIFIED:"))

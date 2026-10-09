@@ -6,7 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from core import discord_tools as discord
-from core.desktop_input import InputDeliveryError
+from core.desktop_input import InputDeliveryError, InputNotDispatchedError
 from core.discord_tools import register_discord_tools
 from core.tools import ToolRegistry
 
@@ -204,6 +204,17 @@ class DiscordToolsTests(unittest.TestCase):
                 discord.discord_navigate_and_send("general", "hello")
             self.assertEqual(mocks["ui_type"].call_count, 1)
 
+    def test_typing_rejected_before_dispatch_does_not_become_uncertain_send(self):
+        win = Window(Control("general", selected=True), Control("Message #general", "Edit"))
+        registry = ToolRegistry()
+        register_discord_tools(registry)
+        with desktop_fixture(win) as mocks:
+            mocks["ui_type"].side_effect = InputNotDispatchedError("Editor changed before input")
+            result = registry.execute("discord_send_message", {"text": "hello"}, approved=True)
+        self.assertIn("InputNotDispatchedError", result)
+        self.assertEqual(result.execution.get("input_delivery"), "not_dispatched")
+        mocks["ui_type"].assert_called_once()
+
     def test_existing_draft_and_unreadable_composer_block_send(self):
         for value in ("existing unsent draft", None):
             win = Window(Control("general", selected=True), Control("Message #general", "Edit", value=value))
@@ -302,6 +313,27 @@ class DiscordToolsTests(unittest.TestCase):
         mocks["ui_type"].assert_called_once()
         self.assertEqual(mocks["ui_type"].call_args.kwargs["text"], "FDD")
         self.assertTrue(mocks["ui_type"].call_args.kwargs["submit"])
+
+    def test_same_name_selected_row_cannot_override_current_dm_route(self):
+        wrong = Control("Alice (direct message),", "Hyperlink", selected=True,
+                        value="https://discord.com/channels/@me/111")
+        current = Control("Alice (direct message),", "Hyperlink", selected=False,
+                          value="https://discord.com/channels/@me/222")
+        document = Control("Discord", "Document", value=current.value)
+        win = Window(wrong, current, document, Control("Message @Alice", "Edit"))
+        with desktop_fixture(win):
+            context = discord._context(win, (42, 100, 1.0), "Alice")
+        self.assertEqual(context.destination_id, ("route", "/channels/@me/222"))
+
+    def test_wrong_route_and_matching_title_never_authorize_a_same_name_dm(self):
+        wrong = Control("Alice (direct message),", "Hyperlink", selected=True,
+                        value="https://discord.com/channels/@me/111")
+        document = Control("Discord", "Document", value="https://discord.com/channels/@me/222")
+        win = Window(wrong, document, Control("Message @Alice", "Edit"))
+        win.element_info.name = "@Alice - Discord"
+        with desktop_fixture(win) as mocks, self.assertRaises(InputNotDispatchedError):
+            discord.discord_send_message("hello", destination="Alice")
+        mocks["ui_type"].assert_not_called()
 
     def test_true_pre_dispatch_dm_ambiguity_is_marked_not_dispatched(self):
         first = Control("bel (direct message),", "ListItem", selected=False)

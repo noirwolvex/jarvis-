@@ -252,8 +252,12 @@ def _context(win: Any, identity: tuple[int, int, float], destination: str = "", 
     active_route = _active_dm_route(controls) if current.startswith("@") else ""
     destination_matches = _named(controls, current, _DESTINATION_TYPES, channel=True)
     selected = [control for control in destination_matches if _selected(control)]
-    item = _route_bound_dm(selected, active_route)
+    item = _route_bound_dm(destination_matches, active_route)
     if item is None:
+        if active_route:
+            # Selection state may lag behind navigation. Never attach the current
+            # route to a same-name selected row that explicitly points elsewhere.
+            selected = [control for control in selected if not _control_value(control)]
         item = _unique(selected, "selected conversation", missing_ok=True)
     semantic_destination_id: tuple = ("route", active_route) if item is not None and active_route else ()
 
@@ -272,7 +276,8 @@ def _context(win: Any, identity: tuple[int, int, float], destination: str = "", 
             # accepting one unique route-less row as the active conversation.
             title_destination = _window_dm_destination(win)
             if title_destination == _channel_name(current):
-                item = _unique(matches, "active DM conversation", missing_ok=True)
+                route_less = [control for control in matches if not _control_value(control)]
+                item = _unique(route_less, "active DM conversation", missing_ok=True)
     if item is None:
         return None
     server_item = None
@@ -448,6 +453,10 @@ def _send(win: Any, context: _Context, message: str,
     # The guard runs before focus, writing, Enter, and delivery probes. Never retry a send.
     try:
         result = ui_type(text=message, target=context.composer_name, submit=True, replace=False, state_guard=guard)
+    except InputNotDispatchedError:
+        # Preserve proven pre-write rejection so recovery does not require evidence
+        # for a message that was never typed. Uncertain writes remain non-replayable.
+        raise
     except Exception as exc:
         raise InputDeliveryError(
             f"Discord text or send outcome is uncertain; inspect state and do not resend automatically: {exc}"

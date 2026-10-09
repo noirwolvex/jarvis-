@@ -36,8 +36,20 @@ _ACTIONABLE_TYPES = {
     "CheckBox",
     "RadioButton",
     "ComboBox",
+    "DataItem",
+    "Slider",
+    "Spinner",
 }
 _EDIT_TYPES = {"Edit", "Document"}
+_MAX_DESCENDANT_CONTROLS = 700
+
+
+class _ControlScan(list[Any]):
+    """Bounded provider results retaining whether enumeration was incomplete."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.truncated = False
 
 
 def _windows_only() -> None:
@@ -255,6 +267,15 @@ def _query_descendants(win: Any, control_types: tuple[str, ...], *, visible_only
                     pass
             yield wrapper
         return
+    if len(control_types) > 2:
+        # Compatibility providers lack native union conditions. Traverse once,
+        # preserving provider order, rather than scanning the whole tree per type.
+        # Narrow one/two-type lookups retain provider filtering for editor resolution.
+        for control in win.descendants():
+            check_cancelled()
+            if _control_type(control) in control_types:
+                yield control
+        return
     for kind in control_types or (None,):
         check_cancelled()
         yield from win.descendants(control_type=kind) if kind else win.descendants()
@@ -282,7 +303,7 @@ def _descendants(win: Any, *, require_complete: bool = False,
 def _read_descendants(win: Any, *, require_complete: bool = False,
                       control_types: tuple[str, ...] = (), visible_only: bool = False) -> list[Any]:
     check_cancelled()
-    result: list[Any] = []
+    result = _ControlScan()
     seen: set[tuple] = set()
     # Apply type conditions inside UIA. Materializing every chat/message/button
     # and reading its properties across processes dominates editor resolution.
@@ -298,9 +319,10 @@ def _read_descendants(win: Any, *, require_complete: bool = False,
         if identity in seen:
             continue
         seen.add(identity)
-        if len(result) == 700:
+        if len(result) == _MAX_DESCENDANT_CONTROLS:
             if require_complete:
                 raise RuntimeError("UI tree exceeds 700 controls; narrow the window before ordinal/relational selection")
+            result.truncated = True
             break
         result.append(control)
     check_cancelled()
@@ -356,9 +378,24 @@ def _candidate_controls(win: Any, target: str = "", control_type: str = "", *,
     return rows
 
 
-def _selector_controls(win: Any) -> list[tuple[Any, dict]]:
-    """Read one bounded live tree; selectors never consume the detached inspection cache."""
-    controls = [win, *_descendants(win, require_complete=True)]
+def _selector_controls(win: Any, *, control_type: str = "", editable: bool = False,
+                       selector: dict[str, Any] | None = None) -> list[tuple[Any, dict]]:
+    """Read fresh candidates, including the complete tree only for relational selectors."""
+    relational = selector is None or "parent" in selector or "adjacent" in selector
+    kinds: tuple[str, ...] = ()
+    if not relational:
+        # An ordinal/focus/selection query only compares candidates of its own
+        # type. Asking UIA for that type avoids reading every message, icon and
+        # container in a large app. Never narrow parent/adjacent queries: their
+        # anchors can have a different type from the requested control.
+        known_type = next((kind for kind in _ACTIONABLE_TYPES
+                           if kind.casefold() == _text(control_type).casefold()), None)
+        kinds = (known_type,) if known_type else (("Edit", "Document") if editable else ())
+    controls = [win, *_descendants(win, require_complete=True,
+                                  control_types=kinds, visible_only=not relational)]
+    # Ordinals still require a common immediate parent. A focus/selection query
+    # needs no hierarchy; only relational selectors need all ancestor links.
+    ancestor_depth = 12 if relational else 1 if "ordinal" in selector else 0
     rows = []
     root = _node_identity(win)
     parents: dict[tuple, Any | None] = {root: None}
@@ -368,7 +405,7 @@ def _selector_controls(win: Any) -> list[tuple[Any, dict]]:
         row["identity"] = _node_identity(control)
         row["ancestors"] = []
         node, seen = control, {row["identity"]}
-        for _ in range(12):
+        for _ in range(ancestor_depth):
             key = _node_identity(node)
             if key not in parents:
                 try:
@@ -419,7 +456,7 @@ def _find_control(win: Any, target: str = "", control_type: str = "", editable: 
                   selector: dict[str, Any] | None = None):
     record_backend("windows_uia", phase="resolve", detail="Fresh semantic target resolution")
     if selector is not None:
-        rows = _selector_controls(win)
+        rows = _selector_controls(win, control_type=control_type, editable=editable, selector=selector)
         if editable:
             for control, row in rows:
                 row["editable"] = _editable_control(control)
@@ -571,13 +608,15 @@ def _focus_control(control: Any, hwnd: int, state_guard: Callable[[], None] | No
 
 
 def ui_inspect(title: str = "", query: str = "", actionable_only: bool = True, max_controls: int = 120,
-               force_refresh: bool = False) -> str:
+               force_refresh: bool = False, control_type: str = "") -> str:
     """Return a compact UIA snapshot optimized for fast agent decisions."""
     win = _window(title)
     hwnd = int(win.handle)
     wanted = _text(query).casefold()
+    requested_type = _text(control_type)
+    kind = next((item for item in _ACTIONABLE_TYPES if item.casefold() == requested_type.casefold()), requested_type)
     limit = max(1, min(int(max_controls), 250))
-    key = (hwnd, title, wanted, actionable_only, limit)
+    key = (hwnd, title, wanted, actionable_only, limit, kind)
     cached = None if force_refresh else _SNAPSHOTS.get(key)
     if cached is not None:
         record_backend("windows_uia_cache", phase="observe", detail="Read detached UIA snapshot")
@@ -586,14 +625,18 @@ def ui_inspect(title: str = "", query: str = "", actionable_only: bool = True, m
     record_backend("windows_uia", phase="observe", detail="Read UI Automation tree")
     controls: list[dict[str, Any]] = []
     returned: list[tuple[Any, dict]] = []
-    for index, control in enumerate(_descendants(win)[:700]):
+    # Filter in one UIA provider query before constructing wrappers and fetching
+    # geometry, patterns, focus and hierarchy for irrelevant message/text nodes.
+    kinds = (kind,) if kind else tuple(sorted(_ACTIONABLE_TYPES)) if actionable_only else ()
+    scan = _descendants(win, control_types=kinds, visible_only=True)
+    for index, control in enumerate(scan):
+        if wanted:
+            haystack = f"{_control_name(control)} {_automation_id(control)} {_control_type(control)}".casefold()
+            if wanted not in haystack:
+                continue
         row = _meta(control, index)
         if actionable_only and row.get("type") not in _ACTIONABLE_TYPES:
             continue
-        if wanted:
-            haystack = f"{row.get('name', '')} {row.get('automation_id', '')} {row.get('type', '')}".casefold()
-            if wanted not in haystack:
-                continue
         if row.get("visible") is False:
             continue
         controls.append(row)
@@ -621,7 +664,10 @@ def ui_inspect(title: str = "", query: str = "", actionable_only: bool = True, m
             "window": window_meta, "foreground_hwnd": foreground, "is_foreground": hwnd == foreground,
             "focused_controls": [row["index"] for row in controls if row.get("focused")],
             "containers": containers, "hierarchy_depth_limit": 4,
-            "truncated": len(controls) >= limit,
+            # Query filtering can return zero matches while the provider scan itself
+            # omitted later controls. Never present that as a complete observation.
+            "truncated": bool(getattr(scan, "truncated", False)) or len(controls) >= limit,
+            "scan_truncated": bool(getattr(scan, "truncated", False)),
             "note": "Read snapshot only; actions resolve live controls. Use force_refresh after external UI changes."}
     _SNAPSHOTS.put(key, data, generation)
     return json.dumps(data, ensure_ascii=False)
@@ -681,28 +727,40 @@ def _activate_control(control: Any, hwnd: int) -> str:
 
     from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
 
-    _guard_foreground(hwnd)
+    try:
+        _guard_foreground(hwnd)
+    except InputDeliveryError as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     _SNAPSHOTS.invalidate(hwnd)
     generation = _SNAPSHOTS.generation
 
     def click_guard() -> None:
-        _guard_foreground(hwnd)
+        try:
+            _guard_foreground(hwnd)
+        except InputDeliveryError as exc:
+            raise InputNotDispatchedError(str(exc)) from exc
         if _SNAPSHOTS.generation != generation or _meta(control) != identity:
-            raise InputDeliveryError("Semantic click target changed before dispatch; resolve again")
+            raise InputNotDispatchedError("Semantic click target changed before dispatch; resolve again")
         try:
             owner = int(control.top_level_parent().handle)
         except Exception as exc:
-            raise InputDeliveryError("Semantic click window identity is unavailable") from exc
+            raise InputNotDispatchedError("Semantic click window identity is unavailable") from exc
         if owner != hwnd:
-            raise InputDeliveryError("Semantic click target belongs to another window; no input delivered")
+            raise InputNotDispatchedError("Semantic click target belongs to another window; no input delivered")
 
-    client, status = _preflight()
+    try:
+        client, status = _preflight()
+    except RustEngineUnavailable as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     click_guard()
     if client is not None:
-        _guard_native_target(hwnd, status)
+        try:
+            _guard_native_target(hwnd, status)
+        except (InputDeliveryError, RustEngineUnavailable) as exc:
+            raise InputNotDispatchedError(str(exc)) from exc
     if client is None:
         if native_engine_mode() not in {"auto", "python"}:
-            raise RustEngineUnavailable(
+            raise InputNotDispatchedError(
                 "Strict Rust mode requires the native daemon before UIA-resolved mouse activation"
             )
         try:
@@ -716,9 +774,9 @@ def _activate_control(control: Any, hwnd: int) -> str:
 
     try:
         result = client.click(x, y, status, before_dispatch=click_guard)
-    except RustEngineUnavailable:
+    except RustEngineUnavailable as exc:
         if native_engine_mode() != "auto":
-            raise
+            raise InputNotDispatchedError(str(exc)) from exc
         click_guard()
         try:
             record_backend("python_native", detail="UIA-resolved physical click")
@@ -736,24 +794,59 @@ def _activate_control(control: Any, hwnd: int) -> str:
     return "rust_uia_center_click"
 
 
-def _control_value(control: Any) -> str | None:
+class _ControlValueReader:
+    """Bind one working provider for an action, never the editor's text or range."""
+
+    def __init__(self, control: Any) -> None:
+        self.control = control
+        self.provider: Callable[[], Any] | None = None
+
+    def __call__(self) -> str | None:
+        return _control_value(self.control, _reader=self)
+
+
+def _control_value(control: Any, *, _reader: _ControlValueReader | None = None) -> str | None:
+    if _reader is not None and _reader.provider is not None:
+        try:
+            value = _reader.provider()
+            return str(value) if value is not None else None
+        except Exception:
+            # A bound provider failure is not permission to change the source of
+            # draft evidence. Guards fail closed; readback may poll it again.
+            return None
     try:
-        value = control.get_value()
+        provider = control.get_value
+        value = provider()
         if value is not None:
-            return str(value)
+            value = str(value)
+            if _reader is not None:
+                _reader.provider = provider
+            return value
     except Exception:
         pass
     try:
-        value = control.iface_value.CurrentValue
+        value_pattern = control.iface_value
+        value = value_pattern.CurrentValue
         if value is not None:
-            return str(value)
+            value = str(value)
+            if _reader is not None:
+                _reader.provider = lambda: value_pattern.CurrentValue
+            return value
     except Exception:
         pass
     try:
         # Electron contenteditable surfaces may expose TextPattern but no ValuePattern.
         # The returned text is bounded and comes from the editor, never its label/name.
-        value = str(control.iface_text.DocumentRange.GetText(4097))
-        return value if len(value) <= 4096 else None
+        text_pattern = control.iface_text
+
+        def text_value() -> str | None:
+            value = str(text_pattern.DocumentRange.GetText(4097))
+            return value if len(value) <= 4096 else None
+
+        value = text_value()
+        if value is not None and _reader is not None:
+            _reader.provider = text_value
+        return value
     except Exception:
         pass
     return None
@@ -770,24 +863,27 @@ def _rust_type_or_python(text: str, *, hwnd: int | None = None,
     """Deliver focused text through Rust in strict mode; auto mode may retain Python compatibility."""
     from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
 
-    client, status = _preflight()
-    if guard:
-        guard()
-    if client is not None and hwnd is not None:
-        _guard_native_target(hwnd, status)
+    try:
+        client, status = _preflight()
+        if guard:
+            guard()
+        if client is not None and hwnd is not None:
+            _guard_native_target(hwnd, status)
+    except (InputDeliveryError, RustEngineUnavailable) as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     if client is None:
         if native_engine_mode() in {"auto", "python"}:
             record_backend("python_native", detail="Focused Unicode input")
             paste_text(text)
             return "windows_unicode_input"
-        raise RustEngineUnavailable(
+        raise InputNotDispatchedError(
             "Strict Rust mode requires the native daemon before semantic keyboard input"
         )
     try:
         result = client.type_text(text, status, before_dispatch=guard)
-    except RustEngineUnavailable:
+    except RustEngineUnavailable as exc:
         if native_engine_mode() != "auto":
-            raise
+            raise InputNotDispatchedError(str(exc)) from exc
         if guard:
             guard()
         record_backend("python_native", detail="Focused Unicode input")
@@ -805,11 +901,20 @@ def _rust_hotkey_or_python(keys: list[str], *, hwnd: int | None = None,
     """Dispatch an atomic focused shortcut through Rust whenever strict native mode is active."""
     from .rust_engine import RustEngineUnavailable, _preflight, native_engine_mode
 
-    client, status = _preflight()
-    if guard:
-        guard()
-    if client is not None and hwnd is not None:
-        _guard_native_target(hwnd, status)
+    def dispatch_guard() -> None:
+        try:
+            if guard:
+                guard()
+        except (InputDeliveryError, RustEngineUnavailable) as exc:
+            raise InputNotDispatchedError(str(exc)) from exc
+
+    try:
+        client, status = _preflight()
+        dispatch_guard()
+        if client is not None and hwnd is not None:
+            _guard_native_target(hwnd, status)
+    except (InputDeliveryError, RustEngineUnavailable) as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     if client is None:
         if native_engine_mode() in {"auto", "python"}:
             record_backend("python_native", detail="Focused keyboard shortcut")
@@ -820,16 +925,15 @@ def _rust_hotkey_or_python(keys: list[str], *, hwnd: int | None = None,
             from .tools import _desktop_hotkey
             _desktop_hotkey(keys)
             return "python_hotkey"
-        raise RustEngineUnavailable(
+        raise InputNotDispatchedError(
             "Strict Rust mode requires the native daemon before semantic hotkeys"
         )
     try:
-        result = client.hotkey(keys, status, before_dispatch=guard)
-    except RustEngineUnavailable:
+        result = client.hotkey(keys, status, before_dispatch=dispatch_guard)
+    except RustEngineUnavailable as exc:
         if native_engine_mode() != "auto":
-            raise
-        if guard:
-            guard()
+            raise InputNotDispatchedError(str(exc)) from exc
+        dispatch_guard()
         record_backend("python_native", detail="Focused keyboard shortcut")
         if len(keys) == 1:
             from .tools import _desktop_press
@@ -855,6 +959,7 @@ def ui_type(
     state_guard: Callable[[], None] | None = None,
     selector: dict[str, Any] | None = None,
     _resolved_editor: tuple[Any, Any, dict[str, Any]] | None = None,
+    _value_reader: _ControlValueReader | None = None,
 ) -> str:
     if len(str(text)) > 4096 or "\0" in str(text):
         raise ValueError("Semantic UI text must contain at most 4096 characters and no NUL")
@@ -870,7 +975,8 @@ def ui_type(
     except InputDeliveryError as exc:
         raise InputNotDispatchedError(str(exc)) from exc
     binding = _resolved_editor[2] if _resolved_editor is not None else _target_binding(win, control)
-    before_value = _control_value(control)
+    read_value = _value_reader if _value_reader is not None else _ControlValueReader(control)
+    before_value = read_value()
     if before_value is None:
         raise InputNotDispatchedError("Editor value cannot be read semantically; use fresh observation and guarded desktop input")
     if submit and not replace and before_value:
@@ -916,7 +1022,7 @@ def ui_type(
         _validate_target(win, control, binding, state_guard)
     except InputDeliveryError as exc:
         raise InputNotDispatchedError(str(exc)) from exc
-    if _control_value(control) != before_value:
+    if read_value() != before_value:
         raise InputNotDispatchedError("Editor changed before input; inspect the current draft before retrying")
     _SNAPSHOTS.invalidate(hwnd)
     # Preserve all target evidence while accounting for this action's own cache
@@ -932,7 +1038,7 @@ def ui_type(
                     _validate_target(win, control, binding, state_guard)
                 except InputDeliveryError as exc:
                     raise InputNotDispatchedError(str(exc)) from exc
-                if not _has_focus(control) or _control_value(control) != before_value:
+                if not _has_focus(control) or read_value() != before_value:
                     raise InputNotDispatchedError("Editor focus or draft changed during input preparation")
                 if caret_guard is not None:
                     caret_guard()
@@ -945,7 +1051,7 @@ def ui_type(
     def value_matches():
         _guard_foreground(hwnd, state_guard)
         record_backend("windows_uia", phase="verify", detail="Exact editor value readback")
-        return _control_value(control) in expected_values
+        return read_value() in expected_values
     try:
         wait_until(value_matches, description="exact editor value readback")
     except TimeoutError as exc:
@@ -957,12 +1063,12 @@ def ui_type(
         )
 
     _guard_foreground(hwnd, state_guard)
-    if not _has_focus(control) or _control_value(control) != expected:
+    if not _has_focus(control) or read_value() != expected:
         raise InputDeliveryError("Editor lost keyboard focus before submit; text was not submitted")
     try:
         def submit_guard():
             _validate_target(win, control, binding, state_guard)
-            if not _has_focus(control) or _control_value(control) != expected:
+            if not _has_focus(control) or read_value() != expected:
                 raise InputDeliveryError("Editor focus or draft changed during submit preparation")
         submit_method = _rust_hotkey_or_python(["enter"], hwnd=hwnd, guard=submit_guard)
     except BrowserBoundaryError:
@@ -972,7 +1078,7 @@ def ui_type(
     state = {"cleared": False, "echoed": False}
     def submitted():
         _guard_foreground(hwnd, state_guard)
-        state["cleared"] = bool(expected) and _control_value(control) == ""
+        state["cleared"] = bool(expected) and read_value() == ""
         if state["cleared"]:
             # Exact composer clear is already independent post-submit evidence.
             # Avoid a full conversation-tree enumeration on the common path.
@@ -1035,21 +1141,101 @@ def ui_hotkey(keys: list[str], title: str = "") -> str:
 
 
 def ui_wait_state(target: str = "", title: str = "", control_type: str = "", state: str = "visible",
-                  timeout_ms: int = 1500, selector: dict[str, Any] | None = None) -> str:
+                  timeout_ms: int = 1500, selector: dict[str, Any] | None = None, text: str = "") -> str:
     """Read a fresh live target until a condition holds; never focus a window/control."""
-    if (not _text(target) and selector is None) or state not in {"visible", "focused"}:
-        raise ValueError("Provide an exact target or selector and state visible or focused")
+    if (not _text(target) and selector is None) or state not in {"visible", "enabled", "focused", "selected", "text", "hidden"}:
+        raise ValueError("Provide an exact target or selector and state visible, enabled, focused, selected, text, or hidden")
+    if not isinstance(text, str) or len(text) > 4096 or "\0" in text:
+        raise ValueError("Expected text must contain at most 4096 characters and no NUL")
+    if state == "hidden" and (not _text(target) or selector is not None):
+        # Ordinals/selection/adjacency describe the current visible collection;
+        # their disappearance cannot identify the same control in a changed tree.
+        raise ValueError("Hidden-state verification requires an exact named target without a relative selector")
     def probe():
         try:
             win = _window(title)
-            control = _find_control(win, target, control_type, selector=selector)
+            if state == "hidden":
+                # An input resolver filters disabled controls and can mistake a
+                # disabled button for an absent one. Prove absence using a complete
+                # fresh query that includes both hidden and disabled controls.
+                kind = next((kind for kind in _ACTIONABLE_TYPES if kind.casefold() == control_type.casefold()), None)
+                candidates = _descendants(win, require_complete=True, control_types=(kind,) if kind else ())
+                matches = []
+                for candidate in candidates:
+                    check_cancelled()
+                    try:
+                        # The reporting helpers tolerate unavailable properties by
+                        # returning empty strings; that cannot prove absence.
+                        info = candidate.element_info
+                        name, automation_id = _text(info.name), _text(info.automation_id)
+                        candidate_type = _text(info.control_type)
+                    except Exception:
+                        return False
+                    if ((_text(control_type) and candidate_type.casefold() != _text(control_type).casefold())
+                            or _text(target).casefold() not in {name.casefold(), automation_id.casefold()}):
+                        continue
+                    matches.append(candidate)
+                if len(matches) > 1:
+                    return False
+                observed = _meta(matches[0]) if matches else None
+                if observed is not None and observed.get("visible") is not False:
+                    return False
+                record_backend("windows_uia", phase="observe", detail="Complete exact-target absence/visibility read")
+                return {"action": "ui_wait_state", "state": state, "window_hwnd": int(win.handle),
+                        "target": target, "control": observed, "absent": not matches, "complete_tree": True}
+            if selector is None and state in {"visible", "text", "selected"}:
+                # Read-only outcomes may be visible while disabled (for example
+                # a saved draft or a result field). Input resolution still requires
+                # enabled controls; do not reuse that filter for observations.
+                kind = next((kind for kind in _ACTIONABLE_TYPES if kind.casefold() == control_type.casefold()), None)
+                controls = _descendants(win, require_complete=True,
+                                        control_types=(kind,) if kind else (), visible_only=True)
+                matches = []
+                for candidate in controls:
+                    check_cancelled()
+                    try:
+                        info = candidate.element_info
+                        names = {_text(info.name).casefold(), _text(info.automation_id).casefold()}
+                        kind_matches = not _text(control_type) or _text(info.control_type).casefold() == _text(control_type).casefold()
+                        if kind_matches and _text(target).casefold() in names and candidate.is_visible():
+                            matches.append(candidate)
+                    except Exception:
+                        return False  # An incomplete identity cannot prove uniqueness.
+                if len(matches) != 1:
+                    return False
+                control = matches[0]
+            else:
+                control = _find_control(win, target, control_type, selector=selector)
         except RuntimeError as exc:
             if "Emergency stop" in str(exc):
                 raise
             return False
         if state == "focused" and (int(win.handle) != _foreground_hwnd() or not _has_focus(control)):
             return False
-        return {"action": "ui_wait_state", "state": state, "window_hwnd": int(win.handle), "control": _meta(control)}
+        evidence: dict[str, Any] = {}
+        if state == "selected":
+            try:
+                selected = control.is_selected()
+            except Exception:
+                return False
+            if not isinstance(selected, (bool, int)) or selected != 1:
+                return False
+            evidence["selected"] = True
+        if state == "text":
+            observed_text = _control_value(control)
+            if observed_text is None and _control_type(control) not in _EDIT_TYPES:
+                try:
+                    # Preserve whitespace: a control's label is display text,
+                    # while an editor's label must never substitute for its value.
+                    observed_text = control.element_info.name
+                except Exception:
+                    return False
+            if observed_text != text:
+                return False
+            evidence["text"] = observed_text
+        record_backend("windows_uia", phase="observe", detail=f"Fresh semantic {state} evidence")
+        return {"action": "ui_wait_state", "state": state, "window_hwnd": int(win.handle),
+                "control": _meta(control), **evidence}
     result = wait_until(probe, timeout=max(0, min(timeout_ms, 15000)) / 1000, description=f"{target!r} {state}")
     _SNAPSHOTS.invalidate(result["window_hwnd"])
     return "VERIFIED: " + json.dumps(result, ensure_ascii=False)
@@ -1178,13 +1364,14 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
 
     registry.register(ToolSpec(
         "ui_inspect",
-        "Compact read-only Windows UI Automation snapshot. Reuses detached metadata for up to 250 ms; force_refresh bypasses cache. Actions always resolve live exact controls. Does not focus the window.",
+        "Compact read-only Windows UI Automation snapshot. Use control_type to inspect only editors, buttons or rows and query to filter labels. Reuses detached metadata for up to 250 ms; force_refresh bypasses cache. Actions always resolve live exact controls. Does not focus the window.",
         Risk.LOW,
         {
             "type": "object",
             "properties": {
                 "title": {"type": "string"},
                 "query": {"type": "string"},
+                "control_type": {"type": "string", "maxLength": 80},
                 "actionable_only": {"type": "boolean"},
                 "max_controls": {"type": "integer", "minimum": 1, "maximum": 250},
                 "force_refresh": {"type": "boolean"},
@@ -1249,10 +1436,11 @@ def register_semantic_ui_tools(registry: ToolRegistry) -> None:
     ))
     registry.register(ToolSpec(
         "ui_wait_state",
-        "Read a fresh exact UIA target until it is visible/enabled or keyboard-focused. Cancellable bounded polling without focusing, typing, or clicking; returns verified read evidence for a preceding action.",
+        "Read a fresh exact UIA target until visible/enabled, selected, keyboard-focused, exactly matching text, or hidden. Selection verifies the control's SelectionItem state, not completed navigation. Hidden requires an exact named target without a relative selector and a complete fresh tree. Editor text uses value readback, never its label. Cancellable read-only polling; returns verified evidence for a preceding action.",
         Risk.LOW,
         {"type": "object", "properties": {**_NAMED_FIELDS,
-            "state": {"type": "string", "enum": ["visible", "focused"]},
+            "state": {"type": "string", "enum": ["visible", "enabled", "focused", "selected", "text", "hidden"]},
+            "text": {"type": "string", "maxLength": 4096},
             "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 15000}},
          "anyOf": _TARGET_REQUIRED, "additionalProperties": False},
         ui_wait_state,

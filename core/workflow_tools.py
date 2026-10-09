@@ -11,14 +11,16 @@ import copy
 import json
 import time
 from typing import Any
+from jsonschema import ValidationError
 
 from .orchestrator import tool_succeeded
 from .permissions import Risk
-from .tools import ToolSpec
+from .tool_classification import is_reference_tool
+from .tools import ToolSpec, argument_error
 
 
 _CHECKPOINTS = {"ui_wait_state", "browser_wait_state", "browser_wait", "interaction_wait"}
-_EXCLUDED = {"screen_observe", "take_screenshot", "browser_screenshot", "wait"}
+_EXCLUDED = {"screen_observe", "computer_observe", "take_screenshot", "browser_screenshot", "wait"}
 
 
 def _report(workflow: dict, prefix: str = "") -> str:
@@ -27,7 +29,7 @@ def _report(workflow: dict, prefix: str = "") -> str:
         "steps": [{"id": step["id"], "status": step["status"], "result": step.get("result", "")[:1200]}
                   for step in workflow["steps"]],
         "remaining": [step["id"] for step in workflow["steps"] if step["status"] != "completed"],
-        "instruction": "Continue only remaining steps. Never replay an uncertain action. Inspect and review its actual outcome first.",
+        "instruction": "After reviewing any uncertain action, call workflow_resume with this workflow_id. It loads the original program and runs only remaining steps; do not reconstruct the program or create a replacement workflow.",
     }, ensure_ascii=False)
 
 
@@ -78,10 +80,14 @@ class WorkflowExecutor:
     def _validate_call(self, call: dict, checkpoint: bool = False) -> None:
         name, args = call["tool"], call["arguments"]
         spec = self.agent.tools._tools.get(name)
-        if (not spec or name.startswith(("task_", "workflow_", "desktop_")) or name in _EXCLUDED
+        if (not spec or is_reference_tool(name)
+                or name.startswith(("task_", "workflow_", "desktop_")) or name in _EXCLUDED
                 or checkpoint and (name not in _CHECKPOINTS or spec.risk > Risk.LOW)):
             raise ValueError(f"Tool {name} is not allowed in this workflow position")
-        self.agent.tools._validators[name].validate(args)
+        try:
+            self.agent.tools._validators[name].validate(args)
+        except ValidationError as exc:
+            raise ValueError(f"Workflow preflight rejected {name}: {argument_error(exc)}; no workflow actions dispatched") from exc
         allowed, reason = self.agent.tools.permissions.check(name, spec.risk, self.agent.approval(name, args))
         if not allowed:
             raise PermissionError(reason)
@@ -202,8 +208,17 @@ class WorkflowExecutor:
             raise ValueError("Unknown workflow")
         return json.dumps(selected, ensure_ascii=False)
 
+    def resume(self, workflow_id: str) -> str:
+        current = self.agent.orchestrator.current
+        workflow = next((item for item in current.workflows if item["id"] == workflow_id), None) if current else None
+        if workflow is None:
+            raise ValueError("Unknown workflow; resume requires a saved program in the current mission")
+        # Reuse all execution policy, journal validation and uncertain-action
+        # boundaries. The model cannot edit or drop steps through this operation.
+        return self.execute(workflow_id, copy.deepcopy(workflow["program"]))
+
     def review(self, workflow_id: str, step_id: str, claim: str) -> str:
-        """Accept an existing live task verification; never dispatch or replay here."""
+        """Review evidence and recheck declared postconditions without replaying input."""
         current = self.agent.orchestrator.current
         workflow = next((item for item in current.workflows if item["id"] == workflow_id), None) if current else None
         if not workflow:
@@ -217,7 +232,24 @@ class WorkflowExecutor:
                 or verification.evidence_trace_index <= record.get("trace_index", len(current.traces))
                 or self.agent.orchestrator.needs_action_review()):
             raise ValueError("Review requires task_verify with fresh successful evidence after the uncertain action")
-        record.update(status="completed", result=verification.evidence[:4000])
+        call = next(item for item in workflow["program"] if item["id"] == step_id)
+        result = verification.evidence
+        if call.get("checkpoint"):
+            # Free-form model evidence cannot replace the program's concrete
+            # postcondition (e.g. an unchanged link is not proof of navigation).
+            # Validate and run only the bounded read; the mutation stays journaled.
+            self._validate_call(call["checkpoint"], checkpoint=True)
+            record["status"] = "checkpoint_pending"
+            self._save()
+            result = self._checkpoint(call["checkpoint"], record, getattr(self.agent, "_active_emit", None))
+            record["result"] = result[:4000]
+            if not result.startswith("VERIFIED:"):
+                workflow["status"] = "blocked"
+                self._save()
+                prefix = "BROWSER_ACTION_BLOCKED: " if result.startswith("BROWSER_ACTION_BLOCKED:") else "CANCELLED: " if result.startswith("CANCELLED") else "ERROR: Checkpoint pending. "
+                return _report(workflow, prefix)
+            self.agent.orchestrator.verify(f"Workflow {workflow_id}/{step_id} checkpoint", True, result)
+        record.update(status="completed", result=result[:4000])
         workflow["status"] = "completed" if all(item["status"] == "completed" for item in workflow["steps"]) else "running"
         self._save()
         return _report(workflow)
@@ -240,7 +272,10 @@ def register_workflow_tools(agent) -> None:
         Risk.MEDIUM, {"type": "object", "properties": {"workflow_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$"},
         "steps": {"type": "array", "minItems": 1, "maxItems": 32, "items": step}},
         "required": ["workflow_id", "steps"], "additionalProperties": False}, executor.execute))
-    agent.tools.register(ToolSpec("workflow_review", "Resolve an attempted uncertain workflow step using an existing task_verify claim backed by fresh observation. Does not execute any action. Resume workflow_execute afterward with the original program.",
+    agent.tools.register(ToolSpec("workflow_resume", "Resume a saved workflow by ID without resending its program. Skips completed steps, rechecks pending read-only checkpoints, and refuses to replay uncertain actions until reviewed. Every remaining action retains its normal permission and confirmation checks.",
+        Risk.MEDIUM, {"type": "object", "properties": {"workflow_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$"}},
+        "required": ["workflow_id"], "additionalProperties": False}, executor.resume))
+    agent.tools.register(ToolSpec("workflow_review", "Resolve an attempted uncertain workflow step using the exact existing task_verify claim string backed by fresh observation. Rechecks any declared read-only checkpoint; never replays the original action. Then call workflow_resume with the same workflow_id.",
         Risk.SAFE, {"type": "object", "properties": {key: {"type": "string", "minLength": 1, "maxLength": 200}
         for key in ("workflow_id", "step_id", "claim")}, "required": ["workflow_id", "step_id", "claim"], "additionalProperties": False}, executor.review))
     agent.tools.register(ToolSpec("workflow_status", "Read the original ordered workflow program and durable step states after context trimming. Omit workflow_id to list current mission workflows. Does not execute anything.",

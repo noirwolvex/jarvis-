@@ -5,6 +5,7 @@ from typing import Any
 
 from .orchestrator import PlanStep, TaskOrchestrator
 from .permissions import Risk
+from .tool_classification import is_reference_tool
 from .tools import ToolSpec
 
 
@@ -74,7 +75,11 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             )
             recent = []
             for trace in reversed(orchestrator.current.traces):
-                if trace.name == "task_update_step":
+                # Only completed work consumes evidence. Rejected bookkeeping or
+                # a running-state update must not discard the read/action that a
+                # corrected completion attempt still needs to verify.
+                if (trace.name == "task_update_step" and trace.success
+                        and str(trace.arguments.get("status", "")).strip().lower() == "completed"):
                     break
                 recent.append(trace)
             recent_start = len(orchestrator.current.traces) - len(recent)
@@ -89,6 +94,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             evidence = [
                 trace for trace in recent
                 if trace.success and not trace.name.startswith(("task_", "workflow_"))
+                and not is_reference_tool(trace.name)
             ]
             if not evidence:
                 raise ValueError(
@@ -137,6 +143,7 @@ def register_task_tools(registry, orchestrator: TaskOrchestrator) -> None:
             raise ValueError("No active task")
         observed = [trace for index, trace in enumerate(current.traces)
                     if trace.success and not trace.name.startswith(("task_", "workflow_"))
+                    and not is_reference_tool(trace.name)
                     and (index > current.last_mutation_index
                          or index == current.last_mutation_index and trace.result.startswith("VERIFIED:") and not trace.name.startswith("desktop_"))]
         if not observed:

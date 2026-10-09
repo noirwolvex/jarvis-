@@ -744,6 +744,7 @@ mod windows_input {
         fn WindowFromPhysicalPoint(point: Point) -> isize;
         fn GetAncestor(hwnd: isize, flags: u32) -> isize;
         fn SendInput(count: u32, inputs: *const Input, size: i32) -> u32;
+        fn MapVirtualKeyW(code: u32, map_type: u32) -> u32;
     }
 
     fn mouse_input(flags: u32, mouse_data: u32) -> Input {
@@ -947,17 +948,18 @@ mod windows_input {
 
     pub fn press_key(value: &str) -> Result<()> {
         let (key, flags) = virtual_key(value)?;
+        let scan = virtual_scan_code(key)?;
         match send(
             &[
-                keyboard_input(key, 0, flags),
-                keyboard_input(key, 0, flags | KEYEVENTF_KEYUP),
+                keyboard_input(key, scan, flags),
+                keyboard_input(key, scan, flags | KEYEVENTF_KEYUP),
             ],
             "keyboard key press",
         ) {
             Ok(()) => Ok(()),
             Err(error) => {
                 let _ = send(
-                    &[keyboard_input(key, 0, flags | KEYEVENTF_KEYUP)],
+                    &[keyboard_input(key, scan, flags | KEYEVENTF_KEYUP)],
                     "keyboard key cleanup",
                 );
                 Err(error)
@@ -968,14 +970,17 @@ mod windows_input {
     pub fn hotkey(values: &[String]) -> Result<()> {
         let keys = values
             .iter()
-            .map(|value| virtual_key(value))
+            .map(|value| {
+                let (key, flags) = virtual_key(value)?;
+                Ok((key, virtual_scan_code(key)?, flags))
+            })
             .collect::<Result<Vec<_>>>()?;
         let mut events = Vec::with_capacity(keys.len() * 2);
-        for (key, flags) in &keys {
-            events.push(keyboard_input(*key, 0, *flags));
+        for (key, scan, flags) in &keys {
+            events.push(keyboard_input(*key, *scan, *flags));
         }
-        for (key, flags) in keys.iter().rev() {
-            events.push(keyboard_input(*key, 0, *flags | KEYEVENTF_KEYUP));
+        for (key, scan, flags) in keys.iter().rev() {
+            events.push(keyboard_input(*key, *scan, *flags | KEYEVENTF_KEYUP));
         }
         match send(&events, "keyboard hotkey") {
             Ok(()) => Ok(()),
@@ -983,12 +988,23 @@ mod windows_input {
                 let releases = keys
                     .iter()
                     .rev()
-                    .map(|(key, flags)| keyboard_input(*key, 0, *flags | KEYEVENTF_KEYUP))
+                    .map(|(key, scan, flags)| keyboard_input(*key, *scan, *flags | KEYEVENTF_KEYUP))
                     .collect::<Vec<_>>();
                 let _ = send(&releases, "keyboard hotkey cleanup");
                 Err(error)
             }
         }
+    }
+
+    fn virtual_scan_code(key: u16) -> Result<u16> {
+        // Some UI frameworks derive key symbols from WM_KEYDOWN's scan code.
+        // A zero scan code can deliver VK_A while losing the Ctrl+A shortcut.
+        // Preserve virtual-key semantics and the explicit extended-key flags.
+        let scan = unsafe { MapVirtualKeyW(u32::from(key), 0) };
+        if scan == 0 || scan > u32::from(u16::MAX) {
+            return Err(Error::Unsupported("virtual key has no Windows scan code"));
+        }
+        Ok(scan as u16)
     }
 
     pub fn type_text(
@@ -1021,6 +1037,44 @@ mod windows_input {
             }
             Ok(())
         })
+    }
+
+    #[cfg(test)]
+    mod key_encoding_tests {
+        use super::*;
+
+        #[test]
+        fn shortcut_letters_and_navigation_keys_have_scan_codes() {
+            for name in [
+                "a", "ctrl", "shift", "alt", "home", "end", "tab", "enter", "pagedown",
+            ] {
+                let (key, flags) = virtual_key(name).unwrap();
+                let scan = virtual_scan_code(key).unwrap();
+                let event = keyboard_input(key, scan, flags);
+                let payload = unsafe { event.data.keyboard };
+                assert_ne!(payload.scan, 0, "missing scan code for {name}");
+            }
+        }
+
+        #[test]
+        fn navigation_keys_keep_extended_flag() {
+            let (key, flags) = virtual_key("home").unwrap();
+            let event = keyboard_input(key, virtual_scan_code(key).unwrap(), flags);
+            assert_ne!(
+                unsafe { event.data.keyboard.flags } & KEYEVENTF_EXTENDEDKEY,
+                0
+            );
+        }
+
+        #[test]
+        fn unicode_events_keep_literal_code_units() {
+            let event = keyboard_input(0, 0x0645, KEYEVENTF_UNICODE);
+            let payload = unsafe { event.data.keyboard };
+            assert_eq!(
+                (payload.vk, payload.scan, payload.flags),
+                (0, 0x0645, KEYEVENTF_UNICODE)
+            );
+        }
     }
 }
 

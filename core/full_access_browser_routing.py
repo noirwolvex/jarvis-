@@ -6,16 +6,22 @@ from pathlib import PureWindowsPath
 from typing import Any, Callable
 from urllib.parse import urlparse
 
-from .chrome_cdp import chrome_is_connected, chrome_page_operation
+from .chrome_cdp import _runtime, chrome_is_connected, chrome_page_operation
 from .chrome_session_tools import ensure_chrome_connection
+from .chrome_user_browser import existing_chrome_connection
+from .browser_semantic import BrowserChallengeBlocked
 from .tools import ToolRegistry, ToolSpec
 
 _CHROME_NAMES = {
+    "google",
     "chrome",
     "chrome browser",
     "google chrome",
     "google chrome browser",
     "chromium",
+    "جوجل",
+    "غوغل",
+    "كروم",
 }
 
 
@@ -45,6 +51,9 @@ def _validated_url(url: str) -> str:
 
 
 def _ensure_cdp() -> dict[str, Any]:
+    existing = existing_chrome_connection()
+    if existing is not None:
+        return existing
     if not chrome_is_connected():
         return json.loads(ensure_chrome_connection())
     return {"reused": True, "already_connected": True}
@@ -52,9 +61,32 @@ def _ensure_cdp() -> dict[str, Any]:
 
 def _strict_navigate(url: str) -> str:
     target = _validated_url(url)
-    _ensure_cdp()
+    connection = _ensure_cdp()
+    if connection.get("session_type") == "existing-window":
+        from .chrome_existing_window import navigate_existing_chrome
+        try:
+            result = navigate_existing_chrome(target, window=connection["window"])
+        except BrowserChallengeBlocked as exc:
+            return str(exc)
+        if result.get("verified") is not True:
+            raise RuntimeError("Existing Chrome navigation returned no verified evidence")
+        return "VERIFIED: " + json.dumps(result, ensure_ascii=False)
     result = chrome_page_operation("goto", url=target)
-    return f"VERIFIED: loaded {result['title']} — {result['url']} through managed Chrome CDP"
+    return f"VERIFIED: loaded {result['title']} — {result['url']} through Chrome CDP"
+
+
+def _focus_connection(result: dict[str, Any]) -> str:
+    try:
+        if result.get("session_type") == "existing-window":
+            from .chrome_existing_window import focus_existing_chrome
+            focused = focus_existing_chrome(result["window"])
+        else:
+            focused = _runtime().call("focus_selected")
+    except BrowserChallengeBlocked as exc:
+        return str(exc)
+    if focused.get("focused") is not True or focused.get("verified") is not True:
+        raise RuntimeError("Chrome foreground could not be verified")
+    return "VERIFIED: Chrome session ready — " + json.dumps({**result, **focused}, ensure_ascii=False)
 
 
 def _replace_handler(
@@ -77,15 +109,14 @@ def _replace_handler(
 
 
 def register_full_access_browser_routing(registry: ToolRegistry) -> None:
-    """Prevent Full Access browser tasks from escaping the one guarded Chrome/CDP session."""
+    """Reuse open Chrome for browser tasks without launching competing sessions."""
 
     launch_spec = registry._tools.get("launch_installed_app")
     original_launch = launch_spec.handler if launch_spec is not None else None
 
     def launch_installed_app(query: str, timeout_seconds: float = 15.0) -> str:
         if _is_chrome_query(query):
-            result = _ensure_cdp()
-            return "VERIFIED: Chrome routed through managed CDP — " + json.dumps(result, ensure_ascii=False)
+            return _focus_connection(_ensure_cdp())
         if original_launch is None:
             raise RuntimeError("Installed application launcher is unavailable")
         return original_launch(query=query, timeout_seconds=timeout_seconds)
@@ -95,8 +126,7 @@ def register_full_access_browser_routing(registry: ToolRegistry) -> None:
 
     def open_application(command: str) -> str:
         if _is_chrome_query(command):
-            result = _ensure_cdp()
-            return "VERIFIED: Chrome routed through managed CDP — " + json.dumps(result, ensure_ascii=False)
+            return _focus_connection(_ensure_cdp())
         if original_open is None:
             raise RuntimeError("Application launcher is unavailable")
         return original_open(command=command)
@@ -105,20 +135,20 @@ def register_full_access_browser_routing(registry: ToolRegistry) -> None:
         registry,
         "browser_navigate",
         _strict_navigate,
-        description="Navigate the guarded managed Chrome/CDP tab to an HTTP(S) URL. Full Access must not launch a separate Playwright/Chromium fallback browser.",
+        description="Navigate an HTTP(S) URL in the user's current Chrome window using matching CDP or guarded Windows toolbar input. Open Chrome only if no browser window exists.",
     )
     _replace_handler(
         registry,
         "open_url",
         _strict_navigate,
-        description="Open an HTTP(S) URL inside the guarded managed Chrome/CDP session rather than the system default browser.",
+        description="Open an HTTP(S) URL in the user's existing Chrome window, launching Chrome only when needed.",
     )
     _replace_handler(
         registry,
         "launch_installed_app",
         launch_installed_app,
         description=(
-            "Resolve, launch, and verify a Windows application. Chrome/Chromium requests are routed through the guarded managed CDP session; "
+            "Resolve, launch, and verify a Windows application. Chrome/Chromium requests reuse the user's open browser window, starting Chrome only when needed; "
             "other installed applications use the normal resolver."
         ),
     )
@@ -127,7 +157,7 @@ def register_full_access_browser_routing(registry: ToolRegistry) -> None:
         "open_application",
         open_application,
         description=(
-            "Open a Windows application directly. Chrome/Chromium commands are routed through the guarded managed CDP session; "
+            "Open a Windows application directly. Chrome/Chromium commands reuse the user's open browser window, starting Chrome only when needed; "
             "other applications keep the normal direct launcher."
         ),
     )

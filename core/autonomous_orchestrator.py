@@ -9,6 +9,7 @@ from functools import wraps
 from pathlib import Path
 from typing import Any
 
+from .tool_classification import is_reference_tool
 from .orchestrator import (
     PlanStep,
     TaskOrchestrator,
@@ -121,6 +122,9 @@ class ExecutionRouter:
     def classify(cls, tool_name: str, arguments: dict[str, Any] | None = None) -> EngineRoute:
         name = str(tool_name or "").strip().casefold()
         args = arguments or {}
+
+        if name == "computer_observe":
+            return EngineRoute("DIRECT", "SEMANTIC_AUTO", ("UIA", "CDP_DOM", "VISION"))
 
         if name.startswith(("wincom_", "office_", "word_", "excel_", "powerpoint_")):
             # Native application APIs should win over GUI automation when an explicit,
@@ -397,7 +401,7 @@ class AutonomousTaskOrchestrator(TaskOrchestrator):
         )
 
         running = [step for step in self.current.plan if step.status == "running"]
-        if running:
+        if running and not is_reference_tool(name):
             step = running[-1]
             if isinstance(step, ExecutionPlanStep):
                 if mutation or not step.execution_backend:

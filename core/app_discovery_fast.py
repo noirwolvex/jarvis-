@@ -3,7 +3,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 _INSTALLED = False
-_ORIGINAL: Callable[[str], list[dict[str, Any]]] | None = None
+_ORIGINAL: Callable[..., list[dict[str, Any]]] | None = None
 
 
 def _confident(rows: list[dict[str, Any]]) -> bool:
@@ -20,38 +20,20 @@ def _confident(rows: list[dict[str, Any]]) -> bool:
     return best_name == second_name or best - second >= 4.0
 
 
-def _fast_discover(query: str) -> list[dict[str, Any]]:
+def _fast_discover(query: str, *, stop_when_exact: bool = False) -> list[dict[str, Any]]:
     if _ORIGINAL is None:
         raise RuntimeError("Fast application discovery was not initialized")
 
-    from . import app_tools
-
-    cleaned = app_tools._clean_query(query)
-    candidates: list[dict[str, str]] = []
-    candidates.extend(app_tools._explicit_path_candidates(cleaned))
-
-    # These sources are bounded and normally resolve common apps such as Discord,
-    # WhatsApp, VS Code and Chrome without scanning large install trees.
-    for source in (
-        app_tools._start_apps,
-        app_tools._registry_app_path_candidates,
-        app_tools._path_candidates,
-    ):
-        try:
-            candidates.extend(source(cleaned))
-        except Exception:
-            continue
-
-    ranked = app_tools._rank_candidates(cleaned, candidates)
-    if _confident(ranked):
-        return ranked
-
-    # Ambiguous/unusual applications keep the exhaustive resolver for accuracy.
+    # The core resolver now owns the exact-match fast path, including cancellation
+    # and ambiguity checks. Keep this installed compatibility layer mode-aware so
+    # full listings remain exhaustive and explicit paths can return immediately.
+    if stop_when_exact:
+        return _ORIGINAL(query, stop_when_exact=True)
     return _ORIGINAL(query)
 
 
 def enable_fast_app_discovery() -> None:
-    """Install an idempotent exact-match fast path before the normal exhaustive resolver."""
+    """Install the compatibility wrapper for the core's mode-aware fast resolver."""
     global _INSTALLED, _ORIGINAL
     if _INSTALLED:
         return

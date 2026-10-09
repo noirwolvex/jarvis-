@@ -1,6 +1,6 @@
 import { execFile, spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { randomUUID } from "node:crypto";
-import { existsSync } from "node:fs";
+import { createHash, randomUUID } from "node:crypto";
+import { existsSync, readdirSync, readFileSync, realpathSync } from "node:fs";
 import { resolve } from "node:path";
 
 export type FullAccessMissionResult = {
@@ -66,6 +66,7 @@ type PendingRequest = {
 
 type WorkerState = {
   revision?: number;
+  sourceFingerprint?: string;
   child: ChildProcessWithoutNullStreams;
   buffer: string;
   stderr: string;
@@ -77,7 +78,7 @@ type WorkerState = {
 
 const globalState = globalThis as typeof globalThis & { jarvisFullAccessWorkerV1?: WorkerState };
 const WORKER_PROTOCOL = 1;
-export const FULL_ACCESS_WORKER_REVISION = 20;
+export const FULL_ACCESS_WORKER_REVISION = 35;
 const WORKER_TIMEOUT_MS = 30 * 60_000;
 const MAX_WORKER_BUFFER = 2 * 1024 * 1024;
 
@@ -235,6 +236,53 @@ export function stopFullAccessWorker() {
   }
 }
 
+export function workerSourceFingerprint(root = repoRoot()): string {
+  // Next hot reload does not reload Python modules or its cached agent. Only
+  // packaged execution code/resources belong here; never hash runtime data,
+  // user documents, credentials, or Python bytecode caches.
+  try {
+    const identity = realpathSync(root);
+    const core = resolve(identity, "core");
+    const paths: string[] = [];
+    const collect = (directory: string, prefix: string) => {
+      for (const entry of readdirSync(directory, { withFileTypes: true })) {
+        if (entry.name === "__pycache__" || entry.name === ".pytest_cache") continue;
+        const relative = prefix ? `${prefix}/${entry.name}` : entry.name;
+        if (entry.isSymbolicLink()) throw new Error("Linked execution sources are unsupported");
+        if (entry.isDirectory()) collect(resolve(directory, entry.name), relative);
+        else if (entry.isFile() && (entry.name.endsWith(".py")
+          || relative.startsWith("resources/") && entry.name.endsWith(".json"))) paths.push(relative);
+      }
+    };
+    collect(core, "");
+    if (!paths.includes("full_access_worker.py") || !paths.includes("full_access_bridge.py") || paths.length > 4096) {
+      throw new Error("Invalid execution source set");
+    }
+    const hash = createHash("sha256").update(identity).update("\0");
+    let bytes = 0;
+    for (const path of paths.sort()) {
+      const content = readFileSync(resolve(core, path));
+      bytes += content.length;
+      if (bytes > 64 * 1024 * 1024) throw new Error("Execution sources exceed the size limit");
+      hash.update(path).update("\0").update(String(content.length)).update("\0").update(content);
+    }
+    return hash.digest("hex");
+  } catch {
+    throw new Error("Cannot verify Full Access worker sources; restore readable execution code before retrying");
+  }
+}
+
+export function controlFullAccessWorker(action: "pause" | "resume" | "confirm" | "reject" | "cancel", confirmationId?: string) {
+  const state = globalState.jarvisFullAccessWorkerV1;
+  if (!state || state.stopping || state.child.exitCode !== null || state.pending.size !== 1) {
+    throw new Error("No active Full Access worker mission");
+  }
+  if (state.revision !== FULL_ACCESS_WORKER_REVISION) throw new Error("Active worker predates mission controls; finish or cancel it first");
+  const id = state.pending.keys().next().value;
+  state.child.stdin.write(JSON.stringify({ protocol: WORKER_PROTOCOL, action, id,
+    ...(confirmationId ? { confirmation_id: confirmationId } : {}) }) + "\n");
+}
+
 function handleWorkerLine(state: WorkerState, raw: string) {
   const line = raw.trim();
   if (!line) return;
@@ -250,7 +298,12 @@ function handleWorkerLine(state: WorkerState, raw: string) {
     return;
   }
   if (value.type === "progress" && typeof value.id === "string" && typeof value.kind === "string" && typeof value.message === "string") {
-    state.pending.get(value.id)?.onProgress?.(value.kind, value.message.slice(0, 2000));
+    // Confirmation JSON must remain complete: a truncated request would hide
+    // the reviewed content or leave a mission waiting without usable controls.
+    const limit = value.kind === "mission_control" ? 128000 : 2000;
+    if (value.message.length <= limit || value.kind !== "mission_control") {
+      state.pending.get(value.id)?.onProgress?.(value.kind, value.message.slice(0, limit));
+    }
     return;
   }
   if (value.type === "observation" && typeof value.id === "string") {
@@ -285,12 +338,11 @@ function handleWorkerLine(state: WorkerState, raw: string) {
   }
 }
 
-function startWorker(): WorkerState {
+function startWorker(root: string, sourceFingerprint: string): WorkerState {
   const current = globalState.jarvisFullAccessWorkerV1;
   if (current?.stopping && current.child.exitCode === null) throw new Error("Full Access worker is still stopping");
   if (current && !current.child.killed && current.child.exitCode === null) return current;
 
-  const root = repoRoot();
   const python = process.env.JARVIS_PYTHON_EXECUTABLE?.trim() || "python";
   // Browser pairing authority belongs only to the Node control plane. The execution
   // worker receives daemon capabilities but never inherits the browser-session secret.
@@ -303,7 +355,7 @@ function startWorker(): WorkerState {
     stdio: ["pipe", "pipe", "pipe"],
     env: { ...workerEnv, PYTHONUTF8: "1", PYTHONIOENCODING: "utf-8", JARVIS_ACCESS_MODE: "standard", JARVIS_FULL_ACCESS_REQUIRE_APPROVAL: "true" },
   });
-  const state: WorkerState = { revision: FULL_ACCESS_WORKER_REVISION, child, buffer: "", stderr: "", pending: new Map() };
+  const state: WorkerState = { revision: FULL_ACCESS_WORKER_REVISION, sourceFingerprint, child, buffer: "", stderr: "", pending: new Map() };
   globalState.jarvisFullAccessWorkerV1 = state;
 
   child.stdout.setEncoding("utf8");
@@ -341,14 +393,18 @@ function startWorker(): WorkerState {
 
 async function runPersistent(title: string, signal?: AbortSignal, onProgress?: (kind: string, message: string) => void, allowShell = false): Promise<FullAccessMissionResult> {
   if (signal?.aborted) return Promise.reject(new Error("Full Access mission aborted"));
+  const root = repoRoot();
+  let sourceFingerprint = workerSourceFingerprint(root);
   const previous = globalState.jarvisFullAccessWorkerV1;
-  if (previous && previous.revision !== FULL_ACCESS_WORKER_REVISION && previous.child.exitCode === null) {
+  if (previous && (previous.revision !== FULL_ACCESS_WORKER_REVISION || previous.sourceFingerprint !== sourceFingerprint)
+      && previous.child.exitCode === null) {
     if (previous.pending.size) throw new Error("An older worker still has an active mission; stop it before upgrading");
     previous.onEmergency = undefined;
     await retireIdleWorker(previous);
     if (signal?.aborted) throw new Error("Full Access mission aborted during worker replacement");
+    sourceFingerprint = workerSourceFingerprint(root);
   }
-  const state = startWorker();
+  const state = startWorker(root, sourceFingerprint);
   if (state.pending.size) return Promise.reject(new Error("A Full Access mission is already running"));
   state.onEmergency = () => onProgress?.("emergency_stop", "Worker emergency stop activated");
   const id = randomUUID();

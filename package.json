@@ -12,6 +12,7 @@
     "start": "python scripts/jarvis_runtime.py start",
     "start:dashboard": "npm run start --workspace @jarvis/control-center",
     "verify:rust-live": "python scripts/jarvis_runtime.py verify-live",
+    "verify:browser-live": "python -m scripts.verify_browser_control",
     "typecheck": "npm run typecheck --workspaces --if-present",
     "test": "npm run test --workspaces --if-present",
     "demo": "npm run simulate --workspace @jarvis/runtime",

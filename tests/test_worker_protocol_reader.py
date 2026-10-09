@@ -50,6 +50,22 @@ class WorkerProtocolReaderTests(unittest.TestCase):
         self.assert_closed(reader)
         self.assertLessEqual(len(reader._stderr), 8192)
 
+    def test_wait_pumps_target_gui_until_reply_arrives(self):
+        # A stand-in GUI event must be handled to unblock the diagnostic child.
+        reader = self.reader(
+            "import sys; sys.stdin.readline(); print('{\"type\":\"ready\"}')"
+        )
+        pumped = []
+        def pump():
+            if not pumped:
+                pumped.append(True)
+                reader.process.stdin.write("GUI event processed\n")
+                reader.process.stdin.flush()
+        reader.idle_callback = pump
+        self.assertEqual(reader.read_message(timeout_s=3)["type"], "ready")
+        self.assertEqual(pumped, [True])
+        self.assert_closed(reader)
+
     def test_closed_protocol_returns_bounded_stderr(self):
         reader = self.reader("import sys; sys.stderr.write('fixture failure'); sys.stderr.flush()")
         with self.assertRaisesRegex(RuntimeError, "protocol closed.*fixture failure"):

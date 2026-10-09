@@ -32,6 +32,8 @@ export type Snapshot = {
   capabilities: { id: string; permission: string; scope: string; expiresAt: string }[];
   telemetry: { processRssMb: number; hostRamUsedGb: number; hostRamTotalGb: number; processUptime: number; sampledAt: string };
   native: NativeView | null;
+  missionControl?: { paused: boolean; pauseRequested?: boolean;
+    pendingConfirmation?: { id: string; summary: string; tool: string; category?: string; details?: string; reason?: string } };
 };
 
 export const initialSnapshot: Snapshot = {

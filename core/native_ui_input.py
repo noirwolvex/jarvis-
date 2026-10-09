@@ -35,12 +35,21 @@ def _append_caret(control: Any, before: str) -> tuple[str, str, Callable[[], Non
         suffix = "\r\n" if before.endswith("\r\n") else "\n" if before.endswith("\n") else ""
         if suffix:
             # Chromium includes a terminal paragraph break even in an empty editor.
-            # Insert before that break, preserving it and every existing character.
-            caret.MoveEndpointByUnit(0, 0, -1)  # TextUnit_Character
-            caret.MoveEndpointByRange(1, caret, 0)
-        prefix_range = document.Clone()
-        prefix_range.MoveEndpointByRange(1, caret, 0)
-        prefix = prefix_range.GetText(4097)
+            # Providers can expose CRLF as one TextUnit_Character or two. Find
+            # the exact prefix in at most two read-only range moves instead of
+            # rejecting a valid draft when a provider counts both characters.
+            for _ in range(len(suffix)):
+                caret.MoveEndpointByUnit(0, 0, -1)  # TextUnit_Character
+                caret.MoveEndpointByRange(1, caret, 0)
+                prefix_range = document.Clone()
+                prefix_range.MoveEndpointByRange(1, caret, 0)
+                prefix = prefix_range.GetText(4097)
+                if prefix + suffix == before:
+                    break
+        else:
+            prefix_range = document.Clone()
+            prefix_range.MoveEndpointByRange(1, caret, 0)
+            prefix = prefix_range.GetText(4097)
         if prefix + suffix != before:
             raise ValueError("Append range does not match the exact editor value")
         def is_append_position() -> bool:
@@ -74,7 +83,10 @@ def _append_caret(control: Any, before: str) -> tuple[str, str, Callable[[], Non
 
         if not is_append_position():
             caret.Select()
-        check_caret()
+            check_caret()
+        # A caret already at the exact append position was just read above.
+        # Re-read after Select only; the returned guard still checks fresh text
+        # and selection after Rust capture immediately before input dispatch.
         return prefix, suffix, check_caret
     except InputNotDispatchedError:
         raise
@@ -91,7 +103,7 @@ def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[
     from .process_control import check_cancelled
     from .semantic_ui_tools import (
         _SNAPSHOTS,
-        _control_value,
+        _ControlValueReader,
         _resolve_input_control,
         _focus_control,
         _focus_window,
@@ -117,7 +129,8 @@ def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[
     except InputDeliveryError as exc:
         raise InputNotDispatchedError(str(exc)) from exc
     binding = _target_binding(win, control)
-    before_value = _control_value(control)
+    read_value = _ControlValueReader(control)
+    before_value = read_value()
     if before_value is None:
         raise InputNotDispatchedError(
             "Editor value cannot be read semantically; Rust input was not dispatched"
@@ -145,16 +158,20 @@ def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[
     # writable Value pattern. Never repeat an attempted write after failed readback.
     if (before_value and caret_guard is None) or any(char in value for char in "\r\n"):
         return ui_type(text=value, target=target, title=title, submit=False, replace=False,
-                       selector=selector, _resolved_editor=(win, control, binding))
+                       selector=selector, _resolved_editor=(win, control, binding), _value_reader=read_value)
 
-    client, status = _preflight()
+    try:
+        client, status = _preflight()
+    except RustEngineUnavailable as exc:
+        raise InputNotDispatchedError(str(exc)) from exc
     if client is None:
         # Compatibility is allowed for auto or explicitly selected Python mode. The normal
         # JARVIS X launcher uses strict rust mode and must fail closed if the daemon/config
         # is unavailable instead of silently typing through Python.
         if native_engine_mode() in {"auto", "python"}:
-            return ui_type(text=value, target=target, title=title, submit=False, replace=False, selector=selector)
-        raise RustEngineUnavailable(
+            return ui_type(text=value, target=target, title=title, submit=False, replace=False,
+                           selector=selector, _resolved_editor=(win, control, binding), _value_reader=read_value)
+        raise InputNotDispatchedError(
             "Strict Rust mode requires the native daemon before semantic keyboard input"
         )
 
@@ -163,7 +180,7 @@ def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[
         _guard_native_target(hwnd, status)
     except InputDeliveryError as exc:
         raise InputNotDispatchedError(str(exc)) from exc
-    if not _has_focus(control) or _control_value(control) != before_value:
+    if not _has_focus(control) or read_value() != before_value:
         raise InputNotDispatchedError("Editor focus or draft changed during Rust preflight; no input delivered")
     _SNAPSHOTS.invalidate(hwnd)
     # Advance only for our own cache invalidation. Any additional invalidation
@@ -175,16 +192,17 @@ def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[
             _validate_target(win, control, binding)
         except InputDeliveryError as exc:
             raise InputNotDispatchedError(str(exc)) from exc
-        if not _has_focus(control) or _control_value(control) != before_value:
+        if not _has_focus(control) or read_value() != before_value:
             raise InputNotDispatchedError("Editor focus or draft changed after Rust capture; no input delivered")
         if caret_guard is not None:
             caret_guard()
     try:
         result = client.type_text(value, status, before_dispatch=input_guard)
-    except RustEngineUnavailable:
+    except RustEngineUnavailable as exc:
         if native_engine_mode() == "auto":
-            return ui_type(text=value, target=target, title=title, submit=False, replace=False, selector=selector)
-        raise
+            return ui_type(text=value, target=target, title=title, submit=False, replace=False,
+                           selector=selector, _resolved_editor=(win, control, binding), _value_reader=read_value)
+        raise InputNotDispatchedError(str(exc)) from exc
 
     if result.get("executed") is not True or result.get("simulation") is not False:
         raise InputDeliveryError(
@@ -194,7 +212,7 @@ def ui_type_native(text: str, target: str = "", title: str = "", selector: dict[
     def value_matches() -> bool:
         _guard_foreground(hwnd)
         record_backend("windows_uia", phase="verify", detail="Exact editor readback after native input")
-        return _control_value(control) in expected_values
+        return read_value() in expected_values
 
     try:
         wait_until(value_matches, description="exact editor value after Rust native input")

@@ -135,6 +135,9 @@ class DesktopOutcomeSemanticsTests(unittest.TestCase):
 
 
 class GoogleFastPathTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.enterContext(patch("core.browser_fast_tools.preferred_existing_chrome", return_value=None))
+
     @patch("core.browser_fast_tools.browser_check_challenge")
     @patch("core.browser_fast_tools.chrome_current_tab")
     @patch("core.browser_fast_tools.chrome_page_operation")

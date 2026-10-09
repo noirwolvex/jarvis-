@@ -2,6 +2,8 @@
 
 import { useCallback, useEffect, useRef, useState } from "react";
 import { Icon } from "./icons";
+import { MissionControls } from "./mission-controls";
+import { useMissionVoice } from "./use-mission-voice";
 import { initialSnapshot, type EventView, type PageId, type Snapshot, type TaskView } from "@/lib/view-types";
 
 const navigation: { id: PageId; name: string; group: string }[] = [
@@ -51,6 +53,7 @@ export function ControlCenter() {
   const verified = snapshot.events.filter(e => /VERIFICATION_COMPLETED|ACTION_VERIFIED/.test(e.type)).length;
   const halted = snapshot.emergencyStopped;
   const hybrid = snapshot.mode === "hybrid";
+  const voice = useMissionVoice(snapshot, connection === "connected");
 
   const refresh = useCallback(async () => {
     try {
@@ -88,6 +91,7 @@ export function ControlCenter() {
 
   const navigate = (id: PageId) => { setPage(id); setMobileNav(false); setSearch(""); setPalette(false); };
   const control = async (action: string) => {
+    if (["stop", "pause", "resume"].includes(action)) voice.interrupt();
     setBusy(true); setNotice("");
     try {
       const response = await fetch("/api/control", {
@@ -123,7 +127,10 @@ export function ControlCenter() {
       <header className="topbar"><div className="breadcrumbs"><button className="icon-button mobile-toggle" aria-label="Open navigation" onClick={() => setMobileNav(true)}><Icon name="menu" /></button><Icon name="layers" size={17} /><span>Workspace</span><span className="slash">/</span><strong>{navigation.find(n => n.id === page)?.name}</strong></div><div className="topbar-actions"><button ref={commandButtonRef} className="command-search" onClick={() => { setPalette(true); setPaletteQuery(""); }}><Icon name="search" size={15} /><span>Jump to anything…</span><kbd>Ctrl K</kbd></button><span className={`connection ${connection}`}><i />{connection === "connected" ? "Connected" : connection === "offline" ? "Disconnected" : "Connecting"}</span><button className="icon-button" title={light ? "Use dark theme" : "Use light theme"} aria-label={light ? "Use dark theme" : "Use light theme"} onClick={() => { setLight(!light); try { localStorage.setItem("jarvis-theme", light ? "dark" : "light"); } catch { /* optional */ } }}><Icon name={light ? "moon" : "sun"} /></button></div></header>
 
       <main id="main" className="main-content">
-        <div className="page-heading"><div><div className="eyebrow"><span className="small-cross">+</span> JARVIS X / CONTROL CENTER</div><h1>{navigation.find(n => n.id === page)?.name}</h1><p>{page === "mission" ? "Intelligence proposes. Evidence confirms. You stay in control." : subtitles[page]}</p></div><div className="heading-actions"><button className="button secondary" disabled={hybrid || busy || halted || connection !== "connected"} onClick={() => void control(snapshot.status === "PAUSED" ? "resume" : "pause")}><Icon name={snapshot.status === "PAUSED" ? "play" : "pause"} size={14} />{snapshot.status === "PAUSED" ? "Resume" : "Pause"}</button><button className="button stop-button" disabled={halted} onClick={() => void control("stop")}><Icon name="stop" size={13} />{hybrid ? "Emergency stop" : "Stop simulation"}</button></div></div>
+        <div className="page-heading"><div><div className="eyebrow"><span className="small-cross">+</span> JARVIS X / CONTROL CENTER</div><h1>{navigation.find(n => n.id === page)?.name}</h1><p>{page === "mission" ? "Intelligence proposes. Evidence confirms. You stay in control." : subtitles[page]}</p></div><div className="heading-actions"><button className="button secondary" disabled={!voice.available} aria-pressed={voice.enabled} title={!voice.available ? "Speech is unavailable in this browser" : "Speak brief mission status updates; task content stays in the timeline"} onClick={voice.toggle}><Icon name="bell" size={14} />{voice.enabled ? "Mute voice" : "Enable voice"}</button>{!hybrid && <button className="button secondary" disabled={busy || halted || connection !== "connected"} onClick={() => void control(snapshot.status === "PAUSED" ? "resume" : "pause")}><Icon name={snapshot.status === "PAUSED" ? "play" : "pause"} size={14} />{snapshot.status === "PAUSED" ? "Resume" : "Pause"}</button>}<button className="button stop-button" disabled={halted} onClick={() => void control("stop")}><Icon name="stop" size={13} />{hybrid ? "Emergency stop" : "Stop simulation"}</button></div></div>
+
+        {hybrid && <MissionControls snapshot={snapshot} connected={connection === "connected"} refresh={refresh} interrupt={voice.interrupt} />}
+        {voice.error && <div className="banner warning" role="status"><Icon name="info" /><span>{voice.error}</span></div>}
 
         {connection === "offline" && <div className="banner warning" role="alert"><Icon name="info" /><span>Connection lost. The last received state may be stale. Controls are disabled until the service reconnects.</span><button onClick={() => void refresh()}>Reconnect</button></div>}
         {halted && <div className="banner emergency" role="alert"><Icon name="stop" /><span>Emergency stop is latched. Full Access must be enabled again after reset.</span><button disabled={busy || connection !== "connected"} onClick={() => void control("reset")}>Reset emergency stop</button></div>}

@@ -5,9 +5,11 @@ import urllib.parse
 from typing import Any
 
 from .browser_guard import browser_check_challenge
-from .browser_tab_tools import chrome_new_tab
+from .browser_tab_tools import new_tab_in_selected_session as chrome_new_tab
 from .chrome_cdp import chrome_current_tab, chrome_is_connected, chrome_page_operation
 from .chrome_session_tools import ensure_chrome_connection
+from .chrome_user_browser import preferred_existing_chrome
+from .browser_semantic import BrowserChallengeBlocked
 from .permissions import Risk
 from .tools import ToolRegistry, ToolSpec
 
@@ -121,12 +123,17 @@ def _challenge_payload(query: str, new_tab: bool, current_url: str, current_titl
 
 
 def google_search(query: str, new_tab: bool = False) -> str:
-    """Perform and verify a Google search in one guarded CDP tool call."""
+    """Search in the user's current Chrome window with one verified tool call."""
     text = _query(query)
     url = "https://www.google.com/search?" + urllib.parse.urlencode({"q": text})
 
-    if not chrome_is_connected():
-        ensure_chrome_connection()
+    window = preferred_existing_chrome()
+    if window is None and not chrome_is_connected():
+        connected = json.loads(ensure_chrome_connection())
+        if connected.get("session_type") == "existing-window":
+            window = connected["window"]
+    if window is not None:
+        return _search_existing(text, url, bool(new_tab), window)
 
     if bool(new_tab):
         chrome_new_tab(url)
@@ -162,6 +169,17 @@ def google_search(query: str, new_tab: bool = False) -> str:
     )
 
 
+def _search_existing(text: str, url: str, new_tab: bool, window: dict[str, Any]) -> str:
+    from .chrome_existing_window import navigate_existing_chrome
+    try:
+        result = navigate_existing_chrome(url, new_tab=new_tab, window=window)
+    except BrowserChallengeBlocked as exc:
+        return str(exc)
+    if result.get("verified") is not True or not _is_google_search_url(str(result.get("url", "")), text):
+        raise RuntimeError("Existing Chrome search did not produce verified Google results; inspect before retrying")
+    return "VERIFIED: " + json.dumps({**result, "action": "google_search", "query": text}, ensure_ascii=False)
+
+
 def browser_google_search_first_result(
     query: str,
     new_tab: bool = False,
@@ -174,6 +192,10 @@ def browser_google_search_first_result(
         return searched
     if not searched.startswith("VERIFIED:"):
         raise RuntimeError("Google search did not produce verified evidence")
+
+    search_evidence = json.loads(searched[len("VERIFIED:"):])
+    if search_evidence.get("session_type") == "existing-window":
+        return _existing_first_result(text, search_evidence, bool(new_tab), bool(preserve_search_tab))
 
     search_tab = json.loads(chrome_current_tab())
     search_url = str(search_tab.get("url") or "")
@@ -230,11 +252,35 @@ def browser_google_search_first_result(
     )
 
 
+def _existing_first_result(query: str, searched: dict[str, Any], new_tab: bool, preserve: bool) -> str:
+    from .chrome_existing_window import navigate_existing_chrome, read_existing_chrome
+    window = searched["window"]
+    state = read_existing_chrome(window, include_links=True)
+    if state.get("challenge_detected") is True:
+        return "BROWSER_ACTION_BLOCKED: Human verification is present in the existing Chrome window; complete it manually"
+    if not _is_google_search_url(state["url"], query):
+        raise RuntimeError("The existing Chrome window left the verified results page; inspect before continuing")
+    candidate = _first_google_result(state["links"])
+    try:
+        result = navigate_existing_chrome(candidate["href"], new_tab=preserve, window=window)
+    except BrowserChallengeBlocked as exc:
+        return str(exc)
+    parsed = urllib.parse.urlparse(str(result.get("url", "")))
+    if (result.get("verified") is not True or parsed.scheme not in {"http", "https"}
+            or not parsed.netloc or _host_excluded(parsed.hostname or "")):
+        raise RuntimeError("The existing Chrome result did not produce a verified external destination")
+    return "VERIFIED: " + json.dumps({**result, "action": "browser_google_search_first_result",
+        "initial_tab_count": searched.get("initial_tab_count", result.get("initial_tab_count")),
+        "query": query, "new_tab": new_tab, "search_url": state["url"], "search_title": state["title"],
+        "result_text": candidate["text"], "result_url": result["url"], "result_title": result["title"],
+        "preserved_search_tab": preserve}, ensure_ascii=False)
+
+
 def register_browser_fast_tools(registry: ToolRegistry) -> None:
     registry.register(
         ToolSpec(
             "google_search",
-            "Fast path for an explicit Google search. Opens the verified Google results URL directly through the guarded managed Chrome/CDP session in one tool call. Set new_tab=true only when the user explicitly asks for a new/additional tab. If the same request also says to press/click/open the first result or first link, use browser_google_search_first_result instead so both clauses are executed and verified in one tool call. Automatically stops at CAPTCHA/human verification without interacting with it.",
+            "Fast path for an explicit Google search in the user's existing Chrome window. Use matching CDP or guarded Windows toolbar navigation; start Chrome only when needed. Set new_tab=true only for an explicit new/additional tab. For search plus opening the first result, use browser_google_search_first_result to execute both clauses in the same window. Stops at human verification.",
             Risk.MEDIUM,
             {
                 "type": "object",

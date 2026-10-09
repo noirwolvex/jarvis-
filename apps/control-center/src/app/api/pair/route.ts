@@ -1,4 +1,4 @@
-import { assertLocalRequest } from "@/lib/control-service";
+import { assertLocalRequest, readControlObject } from "@/lib/control-service";
 import {
   controlSessionCookie,
   issueControlSession,
@@ -7,6 +7,22 @@ import {
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
+
+export async function POST(request: Request) {
+  const headers = { "Cache-Control": "no-store", "Referrer-Policy": "no-referrer", "X-Content-Type-Options": "nosniff" };
+  try {
+    assertLocalRequest(request);
+    if (!request.headers.get("origin")) throw new Error("Same-origin pairing required");
+    if (request.headers.get("x-jarvis-control") !== "pair") throw new Error("Pairing header required");
+    const body = await readControlObject(request, 1024);
+    if (Object.keys(body).some(key => key !== "token") || typeof body.token !== "string") throw new Error("Invalid pairing request");
+    verifyPairingToken(body.token);
+    return Response.json({ ok: true }, { headers: { ...headers, "Set-Cookie": controlSessionCookie(issueControlSession()) } });
+  } catch {
+    return Response.json({ error: "This pairing file is invalid or belongs to an earlier runtime. Choose the current control-session.json file." },
+      { status: 403, headers });
+  }
+}
 
 export async function GET(request: Request) {
   try {

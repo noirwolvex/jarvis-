@@ -19,11 +19,23 @@ from .universal_interaction import interaction_inspect
 
 _ACTIONABLE_BROWSER_ROLES = {
     "button", "link", "textbox", "combobox", "checkbox", "radio", "slider",
-    "tab", "menuitem", "option", "switch",
+    "tab", "menuitem", "option", "switch", "searchbox", "spinbutton",
+    "menuitemcheckbox", "menuitemradio", "treeitem", "listbox",
 }
 _ACTIONABLE_DESKTOP_TYPES = {
     "Button", "Edit", "Document", "Hyperlink", "ListItem", "TreeItem", "TabItem",
-    "CheckBox", "RadioButton", "ComboBox", "MenuItem", "DataItem", "Slider",
+    "CheckBox", "RadioButton", "ComboBox", "MenuItem", "DataItem", "Slider", "Spinner",
+}
+
+# Use the same natural role across DOM and UIA without changing the actual
+# control type sent to either backend. Document is deliberately not an Edit:
+# a document root often exposes page content rather than a writable field.
+_ROLE_ALIASES = {
+    "edit": "textbox",
+    "hyperlink": "link",
+    "tabitem": "tab",
+    "radiobutton": "radio",
+    "spinner": "spinbutton",
 }
 
 
@@ -33,6 +45,11 @@ def _clean(value: Any) -> str:
 
 def _norm(value: Any) -> str:
     return _clean(value).casefold()
+
+
+def _role_key(value: Any) -> str:
+    normalized = _norm(value)
+    return _ROLE_ALIASES.get(normalized, normalized)
 
 
 def _boolish(value: Any) -> bool | None:
@@ -75,7 +92,7 @@ def _desktop_id(row: dict[str, Any]) -> str:
     return "uia-fallback:" + digest
 
 
-def _browser_nodes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
+def _browser_nodes(snapshot: dict[str, Any], frame_selector: str = "") -> list[dict[str, Any]]:
     version = _clean(snapshot.get("version"))
     nodes = []
     for row in snapshot.get("nodes", []):
@@ -91,6 +108,9 @@ def _browser_nodes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "source": "DOM",
             "role": role,
             "name": name,
+            "tag": _clean(row.get("tag")).casefold(),
+            "frame_url": str(row.get("frame_url") or "")[:1024],
+            "input_kind": row.get("input_kind", ""),
             "parent": "dom:" + _clean(row.get("parent")) if row.get("parent") else "",
             "rect": _rect_browser(row.get("bounds")),
             "enabled": not bool(row.get("disabled")),
@@ -99,13 +119,24 @@ def _browser_nodes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
             "focused": bool(row.get("focused")),
             "checked": _boolish(row.get("checked")),
             "expanded": _boolish(row.get("expanded")),
-            "actionable": role.casefold() in _ACTIONABLE_BROWSER_ROLES,
+            "actionable": role.casefold() in _ACTIONABLE_BROWSER_ROLES or row.get("interactive") is True,
+            "role_resolvable": row.get("role_resolvable") is not False and role.casefold() in _ACTIONABLE_BROWSER_ROLES,
             "target": {
                 "surface": "browser",
                 "browser_target": {"node_id": node_id},
                 "expected_version": version,
+                **({"frame_selector": frame_selector} if frame_selector else {}),
             },
         })
+    # Give the planner reusable semantic targets for uniquely labeled controls.
+    # Each action still resolves the full live DOM and rejects ambiguity. Snapshot
+    # IDs remain necessary for unlabeled/duplicate/state-selected controls.
+    for node in nodes:
+        if (node["name"] and node["role_resolvable"]
+                and sum(other["role"] == node["role"] and other["name"] == node["name"] for other in nodes) == 1):
+            node["target"] = {"surface": "browser",
+                              "browser_target": {"role": node["role"], "name": node["name"]},
+                              **({"frame_selector": frame_selector} if frame_selector else {})}
     return nodes
 
 
@@ -134,10 +165,22 @@ def _desktop_nodes(snapshot: dict[str, Any]) -> list[dict[str, Any]]:
                 "surface": "desktop",
                 "target": name or _clean(row.get("automation_id")),
                 "control_type": kind,
+                **_desktop_context(snapshot),
             },
         }
         nodes.append(node)
     return nodes
+
+
+def _desktop_context(snapshot: dict[str, Any]) -> dict[str, Any]:
+    context: dict[str, Any] = {}
+    title = _clean(snapshot.get("title"))
+    hwnd = snapshot.get("hwnd")
+    if title:
+        context["title"] = title
+    if type(hwnd) is int and hwnd > 0:
+        context["expected_hwnd"] = hwnd
+    return context
 
 
 def _fingerprint(node: dict[str, Any]) -> str:
@@ -145,6 +188,9 @@ def _fingerprint(node: dict[str, Any]) -> str:
         node.get("role"), node.get("name"), node.get("parent"), node.get("rect"),
         node.get("enabled"), node.get("visible"), node.get("selected"),
         node.get("focused"), node.get("checked"), node.get("expanded"),
+        node.get("target"),
+        node.get("input_kind"),
+        node.get("tag"), node.get("frame_url"),
     )
     return hashlib.sha1(
         json.dumps(fields, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
@@ -178,6 +224,11 @@ class SceneTracker:
             self._counter += 1
             scene_id = f"scene-{self._counter}"
             self._scenes[key] = _Scene(scene_id, time.monotonic(), current)
+            # Long missions may visit many URLs/windows. Retain recent delta bases
+            # without keeping every detached tree for the lifetime of the worker.
+            if len(self._scenes) > 128:
+                oldest = min(self._scenes, key=lambda item: self._scenes[item].created)
+                del self._scenes[oldest]
         if previous is None:
             return scene_id, None
 
@@ -228,7 +279,7 @@ def _capture(
     actual = str(wrapped["surface"])
     snapshot = wrapped["snapshot"]
     if actual == "browser":
-        nodes = _browser_nodes(snapshot)
+        nodes = _browser_nodes(snapshot, frame_selector)
         wanted = _norm(query)
         if scope == "actionable":
             nodes = [node for node in nodes if node.get("actionable")]
@@ -298,6 +349,7 @@ def interaction_scene(
         "source_version": snapshot.get("version", snapshot.get("generation")),
         "cached_source": bool(snapshot.get("cached")),
         "truncated": bool(snapshot.get("truncated")),
+        "coverage_gaps": list(snapshot.get("coverage_gaps") or []),
         "scope": scope,
         "node_count": len(nodes),
         "actionable_count": sum(bool(node.get("actionable")) for node in nodes),
@@ -347,7 +399,7 @@ def interaction_resolve(
     force_refresh: bool = False,
 ) -> str:
     wanted = _norm(query)
-    wanted_role = _norm(role)
+    wanted_role = _role_key(role)
     if ordinal is not None and not wanted_role:
         raise ValueError("interaction_resolve ordinal requires an explicit role/control type")
     actual, snapshot, nodes, context = _capture(
@@ -363,7 +415,7 @@ def interaction_resolve(
     candidates = [
         node for node in nodes
         if node.get("visible") is not False and node.get("enabled") is not False
-        and (not wanted_role or _norm(node.get("role")) == wanted_role)
+        and (not wanted_role or _role_key(node.get("role")) == wanted_role)
         and (selected is None or node.get("selected") is selected)
         and (focused is None or node.get("focused") is focused)
     ]
@@ -387,6 +439,21 @@ def interaction_resolve(
 
     candidates.sort(key=_reading_order)
     if ordinal is not None:
+        if snapshot.get("truncated"):
+            # DOM/UIA traversal and focused/modal prioritization are not reading
+            # order. An omitted node can precede even ordinal 1 on the screen.
+            raise RuntimeError("Cannot resolve an ordinal target from a truncated scene; inspect a narrower scope")
+        if candidates:
+            if actual == "desktop":
+                parents = {node.get("parent") for node in candidates}
+                if len(parents) != 1 or not all(parents):
+                    raise RuntimeError("Ordinal controls span uncertain containers; inspect an exact parent scope")
+            rectangles = [node.get("rect") or [] for node in candidates]
+            if any(len(rect) != 4 or rect[2] <= rect[0] or rect[3] <= rect[1] for rect in rectangles):
+                raise RuntimeError("Ordinal control geometry is unavailable")
+            positions = [_reading_order(node) for node in candidates]
+            if len(set(positions)) != len(positions):
+                raise RuntimeError("Ordinal controls overlap at the same position; inspect an exact identity")
         if ordinal == "last":
             index = len(candidates) - 1
         else:
@@ -415,19 +482,45 @@ def interaction_resolve(
         selected_node = candidates[0]
 
     target = dict(selected_node.get("target") or {})
-    if actual == "browser" and match_kind == "exact" and selected_node.get("name") and selected_node.get("role"):
+    if actual == "browser":
+        target = {"surface": "browser", "browser_target": {"node_id": selected_node["id"].removeprefix("dom:")},
+                  "expected_version": _clean(snapshot.get("version")),
+                  **({"frame_selector": frame_selector} if frame_selector else {})}
+    if (actual == "browser" and match_kind == "exact" and selected is None and focused is None
+            and selected_node.get("name") and selected_node.get("role_resolvable")):
         # Exact role/name survives unrelated DOM changes better than a snapshot node.
+        # State-based disambiguation must retain the version-bound node instead;
+        # an identical name can belong to another selected/focused control later.
         target = {
             "surface": "browser",
             "browser_target": {
                 "role": selected_node["role"],
                 "name": selected_node["name"],
             },
+            **({"frame_selector": frame_selector} if frame_selector else {}),
         }
     elif actual == "desktop":
-        exact_token = _clean(selected_node.get("name")) or _clean(selected_node.get("automation_id"))
+        # A query may identify a unique automation ID despite duplicate visible
+        # names. Preserve that exact identity instead of widening it to the name.
+        exact_token = (_clean(query) if match_kind in {"exact", "ordinal_exact"}
+                       else _clean(selected_node.get("name")) or _clean(selected_node.get("automation_id")))
+        if match_kind in {"unique_contains", "ordinal_unique_contains"}:
+            same_type = [node for node in nodes
+                         if node.get("visible") is not False and node.get("enabled") is not False
+                         and node.get("role") == selected_node.get("role")
+                         and (selected is None or node.get("selected") is selected)
+                         and (focused is None or node.get("focused") is focused)]
+            # Substring resolution must return an exact executable token. A
+            # display name can repeat even when the matched automation IDs don't.
+            for token in (selected_node.get("name"), selected_node.get("automation_id")):
+                if token and sum(_norm(token) in {_norm(node.get("name")), _norm(node.get("automation_id"))}
+                                 for node in same_type) == 1:
+                    exact_token = _clean(token)
+                    break
+            else:
+                raise RuntimeError("Resolved desktop target has no unambiguous exact name or automation ID")
         selector: dict[str, Any] = {}
-        if ordinal is not None:
+        if ordinal is not None and match_kind != "ordinal_unique_contains":
             selector["ordinal"] = ordinal
         if selected is not None:
             selector["selected"] = selected
@@ -436,11 +529,11 @@ def interaction_resolve(
         if selector:
             target = {
                 "surface": "desktop",
-                "control_type": role or selected_node.get("role", ""),
+                "control_type": selected_node.get("role", ""),
                 "selector": selector,
             }
             if query:
-                target["target"] = query
+                target["target"] = query if match_kind == "ordinal_exact" else exact_token
         elif exact_token:
             target = {
                 "surface": "desktop",
@@ -449,6 +542,8 @@ def interaction_resolve(
             }
         else:
             target = {}
+        if target:
+            target.update(_desktop_context(snapshot))
 
     confidence = 1.0 if match_kind == "exact" else 0.97 if match_kind.startswith("ordinal_exact") else 0.93
     return "VERIFIED: " + json.dumps({
@@ -459,7 +554,9 @@ def interaction_resolve(
         "confidence": confidence,
         "node": selected_node,
         "action_target": target,
-        "fallback": "screen_observe" if confidence < 0.95 else "",
+        # A resolved ordinal or unique substring already has an exact live
+        # action target. Do not suggest an extra screenshot just for its score.
+        "fallback": "screen_observe" if not target else "",
         "note": "Read-only resolution. The eventual action must revalidate or re-resolve before input.",
     }, ensure_ascii=False)
 

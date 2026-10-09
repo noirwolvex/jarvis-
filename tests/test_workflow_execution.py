@@ -284,6 +284,34 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertIn("immutable ordered program", result)
         self.action.assert_called_once()
 
+    def test_resume_by_id_only_runs_pending_readback_and_remaining_steps(self):
+        self.action.side_effect = ['DELIVERED: first effect', 'VERIFIED: second effect']
+        waiter = Mock(side_effect=['ERROR: loading', 'VERIFIED: expected outcome'])
+        self.register('ui_wait_state', Risk.LOW, waiter)
+        program = [step(checkpoint={'tool': 'ui_wait_state', 'arguments': {}}), step('two')]
+        self.assertTrue(self.execute(program).startswith('ERROR: Checkpoint'))
+        result = self.agent._execute_tool('workflow_resume', {'workflow_id': 'mission'}, True)
+        self.assertTrue(result.startswith('VERIFIED:'), result)
+        self.assertEqual(self.action.call_count, 2)
+        self.assertEqual(waiter.call_count, 2)
+        self.assertEqual(self.agent.orchestrator.current.workflows[0]['program'], program)
+        self.agent._execute_tool('workflow_resume', {'workflow_id': 'mission'}, True)
+        self.assertEqual(self.action.call_count, 2)
+
+    def test_resume_by_id_rejects_unknown_uncertain_denied_or_modified_program(self):
+        unknown = self.agent._execute_tool('workflow_resume', {'workflow_id': 'missing'}, True)
+        self.assertIn('Unknown workflow', unknown)
+        self.action.return_value = 'ERROR: outcome uncertain'
+        self.execute([step()])
+        uncertain = self.agent._execute_tool('workflow_resume', {'workflow_id': 'mission'}, True)
+        self.assertIn('Uncertain', uncertain)
+        modified = self.agent._execute_tool('workflow_resume', {'workflow_id': 'mission', 'steps': []}, True)
+        self.assertIn('ValidationError', modified)
+        self.agent.tools.permissions.deny_tools.add('verified_action')
+        denied = self.agent._execute_tool('workflow_resume', {'workflow_id': 'mission'}, True)
+        self.assertIn('ERROR', denied)
+        self.action.assert_called_once()
+
     def test_uncertain_send_requires_live_review_and_is_never_replayed(self):
         self.action.side_effect = ["ERROR: delivery uncertain", "VERIFIED: later action"]
         program = [step(), step("two")]
@@ -298,6 +326,69 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertFalse(self.agent._execute_tool("workflow_review", args, True).startswith("ERROR"))
         self.assertTrue(self.execute(program).startswith("VERIFIED:"))
         self.assertEqual(self.action.call_count, 2)
+
+    def test_review_cannot_replace_declared_checkpoint_with_link_presence_claim(self):
+        self.action.return_value = "ERROR: navigation outcome uncertain"
+        waiter = Mock(side_effect=["ERROR: editor not present", "VERIFIED: record editor ready"])
+        self.register("ui_wait_state", Risk.LOW, waiter)
+        program = [step(checkpoint={"tool": "ui_wait_state", "arguments": {}})]
+        self.assertTrue(self.execute(program).startswith("ERROR"))
+        current = self.agent.orchestrator
+        current.record_tool("browser_read_page", {}, "Library still lists the record link", 1, 1)
+        self.agent._execute_tool("task_verify", {"claim": "record opened", "verified": True,
+            "evidence": "Library includes the record link"}, True)
+        args = {"workflow_id": "mission", "step_id": "one", "claim": "record opened"}
+
+        rejected = self.agent._execute_tool("workflow_review", args, True)
+        self.assertTrue(rejected.startswith("ERROR: Checkpoint pending"), rejected)
+        self.assertEqual(current.current.workflows[0]["steps"][0]["status"], "checkpoint_pending")
+        self.action.assert_called_once()
+        waiter.assert_called_once()
+
+        recovered = self.agent._execute_tool("workflow_review", args, True)
+        self.assertFalse(recovered.startswith("ERROR"), recovered)
+        self.assertEqual(current.current.workflows[0]["steps"][0]["result"], "VERIFIED: record editor ready")
+        self.assertEqual(waiter.call_count, 2)
+        self.assertTrue(self.execute(program).startswith("VERIFIED:"))
+        self.action.assert_called_once()
+
+    def test_review_checkpoint_preserves_challenge_and_cancel_without_retry(self):
+        for blocked in ("BROWSER_ACTION_BLOCKED: manual verification", "CANCELLED: Emergency stop is active"):
+            with self.subTest(blocked=blocked):
+                self.agent.orchestrator.begin("checkpoint review fixture")
+                self.action.return_value = "ERROR: uncertain navigation"
+                waiter = Mock(return_value=blocked)
+                self.register("ui_wait_state", Risk.LOW, waiter)
+                program = [step(checkpoint={"tool": "ui_wait_state", "arguments": {}}), step("two")]
+                self.assertTrue(self.execute(program).startswith("ERROR"))
+                self.agent.orchestrator.record_tool("browser_read_page", {}, "Current page", 1, 1)
+                self.agent._execute_tool("task_verify", {"claim": "opened", "verified": True, "evidence": "Observed page"}, True)
+                before = self.action.call_count
+                result = self.agent._execute_tool("workflow_review", {
+                    "workflow_id": "mission", "step_id": "one", "claim": "opened"}, True)
+                self.assertTrue(result.startswith(blocked.split(":")[0]), result)
+                waiter.assert_called_once()
+                self.assertEqual(self.action.call_count, before)
+                self.assertEqual([record["status"] for record in self.agent.orchestrator.current.workflows[0]["steps"]],
+                                 ["checkpoint_pending", "pending"])
+
+    def test_review_reauthorizes_read_checkpoint_without_reauthorizing_action(self):
+        self.action.return_value = "ERROR: uncertain navigation"
+        waiter = Mock(return_value="VERIFIED: editor ready")
+        self.register("ui_wait_state", Risk.LOW, waiter)
+        program = [step(checkpoint={"tool": "ui_wait_state", "arguments": {}})]
+        self.execute(program)
+        self.agent.orchestrator.record_tool("browser_read_page", {}, "Editor visible", 1, 1)
+        self.agent._execute_tool("task_verify", {"claim": "opened", "verified": True, "evidence": "Editor visible"}, True)
+        args = {"workflow_id": "mission", "step_id": "one", "claim": "opened"}
+        self.agent.tools.permissions.deny_tools.update({"verified_action", "ui_wait_state"})
+        self.assertTrue(self.agent._execute_tool("workflow_review", args, True).startswith("ERROR"))
+        waiter.assert_not_called()
+        self.agent.tools.permissions.deny_tools.remove("ui_wait_state")
+        reviewed = self.agent._execute_tool("workflow_review", args, True)
+        self.assertFalse(reviewed.startswith("ERROR"), reviewed)
+        waiter.assert_called_once()
+        self.action.assert_called_once()
 
     def test_cancel_and_browser_checkpoint_stop_later_steps(self):
         def cancel():

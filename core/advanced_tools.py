@@ -55,19 +55,9 @@ def focus_window_advanced(title: str) -> str:
     if len(candidates) != 1:
         raise RuntimeError("Window title is ambiguous; inspect windows and use a specific title")
     hwnd, actual = candidates[0]
-    user32 = ctypes.windll.user32
-    user32.ShowWindow(hwnd, 9)
-    user32.SetForegroundWindow(hwnd)
-    from .ui_state import wait_until
-    try:
-        wait_until(
-            lambda: int(user32.GetForegroundWindow()) == hwnd,
-            timeout=0.8,
-            interval=0.02,
-            description=f"foreground window {actual!r}",
-        )
-    except TimeoutError as exc:
-        raise RuntimeError(f"Could not focus window: {actual}") from exc
+    from .app_tools import _focus
+    if not _focus(hwnd):
+        raise RuntimeError(f"Could not focus window: {actual}; inspect the foreground window and blocking dialogs before retrying")
     return f"VERIFIED: focused '{actual}' (hwnd={hwnd})"
 
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -8,7 +9,7 @@ from dataclasses import dataclass
 from typing import Callable, Any
 
 from dotenv import load_dotenv
-from openai import OpenAI
+from openai import APIConnectionError, OpenAI, Timeout
 
 from .memory import MemoryStore
 from .tools import ToolRegistry
@@ -41,12 +42,12 @@ Execution protocol:
 - For Save As, Open, confirmation, and file-picker dialogs, use dialog_inspect before interacting when a dialog is expected. Use dialog_set_field and dialog_click_button for precise UI control.
 - For Notepad save requests, prefer notepad_save_as because it reads the live editor state and verifies the resulting target file. This is a direct persistence path, not a claim that Notepad's own title changed.
 - For a request like \"open Notepad and type X\", prefer open_application_and_type because it has a dedicated reliable Notepad path and exact source verification.
-- Load a relevant skill with list_skills/load_skill before specialized or complex work. Skills provide procedures, not permissions.
-- Use wait after application launches, dialog transitions, or asynchronous browser changes instead of racing the next action.
+- Reuse the relevant control procedures already supplied in context. If method details are missing, read control_guide; use list_skills/load_skill for other specialized work. Reference material provides procedures, not permissions or execution evidence.
+- Use a bounded state checkpoint after asynchronous transitions; verified launches and ready controls do not need an extra sleep.
 - For browser tasks, inspect browser_page_state before filling unfamiliar forms when practical. Before browser_click, browser_type, or browser_press, use browser_check_challenge when a live page is available. If it reports a challenge, stop automation and ask the user to complete the human-verification step manually; do not solve, bypass, click, or type into the challenge.
 - The browser challenge guard is enforced by JARVIS itself, not merely by this prompt. Ordinary browser navigation, reading pages, opening tabs, and filling normal form fields may continue normally. A human-verification checkpoint is the boundary, not a reason to refuse the whole task.
-- For real Chrome control, prefer chrome_connect_cdp to attach to a Chrome instance exposing CDP. If the endpoint is unavailable, use chrome_start_managed to launch an isolated visible Chrome instance with CDP, then connect and continue. Do not claim the managed profile is the user's already-running personal Chrome session.
-- After connecting to Chrome, use chrome_tabs and chrome_use_tab to select the intended real tab before browser_* actions.
+- Reuse the intended Chrome window and connected page. Read its current state directly when already connected. List/select tabs only when the requested tab differs or is ambiguous. Start another browser only when necessary and authorized; an isolated managed profile is not the user's personal session.
+- Call only tools present in the supplied definitions, with their declared arguments. A rejected name/schema is not a desktop failure: correct it directly without rewriting the mission or marking the step complete.
 - Treat passwords, session tokens, API keys, and other secrets as sensitive input. Never echo them back in responses, traces, logs, or tool descriptions.
 - If any tool returns ERROR or PERMISSION_DENIED, do not repeat the identical action blindly. Inspect state, diagnose the failure, and choose a safer alternate path. After recovery, verify the requested outcome again.
 - For browser work, coordinate browser_navigate, browser_read_page, browser_links, browser_wait, browser_click, browser_type, browser_press, chrome_tabs, chrome_use_tab, and chrome_current_tab, rereading state after important navigation.
@@ -170,8 +171,20 @@ class JarvisAgent:
         self.provider = os.getenv("AI_PROVIDER", "tabitoken")
         self.base_url = os.getenv("AI_BASE_URL", "https://tabitoken.com/v1").rstrip("/")
         self.model = os.getenv("AI_MODEL", "claude-sonnet-4-5")
+        self.reasoning_effort = self._configured_reasoning_effort("AI_REASONING_EFFORT")
+        self._fallback_reasoning_effort = self._configured_reasoning_effort("AI_FALLBACK_REASONING_EFFORT")
         self.max_turns = int(os.getenv("JARVIS_MAX_TURNS", "40"))
-        self.client = OpenAI(api_key=api_key, base_url=self.base_url)
+        try:
+            self.ai_timeout_seconds = float(os.getenv("JARVIS_AI_TIMEOUT_SECONDS", "45"))
+        except ValueError as exc:
+            raise ValueError("JARVIS_AI_TIMEOUT_SECONDS must be between 5 and 180 seconds") from exc
+        if not math.isfinite(self.ai_timeout_seconds) or not 5 <= self.ai_timeout_seconds <= 180:
+            raise ValueError("JARVIS_AI_TIMEOUT_SECONDS must be between 5 and 180 seconds")
+        # SDK retries can honor long Retry-After headers before our fallback ever
+        # sees a quota error. Own that recovery here, with no hidden resubmissions.
+        client_options = {"max_retries": 0, "timeout": Timeout(
+            self.ai_timeout_seconds, connect=5.0, write=10.0, pool=5.0)}
+        self.client = OpenAI(api_key=api_key, base_url=self.base_url, **client_options)
         self._fallback_client = None
         self._fallback_provider = ""
         self._fallback_base_url = ""
@@ -189,12 +202,14 @@ class JarvisAgent:
                 "AI_FALLBACK_BASE_URL, and AI_FALLBACK_MODEL together."
             )
         if all(fallback_values):
-            self._fallback_client = OpenAI(api_key=fallback_key, base_url=fallback_base_url)
+            self._fallback_client = OpenAI(api_key=fallback_key, base_url=fallback_base_url, **client_options)
             self._fallback_provider = fallback_provider
             self._fallback_base_url = fallback_base_url
             self._fallback_model = fallback_model
 
         self.tools = tools or ToolRegistry()
+        from .control_knowledge import register_control_knowledge
+        register_control_knowledge(self.tools, self._control_reference_tools)
         if tools is None:
             from .dev_tools import register_dev_tools
             register_dev_tools(self.tools)
@@ -202,7 +217,7 @@ class JarvisAgent:
             register_advanced_tools(self.tools)
             from .wincom_tools import register_wincom_tools
             register_wincom_tools(self.tools)
-            register_skill_tools(self.tools)
+            register_skill_tools(self.tools, self._control_reference_tools)
             register_monitor_tools(self.tools)
             register_browser_guard_tools(self.tools)
             register_chrome_cdp_tools(self.tools)
@@ -230,6 +245,13 @@ class JarvisAgent:
                 input_schema=spec.input_schema,
                 handler=paste_text,
             )
+
+    def _control_reference_tools(self) -> set[str]:
+        current = getattr(getattr(self, "orchestrator", None), "current", None)
+        profile = getattr(self, "_tool_schemas_for_goal", None)
+        if current is not None and callable(profile):
+            return {schema["function"]["name"] for schema in profile(current.goal)}
+        return set(self.tools._tools)
 
     def _execute_tool(self, name: str, arguments: dict[str, Any], approved: bool = False) -> str:
         future = self._tool_executor.submit(self.tools.execute, name, arguments, approved)
@@ -267,21 +289,94 @@ class JarvisAgent:
         text = " ".join(str(exc).split())
         return text[:1200]
 
-    def _chat_completion(self, **kwargs: Any):
+    @staticmethod
+    def _is_provider_unavailable(exc: Exception) -> bool:
+        status = getattr(exc, "status_code", None)
+        return isinstance(exc, APIConnectionError) or (isinstance(status, int) and 500 <= status < 600)
+
+    @staticmethod
+    def _configured_reasoning_effort(key: str) -> str:
+        value = os.getenv(key, "").strip().lower()
+        if value not in {"", "none", "minimal", "low", "medium", "high", "xhigh"}:
+            raise ValueError(f"{key} must be empty, none, minimal, low, medium, high, or xhigh")
+        return value
+
+    @staticmethod
+    def _transient_retry_delay(exc: Exception) -> float | None:
+        # Retry only an explicit temporary server rejection, never ambiguous
+        # timeouts, invalid requests, quota failures, or permission failures.
+        if getattr(exc, "status_code", None) not in {502, 503, 504}:
+            return None
+        response = getattr(exc, "response", None)
+        retry_after = response.headers.get("retry-after") if response is not None else None
+        try:
+            delay = float(retry_after) if retry_after is not None else 1.0
+        except (ValueError, TypeError):
+            return None  # A date/unknown delay is not permission to retry sooner.
+        return delay if math.isfinite(delay) and 0 <= delay <= 3 else None
+
+    def _primary_completion(self, kwargs: dict[str, Any], check_cancelled: Callable[[], None]):
+        for attempt in range(2):
+            check_cancelled()
+            if attempt:
+                current = getattr(getattr(self, "orchestrator", None), "current", None)
+                if current is not None:
+                    current.metrics["provider_retries"] = current.metrics.get("provider_retries", 0) + 1
+            try:
+                response = self.client.chat.completions.create(**kwargs)
+                if attempt:
+                    self._provider_failover_notice = (
+                        "The AI provider recovered after one transient-error retry; "
+                        "the same mission continued without replaying tool actions."
+                    )
+                return response
+            except Exception as exc:
+                check_cancelled()
+                delay = self._transient_retry_delay(exc) if attempt == 0 and self._fallback_client is None else None
+                if delay is None:
+                    raise
+                # Full Access still owns the overall request deadline. Cancellation
+                # during this short backoff prevents the second request entirely.
+                deadline = time.monotonic() + delay
+                while True:
+                    check_cancelled()
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        break
+                    time.sleep(min(0.05, remaining))
+        raise AssertionError("Provider retry loop must return or raise")
+
+    def _chat_completion(self, *, _cancel_check=None, **kwargs: Any):
+        def check_cancelled():
+            if _cancel_check is not None and _cancel_check():
+                raise RuntimeError("CANCELLED: Planning request was abandoned")
+
+        check_cancelled()
         kwargs = dict(kwargs)
         kwargs["model"] = self.model
+        if getattr(self, "reasoning_effort", ""):
+            kwargs.setdefault("reasoning_effort", self.reasoning_effort)
         try:
-            return self.client.chat.completions.create(**kwargs)
+            return self._primary_completion(kwargs, check_cancelled)
         except Exception as exc:
+            check_cancelled()
             access_denied = self._is_provider_access_denied(exc)
             rate_limited = self._is_provider_rate_limited(exc)
-            if not access_denied and not rate_limited:
+            unavailable = self._is_provider_unavailable(exc)
+            if not access_denied and not rate_limited and not unavailable:
                 raise
 
             primary = (
                 f"provider={self.provider} base_url={self.base_url} model={self.model}"
             )
             if self._fallback_client is None:
+                if unavailable:
+                    raise RuntimeError(
+                        "AI_PROVIDER_UNAVAILABLE: The AI provider timed out or is temporarily unreachable "
+                        f"({primary}). The mission checkpoint was preserved; no action was replayed. "
+                        "Continue when the provider is available or configure a fallback provider. "
+                        f"Upstream response: {self._provider_error_summary(exc)}"
+                    ) from exc
                 if rate_limited:
                     raise RuntimeError(
                         "AI_PROVIDER_RATE_LIMITED: The configured AI provider exhausted its current quota "
@@ -292,7 +387,7 @@ class JarvisAgent:
                     ) from exc
                 raise RuntimeError(
                     "AI_PROVIDER_ACCESS_DENIED: The configured AI provider rejected this project "
-                    f"with HTTP 403 ({primary}). JARVIS did not start desktop execution. "
+                    f"with HTTP 403 ({primary}). Completed work remains in the mission checkpoint. "
                     "Restore provider/project access or configure AI_FALLBACK_PROVIDER, "
                     "AI_FALLBACK_BASE_URL, AI_FALLBACK_MODEL, and AI_FALLBACK_API_KEY. "
                     f"Upstream response: {self._provider_error_summary(exc)}"
@@ -304,10 +399,17 @@ class JarvisAgent:
             fallback_model = self._fallback_model
             fallback_kwargs = dict(kwargs)
             fallback_kwargs["model"] = fallback_model
+            # A fallback may use a different model family. Never inherit a
+            # primary-only reasoning parameter that it may not support.
+            fallback_kwargs.pop("reasoning_effort", None)
+            if getattr(self, "_fallback_reasoning_effort", ""):
+                fallback_kwargs["reasoning_effort"] = self._fallback_reasoning_effort
             try:
                 response = fallback_client.chat.completions.create(**fallback_kwargs)
             except Exception as fallback_exc:
-                if self._is_provider_access_denied(fallback_exc) or self._is_provider_rate_limited(fallback_exc):
+                if (self._is_provider_access_denied(fallback_exc)
+                        or self._is_provider_rate_limited(fallback_exc)
+                        or self._is_provider_unavailable(fallback_exc)):
                     raise RuntimeError(
                         "AI_PROVIDER_FAILOVER_FAILED: Both primary and fallback AI providers "
                         "are currently unavailable for this mission. "
@@ -318,12 +420,15 @@ class JarvisAgent:
                     ) from fallback_exc
                 raise
 
+            check_cancelled()
             self.client = fallback_client
             self.provider = fallback_provider
             self.base_url = fallback_base_url
             self.model = fallback_model
+            self.reasoning_effort = getattr(self, "_fallback_reasoning_effort", "")
             self._fallback_client = None
-            trigger = "HTTP 429/quota limit" if rate_limited else "HTTP 403/access denial"
+            trigger = ("HTTP 429/quota limit" if rate_limited else
+                       "timeout/temporary unavailability" if unavailable else "HTTP 403/access denial")
             self._provider_failover_notice = (
                 f"Primary AI provider returned {trigger}; JARVIS switched to configured "
                 f"fallback provider={self.provider} model={self.model} and continued the same mission."

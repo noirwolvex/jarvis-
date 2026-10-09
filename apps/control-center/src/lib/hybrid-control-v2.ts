@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { freemem, totalmem } from "node:os";
-import { runFullAccessMission, stopFullAccessWorker, validateTaskGraph, type FullAccessMissionResult } from "./full-access-bridge";
+import { runFullAccessMission, stopFullAccessWorker, controlFullAccessWorker, validateTaskGraph, type FullAccessMissionResult } from "./full-access-bridge";
 import {
   launchLegacyApplication,
   parseLegacyLaunchMission,
@@ -23,6 +23,7 @@ type State = {
   emergencyStopped?: boolean;
   abort?: AbortController;
   observation?: NativeView;
+  missionControl?: Snapshot["missionControl"];
 };
 const globalState = globalThis as typeof globalThis & { jarvisHybridV3?: State };
 const getState = () => globalState.jarvisHybridV3 ??= {
@@ -63,6 +64,7 @@ export function emergencyStopHybrid() {
   value.accessMode = "standard";
   value.allowShell = false;
   value.status = "EMERGENCY_STOPPED";
+  delete value.missionControl;
   value.abort?.abort();
   stopFullAccessWorker();
   addEvent("EMERGENCY_STOP", "runtime", "Full Access revoked; active worker cancellation requested");
@@ -78,6 +80,18 @@ export function resetHybridStop() {
   addEvent("EMERGENCY_RESET", "runtime", "Stop reset; Full Access remains disabled");
 }
 
+export function controlHybridMission(action: "pause" | "resume" | "confirm" | "reject" | "cancel", confirmationId?: string) {
+  const value = getState();
+  if (!value.running || value.accessMode !== "full" || value.emergencyStopped) throw new Error("No active Full Access mission");
+  if (action === "confirm" || action === "reject") {
+    if (!confirmationId || value.missionControl?.pendingConfirmation?.id !== confirmationId) throw new Error("Confirmation is no longer pending");
+  }
+  controlFullAccessWorker(action, confirmationId);
+  // Worker acknowledgements are authoritative: a pause request waits for a safe
+  // action boundary and must never be displayed as already paused.
+  addEvent("OPERATOR_CONTROL", value.tasks[0]?.id ?? "runtime", `Operator requested ${action}`);
+}
+
 export function assertHybridMutation(request: Request) {
   const value = request.headers.get("x-jarvis-control");
   if (value !== "hybrid" && value !== "simulation") throw new Error("hybrid control header required");
@@ -89,6 +103,7 @@ export function hybridSnapshot(): Snapshot {
   const full = value.accessMode === "full";
   return {
     mode: "hybrid", status: value.status, emergencyStopped: Boolean(value.emergencyStopped),
+    ...(value.missionControl ? { missionControl: structuredClone(value.missionControl) } : {}),
     tasks: value.tasks.map(item => structuredClone(item)), events: value.events.map(item => structuredClone(item)),
     facts: [
       { key: "access.mode", value: value.accessMode },
@@ -166,6 +181,7 @@ async function runFullMission(task: TaskView) {
   const execute = task.nodes[1]!;
   const verify = task.nodes[2]!;
   value.running = true;
+  value.missionControl = { paused: false };
   value.status = "EXECUTING";
   task.status = "RUNNING";
   execute.status = "EXECUTING";
@@ -173,6 +189,29 @@ async function runFullMission(task: TaskView) {
   try {
     const result = await runFullAccessMission(task.title, abort.signal, (kind, message) => {
       if (kind === "emergency_stop") { emergencyStopHybrid(); return; }
+      if (kind === "mission_control") {
+        if (value.emergencyStopped || abort.signal.aborted || value.accessMode !== "full") return;
+        try {
+          const update = JSON.parse(message);
+          if (typeof update.paused !== "boolean" || typeof update.pauseRequested !== "boolean") return;
+          const pending = update.pendingConfirmation;
+          if (pending && (typeof pending.id !== "string" || !/^[a-f0-9]{32}$/.test(pending.id) ||
+              typeof pending.summary !== "string" || typeof pending.tool !== "string" || pending.summary.length > 2000 ||
+              typeof pending.details !== "string" || pending.details.length > 16000 ||
+              typeof pending.reason !== "string" || pending.reason.length > 2000)) return;
+          const before = value.missionControl;
+          value.missionControl = { paused: update.paused, pauseRequested: update.pauseRequested,
+            ...(pending ? { pendingConfirmation: { id: pending.id, summary: pending.summary, tool: pending.tool, category: pending.category,
+              details: pending.details, reason: pending.reason } } : {}) };
+          value.status = pending ? "WAITING_USER" : update.paused ? "PAUSED" : update.pauseRequested ? "PAUSING" : "EXECUTING";
+          task.status = pending ? "WAITING_USER" : update.paused ? "PAUSED" : "RUNNING";
+          if (pending && pending.id !== before?.pendingConfirmation?.id) addEvent("USER_ACTION_REQUIRED", task.id, pending.summary);
+          else if (update.paused && !before?.paused) addEvent("ACTION_PAUSED", task.id, "Mission paused at a safe action boundary");
+          else if (!update.paused && before?.paused) addEvent("ACTION_RESUMED", task.id, "Continuing the same mission from its current step");
+          value.version += 1;
+        } catch { /* Malformed progress cannot grant authority or change actions. */ }
+        return;
+      }
       if (kind === "task_graph") {
         if (value.emergencyStopped || abort.signal.aborted || value.accessMode !== "full") return;
         try { syncAgentGraph(task, validateTaskGraph(JSON.parse(message))); }
@@ -199,7 +238,7 @@ async function runFullMission(task: TaskView) {
       }
     }, Boolean(value.allowShell));
     if (abort.signal.aborted) throw new Error("Full Access mission stopped");
-    execute.status = "VERIFIED";
+    execute.status = result.status === "cancelled" ? "CANCELLED" : "VERIFIED";
 
     if (result.task_graph?.length) {
       syncAgentGraph(task, result.task_graph);
@@ -220,6 +259,15 @@ async function runFullMission(task: TaskView) {
       );
     }
 
+    if (result.status === "cancelled") {
+      verify.status = "CANCELLED";
+      task.status = "CANCELLED";
+      task.summary = result.result || "Mission cancelled; completed steps are preserved in its checkpoint";
+      value.status = "CANCELLED";
+      value.version += 1;
+      addEvent("TASK_CANCELLED", task.id, task.summary);
+      return;
+    }
     if (result.requires_user_action || result.status === "waiting_user") {
       verify.status = "WAITING_USER";
       task.status = "WAITING_USER";
@@ -256,6 +304,7 @@ async function runFullMission(task: TaskView) {
     addEvent("TASK_FAILED", task.id, task.summary);
   } finally {
     value.running = false;
+    delete value.missionControl;
     delete value.abort;
   }
 }
