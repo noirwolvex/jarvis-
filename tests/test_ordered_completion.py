@@ -48,6 +48,40 @@ class OrderedCompletionContractTests(unittest.TestCase):
                 2,
             )
 
+    def test_uncertain_launch_verified_by_fresh_readback_preserves_order(self):
+        from core.ordered_completion import verified_ordered_stage_count
+        with tempfile.TemporaryDirectory() as tmp:
+            state = TaskOrchestrator(tmp)
+            goal = "open Discord then open Calculator"
+            state.begin(goal)
+            state.record_tool("launch_installed_app", {"query": "Discord"},
+                              "VERIFIED: first application open", 1, 1, mutation=True)
+            state.record_tool("launch_installed_app", {"query": "Calculator"},
+                              "ERROR: second still loading", 1, 1, mutation=True)
+            state.record_tool("ui_inspect", {}, "VERIFIED: Calculator is open", 1, 2)
+            state.verify("second app open", True, "exact application location")
+            self.assertEqual(verified_action_count(
+                state.current, lambda name: name == "launch_installed_app"), 2)
+            self.assertEqual(verified_ordered_stage_count(
+                goal, state.current, lambda name: name == "launch_installed_app"), 2)
+
+    def test_not_dispatched_backend_cannot_claim_stage_after_read(self):
+        from core.ordered_completion import verified_ordered_stage_count
+        from types import SimpleNamespace
+        failed = SimpleNamespace(
+            name="ui_type", result="ERROR: target not writable", success=False,
+            execution_backend="not_dispatched", arguments={},
+        )
+        review = SimpleNamespace(verified=True, evidence="editor state read", evidence_trace_index=1)
+        current = SimpleNamespace(
+            traces=[failed, SimpleNamespace(name="ui_inspect", success=True, result="VERIFIED: editor",
+                                            execution_backend="windows_uia", arguments={})],
+            verifications=[review], plan=[],
+        )
+        self.assertEqual(verified_action_count(current, lambda n: n == "ui_type"), 0)
+        self.assertEqual(verified_ordered_stage_count(
+            "type hello then press enter", current, lambda n: n == "ui_type"), 0)
+
     def test_plain_read_only_evidence_does_not_cover_missing_action(self):
         with tempfile.TemporaryDirectory() as tmp:
             state = TaskOrchestrator(tmp)
