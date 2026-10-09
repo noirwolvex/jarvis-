@@ -669,11 +669,20 @@ Full Access execution profile:
                     # Independently enforce a conservative lower bound for goals
                     # with clearly separated imperative actions. Never infer that
                     # an unmatched read-only tool delivered a missing mutation.
-                    from .ordered_completion import explicit_action_count, verified_action_count
+                    from .ordered_completion import (
+                        explicit_action_count, verified_action_count, verified_ordered_stage_count
+                    )
                     required_actions = explicit_action_count(user_text)
                     if required_actions:
                         current = self.orchestrator.current
                         completed_actions = verified_action_count(current, self._is_mutation)
+                        # When adapter semantics are known, counting two identical
+                        # typing operations cannot satisfy a requested click + type.
+                        ordered_prefix = verified_ordered_stage_count(
+                            user_text, current, self._is_mutation
+                        )
+                        if ordered_prefix is not None:
+                            completed_actions = min(completed_actions, ordered_prefix)
                         current.metrics["ordered_actions_required"] = required_actions
                         current.metrics["ordered_actions_evidenced"] = completed_actions
                         if completed_actions < required_actions:
