@@ -25,6 +25,7 @@ jobs:
       - name: Generate consistent lockfile
         run: |
           npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm update sharp --package-lock-only --ignore-scripts --no-audit --no-fund
           npm audit fix --package-lock-only --ignore-scripts --no-fund
       - name: Save lockfile to security branch only
         run: |
