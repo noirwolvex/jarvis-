@@ -8,6 +8,8 @@ from __future__ import annotations
 import re
 from typing import Any, Callable
 
+from .execution_telemetry import input_not_dispatched
+
 
 _ACTIONS = (
     r"open|launch|start|click|press|select|choose|type|write|fill|"
@@ -59,10 +61,12 @@ def verified_action_count(current: Any, is_mutation: Callable[[str], bool]) -> i
     total = 0
     for index, trace in enumerate(getattr(current, "traces", []) or []):
         name = str(getattr(trace, "name", ""))
-        if (not getattr(trace, "success", False) or not is_mutation(name)
-                or name.startswith(("task_", "workflow_"))):
+        result = str(getattr(trace, "result", ""))
+        if (not is_mutation(name) or name.startswith(("task_", "workflow_"))
+                or input_not_dispatched(result)
+                or result.startswith(("PERMISSION_DENIED", "CANCELLED", "BROWSER_ACTION_BLOCKED"))):
             continue
-        direct = str(getattr(trace, "result", "")).startswith("VERIFIED:")
+        direct = getattr(trace, "success", False) and result.startswith("VERIFIED:")
         independently_verified = any(
             item.verified and str(item.evidence).strip()
             and item.evidence_trace_index >= index
@@ -163,12 +167,16 @@ def verified_ordered_stage_count(
     observed: list[str] = []
     for index, trace in enumerate(getattr(current, "traces", []) or []):
         name = str(getattr(trace, "name", ""))
-        if not getattr(trace, "success", False) or not is_mutation(name):
+        result = str(getattr(trace, "result", ""))
+        if (not is_mutation(name) or input_not_dispatched(result)
+                or result.startswith(("PERMISSION_DENIED", "CANCELLED", "BROWSER_ACTION_BLOCKED"))):
             continue
         stages = _KNOWN_TOOL_STAGES.get(name)
         if stages is None:
             return None  # Do not misclassify a custom/native adapter.
-        if not (str(trace.result).startswith("VERIFIED:") or any(
+        # An uncertain adapter error can still resolve safely when a fresh
+        # independent readback verifies its requested outcome. Never retry it.
+        if not ((getattr(trace, "success", False) and result.startswith("VERIFIED:")) or any(
             item.verified and str(item.evidence).strip()
             and item.evidence_trace_index >= index for item in verified
         )):
