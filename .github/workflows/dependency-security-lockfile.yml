@@ -1,0 +1,49 @@
+# One-time isolated dependency lockfile repair.
+# This workflow is scoped to the security branch and will be removed after verification.
+name: Dependency security lockfile refresh
+on:
+  push:
+    branches:
+      - fix/dependency-security-2026-10-09
+
+permissions:
+  contents: write
+
+jobs:
+  refresh-and-verify:
+    if: github.repository == 'noirwolvex/jarvis-'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: true
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+      - name: Generate consistent lockfile
+        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+      - name: Save lockfile to security branch only
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add package-lock.json
+          if ! git diff --cached --quiet; then
+            git commit -m "security: regenerate npm lockfile for patched dependencies"
+            git push origin HEAD:fix/dependency-security-2026-10-09
+          fi
+      - name: Install exactly locked dependencies
+        run: npm ci
+      - name: Verify no high or critical npm advisories
+        run: npm audit --audit-level=high
+      - name: Generate Prisma client
+        run: npm run db:generate
+      - name: Validate Prisma schema
+        run: npm run db:validate
+      - name: Typecheck
+        run: npm run typecheck
+      - name: Run JavaScript tests
+        run: npm test
+      - name: Build Control Center
+        run: npm run build
