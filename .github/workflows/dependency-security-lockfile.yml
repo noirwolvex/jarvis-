@@ -23,7 +23,9 @@ jobs:
           node-version: '22'
           cache: npm
       - name: Generate consistent lockfile
-        run: npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+        run: |
+          npm install --package-lock-only --ignore-scripts --no-audit --no-fund
+          npm audit fix --package-lock-only --ignore-scripts --no-fund
       - name: Save lockfile to security branch only
         run: |
           git config user.name "github-actions[bot]"
