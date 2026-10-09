@@ -587,6 +587,24 @@ Full Access execution profile:
                 tool_calls = getattr(message, "tool_calls", None) or []
                 if not tool_calls:
                     if self.orchestrator.needs_action_review():
+                        # An explicit negative readback is a failed postcondition,
+                        # not permission to advance or retry the uncertain input.
+                        # When the model has no further tools to propose, close the
+                        # checkpoint as incomplete rather than prompting forever.
+                        current = self.orchestrator.current
+                        recent_review = next(
+                            (record for record in reversed(current.verifications)
+                             if record.evidence_trace_index >= current.last_review_required_index),
+                            None,
+                        )
+                        if recent_review is not None and not recent_review.verified:
+                            result = (
+                                "Verification failed: the previous action's requested outcome "
+                                "was not confirmed. Checkpoint preserved; no automatic input replay."
+                            )
+                            self.memory.add("assistant", result)
+                            self.orchestrator.finish("incomplete", result)
+                            return result
                         self.messages.append({"role": "user", "content": "An action is still unverified. Inspect its result and use task_verify with observed evidence before completing the mission."})
                         continue
                     unfinished_workflows = [item["id"] for item in self.orchestrator.current.workflows if item["status"] != "completed"]
