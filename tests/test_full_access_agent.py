@@ -29,9 +29,32 @@ class FullAccessAgentPolicyTests(unittest.TestCase):
     def test_explicit_browser_action_does_not_inspect_unrelated_desktop(self):
         agent = object.__new__(FullAccessJarvisAgent)
         with patch("core.agent.JarvisAgent._browser_action_guard", return_value=None) as guard, \
+                patch("core.chrome_cdp.chrome_is_connected", return_value=True), \
                 patch("core.chrome_existing_window.read_existing_chrome") as read:
             self.assertIsNone(agent._browser_action_guard("interaction_type", {"surface": "browser"}))
         guard.assert_called_once_with("browser_click")
+        read.assert_not_called()
+
+    def test_auto_browser_target_checks_the_cdp_page_and_never_reads_another_window(self):
+        agent = object.__new__(FullAccessJarvisAgent)
+        with patch('core.full_access_agent._foreground_is_chrome', return_value=False), \
+                patch('core.chrome_cdp.chrome_is_connected', return_value=True), \
+                patch('core.agent.JarvisAgent._browser_action_guard', return_value='BROWSER_ACTION_BLOCKED: fixture') as guard, \
+                patch('core.chrome_existing_window.read_existing_chrome') as read:
+            result = agent._browser_action_guard('interaction_click', {
+                'browser_target': {'role': 'link', 'name': 'Open'}})
+        self.assertEqual(result, 'BROWSER_ACTION_BLOCKED: fixture')
+        guard.assert_called_once_with('browser_click')
+        read.assert_not_called()
+
+    def test_mixed_targets_are_rejected_before_any_window_or_cdp_guard(self):
+        agent = object.__new__(FullAccessJarvisAgent)
+        with patch('core.agent.JarvisAgent._browser_action_guard') as guard, \
+                patch('core.chrome_existing_window.read_existing_chrome') as read:
+            result = agent._browser_action_guard('interaction_type', {'surface': 'browser', 'title': 'Notepad',
+                'browser_target': {'role': 'textbox', 'name': 'Draft'}})
+        self.assertIn('rejected before input', result)
+        guard.assert_not_called()
         read.assert_not_called()
 
     def test_human_verification_pause_precedes_recovery(self) -> None:

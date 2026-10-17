@@ -95,8 +95,15 @@ class ToolRegistry:
                     if len(encoded.encode("utf-8")) > 65536:
                         raise ValueError("Tool arguments exceed 64 KiB")
                     self._validators[name].validate(arguments)
-                    dispatched = True
-                    result = spec.handler(**arguments)
+                    from .control_engines.scheduler import input_lane
+                    with input_lane(name):
+                        # Policy may have changed while another input held the lane.
+                        ok, reason = self.permissions.check(name, spec.risk, approved)
+                        if not ok:
+                            result = f"PERMISSION_DENIED: {reason}"
+                        else:
+                            dispatched = True
+                            result = spec.handler(**arguments)
         except ValidationError as exc:
             result = f"ERROR executing {name}: ValidationError: {argument_error(exc)}"
         except InputNotDispatchedError as exc:
@@ -117,7 +124,7 @@ class ToolRegistry:
         self.register(ToolSpec("open_application_and_type", "Open a Windows application without a command shell, detect the actual visible window, focus it, focus its main content area, and reliably enter and verify the requested text.", Risk.MEDIUM, {"type": "object", "properties": {"command": {"type": "string"}, "text": {"type": "string"}}, "required": ["command", "text"]}, _open_application_and_type))
         self.register(ToolSpec("open_url", "Open an HTTP(S) URL in the user's default browser.", Risk.LOW, {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, _open_url))
         self.register(ToolSpec("read_file", "Read a UTF-8 text file inside the configured JARVIS workspace.", Risk.LOW, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, _read_file))
-        self.register(ToolSpec("write_file", "Write or replace a UTF-8 text file inside the configured JARVIS workspace.", Risk.MEDIUM, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}, _write_file))
+        self.register(ToolSpec("write_file", "Write or replace a UTF-8 text file inside the configured JARVIS workspace and independently read back its exact bytes before reporting VERIFIED.", Risk.MEDIUM, {"type": "object", "properties": {"path": {"type": "string"}, "content": {"type": "string"}}, "required": ["path", "content"]}, _write_file))
         self.register(ToolSpec("list_directory", "List files and folders in a directory inside the configured workspace.", Risk.SAFE, {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]}, _list_directory))
         self.register(ToolSpec("take_screenshot", "Capture the primary monitor and save a timestamped screenshot for visual automation.", Risk.LOW, {"type": "object", "properties": {}, "additionalProperties": False}, _take_screenshot))
         self.register(ToolSpec("browser_navigate", "Launch or reuse a visible Chromium browser and navigate to an HTTP(S) URL.", Risk.MEDIUM, {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}, _browser_navigate))
@@ -381,8 +388,18 @@ def _write_file(path: str, content: str) -> str:
     target = _safe_path(path)
     record_backend("direct_filesystem", detail="Write file")
     target.parent.mkdir(parents=True, exist_ok=True)
-    target.write_text(content, encoding="utf-8")
-    return f"Wrote {len(content)} characters to {target}"
+    target.write_text(content, encoding="utf-8", newline="")
+    # A successful write return is delivery evidence only. Reopen the file and
+    # compare bytes so the next mission action does not need a model-mediated
+    # read/verify cycle. On failure retain uncertainty; never retry the write.
+    record_backend("direct_filesystem", phase="observe", detail="Verify written bytes")
+    expected = content.encode("utf-8")
+    if target.read_bytes() != expected:
+        raise RuntimeError("Written file failed exact readback verification; inspect it before retrying")
+    return "VERIFIED: " + json.dumps({
+        "path": str(target), "characters": len(content), "bytes": len(expected),
+        "verification": "exact_utf8_bytes", "verified": True,
+    }, ensure_ascii=False)
 
 
 def _list_directory(path: str) -> str:
@@ -464,5 +481,8 @@ def _desktop_hotkey(keys: list[str]) -> str:
             desktop_key_down(key)
     finally:
         for key in reversed(pressed):
-            desktop_key_up(key)
+            try:
+                desktop_key_up(key)
+            except Exception:
+                pass
     return f"Pressed hotkey: {'+'.join(keys)}"

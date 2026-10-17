@@ -166,7 +166,7 @@ class MissionMonitoringTests(unittest.TestCase):
 class ResponsiveInputTests(unittest.TestCase):
     def test_pointer_samples_have_no_pause_and_keep_foreground_binding(self):
         from core.desktop_control_tools import move_pointer
-        fake = SimpleNamespace(position=Mock(side_effect=[SimpleNamespace(x=0, y=0), SimpleNamespace(x=-40, y=10)]), moveTo=Mock())
+        fake = SimpleNamespace(position=Mock(side_effect=[SimpleNamespace(x=0, y=0), SimpleNamespace(x=0, y=0), SimpleNamespace(x=-40, y=10)]), moveTo=Mock())
         with patch.dict(sys.modules, {"pyautogui": fake}), patch("core.desktop_control_tools._windows_only"), \
              patch("core.desktop_observation.foreground_identity", side_effect=[12, 12]), \
              patch("core.desktop_control_tools.time.sleep") as sleep:

@@ -315,6 +315,52 @@ class JarvisAgent:
             return None  # A date/unknown delay is not permission to retry sooner.
         return delay if math.isfinite(delay) and 0 <= delay <= 3 else None
 
+    @staticmethod
+    def _minute_quota_retry_delay(exc: Exception, *, max_delay: float = 30) -> float | None:
+        """Honor one short, explicit per-minute cooldown; never retry billing/daily quotas."""
+        if getattr(exc, "status_code", None) != 429:
+            return None
+        body = getattr(exc, "body", None)
+        if isinstance(body, list) and len(body) == 1:
+            body = body[0]
+        if not isinstance(body, dict):
+            return None
+        body = body.get("error", body)
+        if not isinstance(body, dict) or not isinstance(body.get("details"), list):
+            return None
+        violations, delays = [], []
+        for detail in body["details"]:
+            if not isinstance(detail, dict):
+                return None
+            if detail.get("@type") == "type.googleapis.com/google.rpc.QuotaFailure":
+                rows = detail.get("violations")
+                if not isinstance(rows, list) or not rows:
+                    return None
+                violations.extend(rows)
+            if detail.get("@type") == "type.googleapis.com/google.rpc.RetryInfo":
+                value = detail.get("retryDelay")
+                if not isinstance(value, str) or not value.endswith("s"):
+                    return None
+                try:
+                    delays.append(float(value[:-1]))
+                except ValueError:
+                    return None
+        if not violations or any(not isinstance(row, dict)
+                or "perminute" not in str(row.get("quotaId", "")).casefold()
+                or "perday" in str(row.get("quotaId", "")).casefold()
+                for row in violations):
+            return None
+        try:
+            limits = [float(row.get("quotaValue", 0)) for row in violations]
+        except (ValueError, TypeError):
+            return None
+        if any(not math.isfinite(limit) or limit <= 0 for limit in limits):
+            return None
+        if not delays or any(not math.isfinite(delay) or not 0 <= delay <= max_delay for delay in delays):
+            return None
+        # RetryInfo can round below the provider's human-readable fractional delay.
+        return max(delays) + 1.0
+
     def _primary_completion(self, kwargs: dict[str, Any], check_cancelled: Callable[[], None]):
         for attempt in range(2):
             check_cancelled()
@@ -333,6 +379,15 @@ class JarvisAgent:
             except Exception as exc:
                 check_cancelled()
                 delay = self._transient_retry_delay(exc) if attempt == 0 and self._fallback_client is None else None
+                if delay is None and attempt == 0 and self._fallback_client is None:
+                    delay = self._minute_quota_retry_delay(exc)
+                    if delay is not None:
+                        current = getattr(getattr(self, "orchestrator", None), "current", None)
+                        if current is not None:
+                            current.metrics["provider_cooldown_ms"] = current.metrics.get("provider_cooldown_ms", 0) + round(delay * 1000)
+                        emit = getattr(self, "_active_emit", None)
+                        if emit:
+                            emit(AgentEvent("status", f"AI provider requested a {delay:g}s per-minute cooldown. Waiting once; mission progress is preserved."))
                 if delay is None:
                     raise
                 # Full Access still owns the overall request deadline. Cancellation
@@ -352,6 +407,7 @@ class JarvisAgent:
                 raise RuntimeError("CANCELLED: Planning request was abandoned")
 
         check_cancelled()
+        self._provider_pause_retry_seconds = None
         kwargs = dict(kwargs)
         kwargs["model"] = self.model
         if getattr(self, "reasoning_effort", ""):
@@ -378,6 +434,10 @@ class JarvisAgent:
                         f"Upstream response: {self._provider_error_summary(exc)}"
                     ) from exc
                 if rate_limited:
+                    # Expose only validated minute-reset metadata to a caller that
+                    # explicitly chooses bounded continuation. Never infer this
+                    # from an error's prose or retry a daily/billing quota.
+                    self._provider_pause_retry_seconds = self._minute_quota_retry_delay(exc, max_delay=60)
                     raise RuntimeError(
                         "AI_PROVIDER_RATE_LIMITED: The configured AI provider exhausted its current quota "
                         f"({primary}). The active mission checkpoint was preserved. "

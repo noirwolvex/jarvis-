@@ -37,6 +37,24 @@ class RustEngineTests(unittest.TestCase):
         client._session = "fixture"
         return client
 
+    def test_local_encoding_rejection_does_not_consume_wire_sequence(self):
+        for action in ({"kind": "type_text", "text": "\ud800"},
+                       {"kind": "type_text", "text": "x" * 262144},
+                       {"kind": "fixture", "invalid": object()}):
+            with self.subTest(action_kind=action["kind"]):
+                client = self.fixture_client()
+                with self.assertRaises((ValueError, TypeError)):
+                    client._request(action, mutating=True)
+                client._socket.sendall.assert_not_called()
+                self.assertEqual(client._sequence, 0)
+                def response(sock):
+                    request = json.loads(sock.sendall.call_args.args[0][4:])
+                    self.assertEqual(request["seq"], 1)
+                    return {"type": "result", "request_id": request["request_id"],
+                            "ok": True, "data": {"ready": True}}
+                with patch.object(client, "_read_frame", side_effect=response):
+                    self.assertEqual(client.status(), {"ready": True})
+
     def test_idle_and_aged_sessions_renew_before_a_single_dispatch(self):
         for connected_at, last_activity, should_reconnect in [(100, 199, False), (100, 174, True), (-80, 199, True)]:
             with self.subTest(connected_at=connected_at, last_activity=last_activity):

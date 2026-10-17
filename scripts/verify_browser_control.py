@@ -144,6 +144,22 @@ def verify_ordered_workflow(registry, runtime, directory: Path, base: str) -> di
         observed = agent._execute_tool("computer_observe", {"surface": "browser", "visual": "never"}, approved=True)
         if not observed.startswith("VERIFIED:") or not json.loads(observed[len("VERIFIED: "):])["semantic"]["nodes"]:
             raise RuntimeError("Live combined perception did not resolve the owned controls")
+        invalid_targets = [
+            {"node_id": "old-snapshot-node"},
+            {"role": "text", "name": "Approval code"},
+        ]
+        for index, invalid_target in enumerate(invalid_targets):
+            invalid_steps = [steps[0], {
+                **steps[1], "checkpoint": call("interaction_wait", invalid_target, state="visible"),
+            }]
+            rejected = agent._execute_tool("workflow_execute", {
+                "workflow_id": f"invalid-checkpoint-fixture-{index}", "steps": invalid_steps,
+            }, approved=True)
+            if "no workflow actions dispatched" not in rejected or agent.orchestrator.current.workflows:
+                raise RuntimeError("Impossible checkpoint was not rejected before workflow creation")
+            untouched = runtime.call("page", operation="wait_state", target=draft, state="text", text="", timeout_ms=0)
+            if untouched.get("matched") is not True:
+                raise RuntimeError("Invalid checkpoint allowed an earlier editor mutation")
         result = agent._execute_tool("workflow_execute", arguments, approved=True)
         if not result.startswith("VERIFIED:"):
             raise RuntimeError(f"Live ordered workflow failed: {result}")
@@ -157,6 +173,8 @@ def verify_ordered_workflow(registry, runtime, directory: Path, base: str) -> di
         raise RuntimeError("Consequential fixture activation did not request exactly one confirmation")
     return {"steps": len(steps), "completed": True, "model_calls": model_calls, "resume_replays": 0,
             "one_time_confirmations": len(confirmations), "semantic_perception": True,
+            "invalid_checkpoint_rejected_before_input": True,
+            "unsupported_role_rejected_before_input": True,
             "duration_ms": round((time.perf_counter() - started) * 1000, 2)}
 
 
@@ -229,6 +247,8 @@ def main() -> int:
                 if runtime.call("page", operation="url") != base + "/next":
                     raise RuntimeError("Next-page URL did not verify")
                 workflow = verify_ordered_workflow(registry, runtime, profile, base)
+                from scripts.control_engine_qualification import qualify_typed_engines
+                typed_engines = qualify_typed_engines(registry, runtime, profile, base)
                 interface_matrix = qualify_interface(registry, runtime, base, server.interface_events)
                 tabs = runtime.call("tabs")
                 if len(tabs) != 1:
@@ -269,6 +289,7 @@ def main() -> int:
                     "click": True, "scroll": True, "navigation": True, "tabs": len(tabs),
                     "explicit_same_window_new_tab": True, "current_tab_selection": selection_status,
                     "ordered_workflow": workflow,
+                    "typed_control_engines": typed_engines,
                     "interface_matrix": interface_matrix,
                     "human_verification_stop": challenge_stop,
                     "last_action_duration_ms": timings,

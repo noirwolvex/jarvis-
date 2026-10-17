@@ -40,20 +40,21 @@ impl Motion {
         &self,
         mut elapsed: impl FnMut() -> Duration,
         mut wait: impl FnMut(Duration),
-        mut guard: impl FnMut() -> Result<()>,
+        mut guard: impl FnMut((i32, i32)) -> Result<()>,
         mut deliver: impl FnMut(i32, i32) -> Result<()>,
     ) -> Result<()> {
         let mut previous = self.from;
         loop {
-            guard()?;
+            guard(previous)?;
             let now = elapsed();
-            let done = now >= self.duration || self.from == self.to;
             let point = self.position(now);
-            if done || point != previous {
+            // Once rounding has reached the exact destination, more ticks only
+            // add latency. Do not emit a redundant move for an unchanged point.
+            if point != previous {
                 deliver(point.0, point.1)?;
                 previous = point;
             }
-            if done {
+            if point == self.to {
                 return Ok(());
             }
             // Include OS input/verification time in the budget instead of adding a full
@@ -80,7 +81,7 @@ mod tests {
             .run(
                 || now.get(),
                 |delay| now.set(now.get() + delay),
-                || Ok(()),
+                |_| Ok(()),
                 |x, y| {
                     points.borrow_mut().push((x, y));
                     now.set(now.get() + Duration::from_millis(3));
@@ -105,7 +106,7 @@ mod tests {
         let result = Motion::new((0, 0), (100, 100), 100).unwrap().run(
             || Duration::ZERO,
             |_| stopped.set(true),
-            || {
+            |_| {
                 if stopped.get() {
                     Err(Error::Emergency)
                 } else {
@@ -130,7 +131,7 @@ mod tests {
                 .run(
                     || Duration::from_millis(150),
                     |_| panic!("no wait expected"),
-                    || Ok(()),
+                    |_| Ok(()),
                     |x, y| {
                         points.borrow_mut().push((x, y));
                         Ok(())
@@ -158,7 +159,7 @@ mod tests {
         let result = Motion::new((0, 0), (1, 1), 0).unwrap().run(
             || Duration::ZERO,
             |_| {},
-            || Ok(()),
+            |_| Ok(()),
             |_, _| {
                 attempts.set(attempts.get() + 1);
                 Err(Error::Denied("fixture foreground changed"))
@@ -166,5 +167,73 @@ mod tests {
         );
         assert!(result.is_err());
         assert_eq!(attempts.get(), 1);
+    }
+
+    #[test]
+    fn already_at_destination_checks_authority_without_moving_or_waiting() {
+        let guards = Cell::new(0);
+        Motion::new((12, 34), (12, 34), 2_000)
+            .unwrap()
+            .run(
+                || Duration::ZERO,
+                |_| panic!("no wait for an unchanged pointer"),
+                |point| {
+                    assert_eq!(point, (12, 34));
+                    guards.set(guards.get() + 1);
+                    Ok(())
+                },
+                |_, _| panic!("no redundant move"),
+            )
+            .unwrap();
+        assert_eq!(guards.get(), 1);
+    }
+
+    #[test]
+    fn single_pixel_move_finishes_as_soon_as_it_reaches_destination() {
+        let now = Cell::new(Duration::ZERO);
+        let points = RefCell::new(Vec::new());
+        Motion::new((0, 0), (1, 0), 80)
+            .unwrap()
+            .run(
+                || now.get(),
+                |delay| now.set(now.get() + delay),
+                |_| Ok(()),
+                |x, y| {
+                    points.borrow_mut().push((x, y));
+                    Ok(())
+                },
+            )
+            .unwrap();
+        assert_eq!(now.get(), Duration::from_millis(40));
+        assert_eq!(*points.borrow(), vec![(1, 0)]);
+    }
+
+    #[test]
+    fn pointer_displacement_during_wait_prevents_overwriting_user_movement() {
+        let now = Cell::new(Duration::from_millis(16));
+        let actual = Cell::new((0, 0));
+        let points = RefCell::new(Vec::new());
+        let result = Motion::new((0, 0), (100, 100), 80).unwrap().run(
+            || now.get(),
+            |delay| {
+                now.set(now.get() + delay);
+                actual.set((500, 500));
+            },
+            |expected| {
+                if actual.get() != expected {
+                    Err(Error::Denied("pointer moved externally"))
+                } else {
+                    Ok(())
+                }
+            },
+            |x, y| {
+                actual.set((x, y));
+                points.borrow_mut().push((x, y));
+                Ok(())
+            },
+        );
+        assert!(matches!(result, Err(Error::Denied(_))));
+        assert_eq!(points.borrow().len(), 1);
+        assert_eq!(actual.get(), (500, 500));
     }
 }

@@ -10,6 +10,29 @@ from core.orchestrator import TaskOrchestrator
 
 
 class OrchestratorTests(unittest.TestCase):
+    def test_workflow_readback_failure_never_suggests_replaying_save(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = TaskOrchestrator(tmp)
+            orchestrator.begin("Open and save the draft")
+            for result in ("ERROR: Checkpoint pending. save draft: timeout",
+                           "ERROR: Delivered action has no verified outcome; open the file"):
+                with self.subTest(result=result):
+                    hint = orchestrator.recovery_hint(result, "workflow_execute")
+                    self.assertIn("retries only the declared read-only checkpoint", hint)
+                    self.assertIn("Do not repeat an already delivered", hint)
+                    self.assertNotIn("before repeating the action", hint)
+
+    def test_bookkeeping_rejection_does_not_suggest_replaying_ui_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            orchestrator = TaskOrchestrator(tmp)
+            orchestrator.begin("Open and save the draft")
+            hint = orchestrator.recovery_hint(
+                "ERROR: Cannot complete a mutating plan step from observation-only evidence; execute click/select/open/type/send first",
+                "task_update_step")
+        self.assertIn("plan/evidence bookkeeping rejection", hint)
+        self.assertIn("Do not repeat a delivered", hint)
+        self.assertNotIn("Inspect the foreground dialog", hint)
+
     def test_tracks_failures_and_recovery(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             with patch.dict("os.environ", {"JARVIS_WORKSPACE": tmp}, clear=False):

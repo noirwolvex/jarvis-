@@ -7,11 +7,12 @@ import os
 import time
 import uuid
 from pathlib import PureWindowsPath
-from urllib.parse import urlsplit, unquote
+from urllib.parse import urlsplit
 from urllib.request import url2pathname
 
 from .permissions import Risk
 from .tools import ToolSpec
+from .execution_telemetry import record_backend
 
 
 _DOWNLOADS_ID = uuid.UUID("374de290-123f-4565-9164-39c4925e467b")
@@ -40,6 +41,7 @@ def _downloads_path() -> str:
     shell.SHGetKnownFolderPath.restype = ctypes.c_long
     raw = ctypes.c_wchar_p()
     guid = Guid.from_buffer_copy(_DOWNLOADS_ID.bytes_le)
+    record_backend("windows_api", phase="resolve", detail="Resolve the Windows Downloads known folder")
     status = shell.SHGetKnownFolderPath(ctypes.byref(guid), 0, None, ctypes.byref(raw))
     if status != 0:
         raise RuntimeError(f"Windows could not resolve Downloads (HRESULT=0x{status & 0xffffffff:08x})")
@@ -61,6 +63,7 @@ def _folder_windows(path: str) -> list[int]:
     hwnds: set[int] = set()
     pythoncom.CoInitialize()
     try:
+        record_backend("windows_shell_com", phase="observe", detail="Read Explorer folder locations")
         windows = Dispatch("Shell.Application").Windows()
         for item in windows:
             try:
@@ -69,12 +72,14 @@ def _folder_windows(path: str) -> list[int]:
                 url = urlsplit(str(item.LocationURL))
                 if url.scheme.casefold() != "file" or url.netloc not in ("", "localhost"):
                     continue
-                visited = os.path.normcase(os.path.realpath(url2pathname(unquote(url.path))))
+                # url2pathname already decodes URL escapes. Decoding twice changes
+                # literal percent sequences in legitimate folder names.
+                visited = os.path.normcase(os.path.realpath(url2pathname(url.path)))
                 if visited == target:
                     hwnd = int(item.HWND)
                     if hwnd > 0:
                         hwnds.add(hwnd)
-            except (AttributeError, OSError, TypeError, ValueError):
+            except (AttributeError, OSError, TypeError, ValueError, pythoncom.com_error):
                 continue  # An unreadable location is not verification.
     finally:
         pythoncom.CoUninitialize()
@@ -85,16 +90,20 @@ def _foreground_hwnd() -> int:
     return int(ctypes.windll.user32.GetForegroundWindow() or 0)
 
 
-def _verify_existing_folder_window(hwnd: int, path: str) -> bool:
+def _verify_existing_folder_window(hwnd: int, path: str, *, activate: bool = True) -> bool:
     """Ensure the foreground HWND still belongs to the exact known folder."""
     from .app_tools import _focus
     from .process_control import check_cancelled
 
     check_cancelled()
-    if not _focus(hwnd):
+    if activate and not _focus(hwnd):
         return False
     check_cancelled()
-    return _foreground_hwnd() == hwnd and hwnd in _folder_windows(path)
+    if _foreground_hwnd() != hwnd or hwnd not in _folder_windows(path):
+        return False
+    check_cancelled()
+    # COM reads can outlive a focus change. Require a final independent read.
+    return _foreground_hwnd() == hwnd
 
 
 def open_known_folder(folder: str = "Downloads", timeout_seconds: float = 8) -> str:
@@ -106,26 +115,34 @@ def open_known_folder(folder: str = "Downloads", timeout_seconds: float = 8) -> 
         raise ValueError("Known-folder navigation timeout must be 2-20 seconds")
 
     from .process_control import check_cancelled
-    from .desktop_input import InputDeliveryError
+    from .desktop_input import InputDeliveryError, InputNotDispatchedError
 
     check_cancelled()
     target = _downloads_path()
     matches = _folder_windows(target)
     if len(matches) > 1:
-        raise RuntimeError("Several Explorer windows show Downloads; select one explicitly")
+        raise InputNotDispatchedError("Several Explorer windows show Downloads; select one explicitly")
     reused = bool(matches)
     if not reused:
         # Exactly one dispatch. An unverified launch is never automatically retried.
         check_cancelled()
+        record_backend("windows_api", detail="Open the resolved Downloads folder")
         os.startfile(target)
 
     deadline = time.monotonic() + float(timeout_seconds)
+    activation_attempts: set[int] = set()
     while time.monotonic() < deadline:
         check_cancelled()
         matches = _folder_windows(target)
         if len(matches) > 1:
             raise InputDeliveryError("Downloads opened but multiple matching Explorer windows exist")
-        if matches and _verify_existing_folder_window(matches[0], target):
+        verified = False
+        if matches:
+            hwnd = matches[0]
+            activate = hwnd not in activation_attempts
+            activation_attempts.add(hwnd)
+            verified = _verify_existing_folder_window(hwnd, target, activate=activate)
+        if verified:
             return "VERIFIED: " + json.dumps({
                 "action": "open_known_folder",
                 "folder": "Downloads",

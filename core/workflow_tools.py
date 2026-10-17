@@ -83,7 +83,8 @@ class WorkflowExecutor:
         if (not spec or is_reference_tool(name)
                 or name.startswith(("task_", "workflow_", "desktop_")) or name in _EXCLUDED
                 or checkpoint and (name not in _CHECKPOINTS or spec.risk > Risk.LOW)):
-            raise ValueError(f"Tool {name} is not allowed in this workflow position")
+            raise ValueError(f"Workflow preflight rejected {name}: tool is not allowed in this workflow position; "
+                             "no workflow actions dispatched")
         try:
             self.agent.tools._validators[name].validate(args)
         except ValidationError as exc:
@@ -122,6 +123,21 @@ class WorkflowExecutor:
             if workflow["program"] != program:
                 raise ValueError("A workflow ID binds an immutable ordered program; use its original steps to resume")
             self._validate_journal(workflow, program)
+        else:
+            # A snapshot binding cannot authorize a sequence of page mutations.
+            # Catch this before the first click, while the model can still supply
+            # live semantic targets without leaving an immutable partial journal.
+            used_versions = set()
+            for call in program:
+                args = call["arguments"]
+                version = args.get("expected_version")
+                if version and call["tool"].startswith(("browser_", "interaction_")) and agent._is_mutation(call["tool"]):
+                    if version in used_versions:
+                        raise ValueError(
+                            f"Workflow preflight rejected step {call['id']}: expected_version is reused after a page mutation. "
+                            "Use observed unique role/name targets without expected_version, or split the batch at a fresh observation; "
+                            "no workflow actions dispatched")
+                    used_versions.add(version)
         # Completed effects and effects awaiting a readback will not be dispatched
         # again. Validate only remaining calls, while still preflighting the whole
         # remaining program before its first side effect.
@@ -265,8 +281,13 @@ def register_workflow_tools(agent) -> None:
     step["required"] += ["id", "description"]
     agent.tools.register(ToolSpec("workflow_execute",
         "Compile all known mission clauses into 1-32 ordered semantic/native tool steps, then execute in one call. "
-        "Every step uses normal policy and is durably journaled. Add a read-only ui_wait_state/browser_wait_state checkpoint "
-        "when a tool reports delivery only. Completed steps are never replayed when resuming the same immutable workflow_id. "
+        "Every step uses normal policy and is durably journaled. Each arguments object must match that tool's exposed schema. "
+        "For interaction_* use surface=browser and browser_target; for browser_wait_state use target. "
+        "interaction_type requires text. Use unique role/name targets resolved live across steps, not one stale expected_version. "
+        "Add a read-only interaction_wait/ui_wait_state/browser_wait_state checkpoint "
+        "when its locator and expected outcome are known. Never invent an unobserved destination heading or role=text. "
+        "For unfamiliar navigation, end the batch after that action, inspect its result, then task_verify and workflow_review "
+        "without replaying the navigation. Completed steps are never replayed when resuming the same immutable workflow_id. "
         "On failure inspect the live state; uncertain sends/writes require task_verify then workflow_review before continuation. "
         "Use ui_batch for trivial UI actions sharing a meaningful checkpoint. Raw coordinates and recursive/task tools are excluded.",
         Risk.MEDIUM, {"type": "object", "properties": {"workflow_id": {"type": "string", "pattern": "^[A-Za-z0-9_-]{1,80}$"},

@@ -199,6 +199,81 @@ test("completion rejects missing evidence and retains actionable failure checkpo
   assert.throws(() => validateMissionResult({ ok: false, result: "Provider timeout", task_id: "task-1-01234567" }), /Provider timeout.*checkpoint/);
 });
 
+test("provider checkpoints before any tool remain waiting without inventing completion evidence", () => {
+  const result = {
+    ok: true, action: "full_access_mission", access_mode: "full", status: "waiting_user",
+    result: "AI_PROVIDER_RATE_LIMITED: Planning paused; checkpoint preserved", task_id: "task-1-01234567",
+    tools_used: 0, failures: 0, recoveries: 0, verifications: 0, verified: false,
+    read_only_observation_verified: false, requires_user_action: true, mission_completed: false,
+    incomplete_steps: ["one"], engine_visibility: [],
+    task_graph: [{ id: "one", action: "navigate", description: "Open Downloads", dependencies: [], status: "QUEUED" }],
+  };
+  assert.equal(validateMissionResult(result).status, "waiting_user");
+  for (const tools_used of [-1, 0.5, NaN, undefined]) {
+    assert.throws(() => validateMissionResult({ ...result, tools_used }), /executed mission/);
+  }
+  for (const changes of [
+    { verified: true }, { read_only_observation_verified: true }, { verifications: 1 },
+    { engine_visibility: [{ tool: "open_known_folder", success: true, duration_ms: 1 }] },
+  ]) {
+    assert.throws(() => validateMissionResult({ ...result, ...changes }), /Unexecuted checkpoint/);
+  }
+  for (const status of ["DELIVERED", "VERIFIED", "COMPLETED"]) {
+    assert.throws(() => validateMissionResult({ ...result,
+      task_graph: [{ ...result.task_graph[0], status }] }), /Unexecuted checkpoint/);
+  }
+  assert.throws(() => validateMissionResult({ ...result,
+    task_graph: [{ ...result.task_graph[0], verification_result: "VERIFIED" }] }), /Unexecuted checkpoint/);
+  assert.throws(() => validateMissionResult({ ...result, task_id: " " }), /checkpoint status/);
+  assert.throws(() => validateMissionResult({ ...result, result: " " }), /checkpoint status/);
+  assert.throws(() => validateMissionResult({ ...result, status: "failed" }), /checkpoint status/);
+  assert.throws(() => validateMissionResult({ ...result, status: "completed", mission_completed: true,
+    requires_user_action: false, incomplete_steps: [], task_graph: [], verified: true }), /evidence/);
+  // Existing verified work may be retained when a later provider request pauses.
+  assert.equal(validateMissionResult({ ...result, tools_used: 1, verified: true, verifications: 1 }).status, "waiting_user");
+});
+
+test("zero-tool provider pause stays waiting in mission history", { skip: process.platform !== "win32" }, async () => {
+  const globals = globalThis as any;
+  delete globals.jarvisHybridV3;
+  const child = new EventEmitter() as any;
+  child.exitCode = null;
+  child.killed = false;
+  child.stdin = { write: (_data: string, callback?: () => void) => callback?.() };
+  child.kill = () => { child.killed = true; child.exitCode = 1; child.emit("exit", 1); };
+  const worker = { revision: FULL_ACCESS_WORKER_REVISION, sourceFingerprint: workerSourceFingerprint(), child,
+    pending: new Map(), buffer: "", stderr: "" };
+  globals.jarvisFullAccessWorkerV1 = worker;
+  try {
+    setHybridAccessMode("full");
+    submitHybridMission("A mocked provider pause; no desktop interaction");
+    const pending = worker.pending.values().next().value;
+    assert.ok(pending);
+    clearTimeout(pending.timer);
+    pending.abortCleanup?.();
+    worker.pending.clear();
+    pending.resolve(validateMissionResult({
+      ok: true, action: "full_access_mission", access_mode: "full", status: "waiting_user",
+      result: "AI_PROVIDER_RATE_LIMITED: Planning paused; checkpoint preserved", task_id: "task-1-01234567",
+      tools_used: 0, failures: 0, recoveries: 0, verifications: 0, verified: false,
+      read_only_observation_verified: false, requires_user_action: true, mission_completed: false,
+      incomplete_steps: ["one"],
+      task_graph: [{ id: "one", action: "navigate", description: "Open Downloads", dependencies: [], status: "QUEUED" }],
+    }));
+    await new Promise(resolve => setImmediate(resolve));
+    const snapshot = hybridSnapshot();
+    assert.equal(snapshot.status, "WAITING_USER");
+    assert.equal(snapshot.tasks[0]?.status, "WAITING_USER");
+    assert.match(snapshot.tasks[0]?.summary ?? "", /AI_PROVIDER_RATE_LIMITED/);
+    assert.equal(snapshot.tasks[0]?.nodes[0]?.status, "QUEUED");
+    assert.ok(!snapshot.events.some(event => event.type === "TASK_FAILED" || event.type === "TASK_COMPLETED"));
+  } finally {
+    child.kill();
+    delete globals.jarvisFullAccessWorkerV1;
+    delete globals.jarvisHybridV3;
+  }
+});
+
 test("live task graph validation rejects ambiguous identities, missing dependencies and invalid phases", () => {
   const node = { id: "one", action: "type", description: "Type fixture", dependencies: [], status: "RUNNING" };
   assert.equal(validateTaskGraph([node])[0]?.id, "one");

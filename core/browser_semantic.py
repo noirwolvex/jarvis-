@@ -10,6 +10,7 @@ import time
 from typing import Any, Callable
 
 from .desktop_input import InputNotDispatchedError
+from .browser_roles import BROWSER_ROLES, validate_browser_role
 
 
 _CHALLENGE_JS = r"""() => {
@@ -103,6 +104,18 @@ _SNAPSHOT_JS = r"""({force, max_nodes}) => {
   const selector = 'a[href],button,input:not([type="hidden"]),textarea,select,summary,[role],[contenteditable]:not([contenteditable="false"]),[tabindex],[onclick],nav,main,form,dialog,h1,h2,h3,h4,h5,h6,progress,iframe,canvas';
   const interactive = el => el.matches('a[href],button,input:not([type="hidden"]),textarea,select,summary,[onclick]')
     || el.isContentEditable || el.tabIndex >= 0;
+  const frameSelector = el => {
+    // Give the planner an observed, unique frame locator instead of asking it
+    // to guess whether an accessible label came from title, name or aria-label.
+    if (el.tagName !== 'IFRAME' || el.getRootNode() !== document || window !== window.top) return undefined;
+    for (const attr of ['id','title','name','src']) {
+      const value = el.getAttribute(attr);
+      if (!value) continue;
+      const selector = `iframe[${attr}="${CSS.escape(value)}"]`;
+      if (selector.length <= 500 && document.querySelectorAll(selector).length === 1) return selector;
+    }
+    return undefined; // Duplicate/unnamed frames still require explicit resolution.
+  };
   const candidates = []; const geometry = new Map(); const modal = new Map();
   const roots = [document]; let scanned = 0;
   while (roots.length && scanned < 3000) {
@@ -139,7 +152,9 @@ _SNAPSHOT_JS = r"""({force, max_nodes}) => {
     let parent = composedParent(el); while (parent && !ids.has(parent)) parent = composedParent(parent);
     const r = geometry.get(el);
     const accessibleName = name(el);
+    const row = composedClosest(el, 'tr,[role="row"],[role="listitem"]');
     return {node_id:ids.get(el), parent:ids.get(parent) || null, role:role(el), name:accessibleName,
+      context_text:row ? text(safeText(row)) : undefined,
       tag:el.tagName.toLowerCase(), id:text(el.id), disabled:el.matches(':disabled')
         || composedClosest(el, '[aria-disabled]')?.getAttribute('aria-disabled') === 'true',
       focused:el === active, interactive:interactive(el), editable:el.isContentEditable,
@@ -153,15 +168,18 @@ _SNAPSHOT_JS = r"""({force, max_nodes}) => {
       selected:el.getAttribute('aria-selected'), checked:el.getAttribute('aria-checked') ?? (el.type === 'checkbox' ? !!el.checked : null),
       bounds:{x:Math.round(r.x),y:Math.round(r.y),width:Math.round(r.width),height:Math.round(r.height)},
       href:el.tagName === 'A' ? String(el.href).slice(0,1024) : undefined,
-      frame_url:el.tagName === 'IFRAME' ? String(el.src).slice(0,1024) : undefined};
+      frame_url:el.tagName === 'IFRAME' ? String(el.src).slice(0,1024) : undefined,
+      frame_selector:frameSelector(el)};
   });
   const result = {version,url:location.href,title:document.title,ready_state:document.readyState,
-    viewport:{width:innerWidth,height:innerHeight,scroll_x:scrollX,scroll_y:scrollY},
+    viewport:{width:innerWidth,height:innerHeight,scroll_x:scrollX,scroll_y:scrollY,
+      max_scroll_x:Math.max(0,(document.scrollingElement?.scrollWidth || innerWidth)-innerWidth),
+      max_scroll_y:Math.max(0,(document.scrollingElement?.scrollHeight || innerHeight)-innerHeight)},
     focused_node:ids.get(active) || null, has_focus:document.hasFocus(), nodes,
     truncated:candidates.length > selected.length || scanned > 3000,
     coverage_gaps:[...(candidates.some(el => el.tagName === 'IFRAME') ? ['uninspected_embedded_content'] : []),
       ...(candidates.some(el => el.tagName === 'CANVAS') ? ['visual_only_regions'] : [])],
-    note:'Viewport controls only; field values omitted. Inspect a selected iframe separately.',cached:false};
+    note:'Viewport controls only; field values omitted. For an iframe, copy its frame_selector into a separate inspection before targeting its inner controls.',cached:false};
   s.cache = {limit:max_nodes,url:location.href,created:performance.now(),result}; return result;
 }"""
 
@@ -286,7 +304,14 @@ def _frame(page: Any, selector: str = "") -> Any:
 
 
 def _target(page: Any, target: dict[str, Any], expected_version: str = "") -> Any:
+    validate_browser_role(target)
     if target.get("node_id"):
+        if str(target["node_id"]).startswith("dom:"):
+            raise ValueError(
+                "Scene IDs (dom:...) are not browser node_id values. Copy the observed node's "
+                "target.browser_target instead; prefer its exact role/name. For browser_semantic_action "
+                "pass that browser_target as target. Do not reuse snapshot versions after input."
+            )
         if not expected_version:
             raise ValueError("Observed node targets require expected_version from their snapshot")
         handle = page.evaluate_handle(_NODE_JS, {"node_id": target["node_id"], "version": expected_version})
@@ -326,6 +351,7 @@ def _wait_state(page: Any, args: dict[str, Any], check: Callable[[], None], oute
     if state not in {"visible", "hidden", "enabled", "text", "focused"}:
         raise ValueError("Unsupported wait state")
     target = args["target"]
+    validate_browser_role(target)
     if target.get("node_id"):
         raise ValueError("State waits require a stable semantic locator, not a snapshot node")
     deadline = time.monotonic() + max(0, min(int(args.get("timeout_ms", 5000)), timeout_limit_ms, 60000)) / 1000
@@ -588,10 +614,13 @@ def register_browser_semantic_tools(registry: Any) -> None:
     from .permissions import Risk
     from .tools import ToolSpec
     target = {"type": "object", "properties": {"node_id": {"type": "string", "maxLength": 32},
-        "selector": {"type": "string", "maxLength": 500}, "role": {"type": "string", "maxLength": 40},
+        "selector": {"type": "string", "maxLength": 500}, "role": {"type": "string", "enum": list(BROWSER_ROLES)},
         "name": {"type": "string", "maxLength": 300}}, "additionalProperties": False,
         "oneOf": [{"required": ["node_id"], "maxProperties": 1}, {"required": ["selector"], "maxProperties": 1}, {"required": ["role", "name"], "maxProperties": 2}]}
     frame = {"type": "string", "maxLength": 500}
+    # Checkpoints survive page mutations; snapshot node IDs cannot do so.
+    wait_target = {**target, "properties": {key: value for key, value in target["properties"].items() if key != "node_id"},
+                   "oneOf": target["oneOf"][1:]}
     registry.register(ToolSpec("browser_semantic_snapshot", "Observe bounded visible DOM controls, parent hierarchy, focus, dialogs, page and tabs with a change version. Prefer these exact controls over coordinates; inspect an iframe explicitly when needed. Values are omitted.", Risk.LOW,
         {"type": "object", "properties": {"force": {"type": "boolean"}, "max_nodes": {"type": "integer", "minimum": 1, "maximum": 250}, "frame_selector": frame}, "additionalProperties": False}, browser_semantic_snapshot))
     registry.register(ToolSpec("browser_semantic_action", "Execute one exact semantic action, refusing ambiguous or stale targets. Use snapshot node_id plus expected_version, or exact role/name. Fill/append/select/check/focus verify locally; click/press require important result verification. Append preserves the existing field value without exposing it. Never blindly repeat an uncertain click.", Risk.MEDIUM,
@@ -599,4 +628,4 @@ def register_browser_semantic_tools(registry: Any) -> None:
     registry.register(ToolSpec("browser_semantic_scroll", "Scroll the selected page/frame viewport by a bounded delta through the managed browser. Human-verification guards run before and after; reports whether the viewport actually moved.", Risk.MEDIUM,
         {"type": "object", "properties": {"delta_y": {"type": "integer", "minimum": -5000, "maximum": 5000}, "delta_x": {"type": "integer", "minimum": -5000, "maximum": 5000}, "frame_selector": frame}, "required": ["delta_y"], "additionalProperties": False}, browser_semantic_scroll))
     registry.register(ToolSpec("browser_wait_state", "Wait for an exact unique DOM target state with bounded 50ms polling and cancellation. Returns immediately when true; no fixed loading delay or action retries.", Risk.LOW,
-        {"type": "object", "properties": {"target": target, "state": {"enum": ["visible", "hidden", "enabled", "text", "focused"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 4096}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))
+        {"type": "object", "properties": {"target": wait_target, "state": {"enum": ["visible", "hidden", "enabled", "text", "focused"]}, "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 30000}, "text": {"type": "string", "maxLength": 4096}, "frame_selector": frame}, "required": ["target"], "additionalProperties": False}, browser_wait_state))

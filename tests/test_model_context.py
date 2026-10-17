@@ -1,10 +1,22 @@
 import json
 import unittest
 
-from core.model_context import compact_bookkeeping_result
+from core.model_context import compact_bookkeeping_result, compact_tool_result
 
 
 class ModelContextTests(unittest.TestCase):
+    def test_observation_compaction_is_lossless_including_field_whitespace(self):
+        payload = {"nodes": [{"name": "  draft\nArabic مرحبا  ", "disabled": False, "value": None,
+                              "bounds": {"x": 0, "y": -20}, "note": ""}], "version": "v1"}
+        raw = json.dumps(payload, ensure_ascii=False, indent=2)
+        for name, prefix in (("browser_semantic_snapshot", ""), ("interaction_scene", "VERIFIED: ")):
+            with self.subTest(name=name):
+                result = compact_tool_result(name, prefix + raw)
+                self.assertEqual(json.loads(result[len(prefix):]), payload)
+                self.assertLess(len(result), len(prefix + raw))
+        for raw in ("ERROR: fresh observation required", "plain text", "null"):
+            self.assertEqual(compact_tool_result("interaction_inspect", raw), raw)
+
     def test_updates_retain_all_steps_evidence_and_unfinished_workflows(self):
         steps = [{"id": str(i), "description": "draft " + str(i), "action": "draft " + str(i),
                   "status": "FAILED" if i == 1 else "COMPLETED", "mutation_delivered": False,

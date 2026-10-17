@@ -98,6 +98,19 @@ class InteractionSceneTests(unittest.TestCase):
         self.assertEqual(second["delta"]["removed"], [])
         self.assertEqual(second["delta"]["unchanged_count"], 1)
 
+    def test_empty_browser_scene_keeps_scroll_position_in_full_and_delta_views(self):
+        observed = json.loads(self._browser_snapshot())
+        observed["snapshot"]["nodes"] = []
+        observed["snapshot"]["viewport"] = {"width": 800, "height": 600,
+            "scroll_x": 0, "scroll_y": 1000, "max_scroll_x": 0, "max_scroll_y": 1600}
+        with patch.object(scene, "interaction_inspect", return_value=json.dumps(observed)):
+            for mode in ("full", "delta"):
+                result = json.loads(scene.interaction_scene(
+                    registry=self.registry, surface="browser", mode=mode)[len("VERIFIED: "):])
+                self.assertEqual(result["viewport"], observed["snapshot"]["viewport"])
+                self.assertEqual(result["mode"], mode)
+                self.assertIn("empty list does not mean", result["note"])
+
     def test_scene_delta_reports_changed_browser_target_without_full_tree(self) -> None:
         with patch.object(scene, "interaction_inspect", side_effect=[
             self._browser_snapshot("Send", version="epoch:1"),
@@ -148,6 +161,29 @@ class InteractionSceneTests(unittest.TestCase):
             )[len("VERIFIED: "):])
         self.assertEqual(observed["nodes"][0]["target"]["frame_selector"], "#editor-frame")
         self.assertEqual(resolved["action_target"]["frame_selector"], "#editor-frame")
+
+    def test_scene_retains_observed_iframe_inspection_locator(self):
+        snapshot = json.loads(self._browser_snapshot('Audit panel'))
+        snapshot['snapshot']['nodes'][0].update(role='iframe', tag='iframe', interactive=True,
+            frame_selector='iframe[id="audit-frame"]', frame_url='https://example.test/frame')
+        with patch.object(scene, 'interaction_inspect', return_value=json.dumps(snapshot)):
+            result = json.loads(scene.interaction_scene(registry=self.registry, surface='browser')[10:])
+        self.assertEqual(result['nodes'][0]['frame_selector'], 'iframe[id="audit-frame"]')
+
+    def test_scene_preserves_row_context_for_record_selection(self):
+        snapshot = json.loads(self._browser_snapshot('Open revision 4'))
+        snapshot['snapshot']['nodes'][0]['context_text'] = 'Orion 4 Approved Open revision 4'
+        with patch.object(scene, 'interaction_inspect', return_value=json.dumps(snapshot)):
+            result = json.loads(scene.interaction_scene(registry=self.registry, surface='browser')[10:])
+        self.assertEqual(result['nodes'][0]['context_text'], 'Orion 4 Approved Open revision 4')
+
+    def test_actionable_scene_keeps_receipts_and_errors_outside_control_filter(self):
+        snapshot = json.loads(self._browser_snapshot('Save'))
+        snapshot['snapshot']['nodes'].append({'node_id': 'n2', 'role': 'status', 'name': 'Draft saved: receipt-42'})
+        with patch.object(scene, 'interaction_inspect', return_value=json.dumps(snapshot)):
+            result = json.loads(scene.interaction_scene(registry=self.registry, surface='browser', scope='actionable')[10:])
+        self.assertEqual([row['name'] for row in result['nodes']], ['Save'])
+        self.assertEqual(result['notices'], [{'role': 'status', 'text': 'Draft saved: receipt-42'}])
 
     def test_scene_cache_remains_bounded_across_long_navigation_missions(self) -> None:
         tracker = scene.SceneTracker()
