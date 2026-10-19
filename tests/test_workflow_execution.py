@@ -121,6 +121,32 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.assertTrue(self.execute([step(), step("read", "ui_wait_state")]).startswith("ERROR"))
         self.action.assert_not_called()
 
+    def test_unknown_workflow_tool_gets_preflight_recovery_not_resume_guidance(self):
+        result = self.execute([step(), step("bad", tool="interaction_semantic_action")])
+        self.assertIn("no workflow actions dispatched", result)
+        self.action.assert_not_called()
+        self.assertEqual(self.agent.orchestrator.current.workflows, [])
+        hint = self.agent.orchestrator.recovery_hint(result, "workflow_execute")
+        self.assertIn("Correct the tool name", hint)
+        self.assertNotIn("workflow_resume", hint)
+
+    def test_reused_snapshot_version_is_rejected_before_first_workflow_mutation(self):
+        self.register('browser_semantic_action', Risk.MEDIUM, self.action, {'type': 'object'})
+        calls = [step('dismiss', 'browser_semantic_action', {
+            'action': 'click', 'target': {'node_id': 'n1'}, 'expected_version': 'page:1'}),
+            step('focus', 'browser_semantic_action', {
+                'action': 'focus', 'target': {'node_id': 'n2'}, 'expected_version': 'page:1'})]
+        result = self.execute(calls)
+        self.assertIn('no workflow actions dispatched', result)
+        self.assertIn('expected_version is reused', result)
+        self.action.assert_not_called()
+        self.assertEqual(self.agent.orchestrator.current.workflows, [])
+        self.assertFalse(self.agent.orchestrator.needs_action_review())
+        # Observed independent frame versions are not confused with each other.
+        calls[1]['arguments']['expected_version'] = 'frame:1'
+        self.assertTrue(self.execute(calls).startswith('VERIFIED:'))
+        self.assertEqual(self.action.call_count, 2)
+
     def test_universal_wait_checkpoint_completes_delivered_action_in_same_workflow_call(self):
         self.action.return_value = "DELIVERED: semantic click"
         waiter = Mock(return_value="VERIFIED: target visible")
@@ -148,6 +174,47 @@ class WorkflowExecutionTests(unittest.TestCase):
         self.action.assert_called_once()
         waiter.assert_called_once()
         self.agent.client.chat.completions.create.assert_not_called()
+
+    def test_impossible_browser_checkpoints_reject_entire_program_before_input(self):
+        from core.browser_semantic import register_browser_semantic_tools
+        from core.universal_interaction import register_universal_interaction_tools
+        register_browser_semantic_tools(self.agent.tools)
+        register_universal_interaction_tools(self.agent.tools)
+        target = {"role": "textbox", "name": "Draft"}
+        cases = [
+            ("browser_wait_state", {"target": {"role": "text", "name": "Approval code"}}),
+            ("interaction_wait", {"surface": "browser", "browser_target": {"role": "text", "name": "Approval code"}}),
+            ("browser_wait_state", {"target": {"node_id": "n1"}}),
+            ("interaction_wait", {"surface": "browser", "browser_target": {"node_id": "n1"}}),
+            ("interaction_wait", {"surface": "browser", "browser_target": target, "expected_version": "page:1"}),
+            ("interaction_wait", {"surface": "browser", "browser_target": target, "state": "selected"}),
+            ("interaction_wait", {"browser_target": target, "state": "selected"}),
+            ("interaction_wait", {"target": "Draft", "frame_selector": "#frame", "state": "selected"}),
+        ]
+        for name, arguments in cases:
+            with self.subTest(name=name, arguments=arguments):
+                result = self.execute([step("first"), step("second", checkpoint={"tool": name, "arguments": arguments})])
+                self.assertIn("no workflow actions dispatched", result)
+                self.action.assert_not_called()
+                self.assertEqual(self.agent.orchestrator.current.workflows, [])
+                self.assertFalse(self.agent.orchestrator.needs_action_review())
+
+    def test_checkpoint_schemas_preserve_stable_targets_and_action_snapshot_support(self):
+        from core.browser_semantic import register_browser_semantic_tools
+        from core.universal_interaction import register_universal_interaction_tools
+        register_browser_semantic_tools(self.agent.tools)
+        register_universal_interaction_tools(self.agent.tools)
+        cases = [
+            ("browser_wait_state", {"target": {"selector": "#receipt"}, "state": "text", "text": "Saved"}),
+            ("interaction_wait", {"surface": "browser", "browser_target": {"role": "textbox", "name": "Draft"}, "expected_version": ""}),
+            ("interaction_wait", {"surface": "desktop", "target": "First chat", "state": "selected"}),
+            ("interaction_wait", {"target": "First chat", "state": "selected"}),
+            ("interaction_click", {"surface": "browser", "browser_target": {"node_id": "n1"}, "expected_version": "page:1"}),
+            ("browser_semantic_action", {"action": "click", "target": {"node_id": "n1"}, "expected_version": "page:1"}),
+        ]
+        for name, arguments in cases:
+            with self.subTest(name=name):
+                self.agent.tools._validators[name].validate(arguments)
 
     def test_checkpoint_retry_does_not_repeat_delivered_action(self):
         self.action.return_value = "ACTION_EXECUTED: navigation requested"

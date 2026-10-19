@@ -38,3 +38,21 @@ def compact_bookkeeping_result(name: str, result: str) -> str:
     else:
         return result
     return json.dumps(compact, ensure_ascii=False, separators=(",", ":"))
+
+
+def compact_tool_result(name: str, result: str) -> str:
+    """Remove JSON formatting overhead without dropping observed fields or evidence."""
+    compact = compact_bookkeeping_result(name, result)
+    if compact != result or name not in {"browser_semantic_snapshot", "interaction_inspect", "interaction_scene",
+                                        "interaction_resolve", "ui_inspect", "ui_resolve",
+                                        "vision_ocr", "computer_observe", "desktop_cursor",
+                                        "inspect_window", "browser_links", "screen_observe"}:
+        return compact
+    prefix = "VERIFIED: " if result.startswith("VERIFIED: ") else ""
+    try:
+        payload = json.loads(result[len(prefix):])
+    except (ValueError, TypeError):
+        return result
+    if not isinstance(payload, (dict, list)):
+        return result
+    return prefix + json.dumps(payload, ensure_ascii=False, separators=(",", ":"))

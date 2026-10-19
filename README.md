@@ -4,6 +4,10 @@ A Windows-first desktop AI agent powered by Claude.
 
 ## Autonomous desktop upgrade
 
+See the [coordinated five-engine implementation and qualification](docs/control-engines-2026-10-10.md) for typed mouse, keyboard, semantic UI, local OCR and verification APIs; shared input scheduling; deadlines and cancellation; setup, examples, measured fixture results and limitations.
+
+See the [October 10 Downloads repair and control-library verification](docs/downloads-navigation-repair-2026-10-10.md) for null-foreground recovery, exact folder verification, honest provider-pause status, and the installed pywinauto/PyAutoGUI/Windows UI Automation integration.
+
 See the [October 9 mission-history repair](docs/mission-history-repair-2026-10-09.md) for the saved-trace diagnosis, stale-worker reload protection, resilient control-reference loading, Google command parsing, and Chrome readiness recovery.
 
 See the [October 9 control-knowledge update](docs/control-knowledge-2026-10-09.md) for 17 contextual control procedures, task-specific tool schemas, stronger reference/evidence separation, and the app-discovery cache integration repair.
@@ -147,6 +151,8 @@ python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
 ```
+
+Windows control dependencies are already included: `pywinauto` supplies the Windows UI Automation (`backend="uia"`) integration, and `PyAutoGUI` supplies the guarded Python mouse/keyboard path. UI Automation itself is a Windows API, not a separate pip package. Full Access prefers semantic UIA/DOM targets and Rust native input; installing these libraries does not enable Full Access or bypass verification.
 
 4. Copy `.env.example` to `.env` and configure your provider credentials.
 5. Start JARVIS:

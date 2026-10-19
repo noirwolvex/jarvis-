@@ -822,6 +822,15 @@ mod windows_input {
         Ok((point.x, point.y))
     }
 
+    pub fn verify_position(expected: (i32, i32)) -> Result<()> {
+        if position()? != expected {
+            return Err(Error::Denied(
+                "pointer moved externally during native motion",
+            ));
+        }
+        Ok(())
+    }
+
     fn root_at(x: i32, y: i32) -> u64 {
         let hit = unsafe { WindowFromPhysicalPoint(Point { x, y }) };
         // GA_ROOT walks parents, not owners: an unexpected owned popup is also
@@ -908,19 +917,30 @@ mod windows_input {
         }
         let (key, flags) = match normalized.as_str() {
             "ctrl" | "control" => (0x11, 0),
+            "ctrlleft" | "leftctrl" | "lctrl" => (0xA2, 0),
+            "ctrlright" | "rightctrl" | "rctrl" => (0xA3, KEYEVENTF_EXTENDEDKEY),
             "alt" => (0x12, 0),
+            "altleft" | "leftalt" | "lalt" => (0xA4, 0),
+            "altright" | "rightalt" | "ralt" => (0xA5, KEYEVENTF_EXTENDEDKEY),
             "shift" => (0x10, 0),
-            "win" | "windows" | "meta" | "super" => (0x5B, 0),
+            "shiftleft" | "leftshift" | "lshift" => (0xA0, 0),
+            "shiftright" | "rightshift" | "rshift" => (0xA1, 0),
+            "win" | "windows" | "meta" | "super" | "winleft" | "lwin" => {
+                (0x5B, KEYEVENTF_EXTENDEDKEY)
+            }
+            "winright" | "rwin" => (0x5C, KEYEVENTF_EXTENDEDKEY),
+            "apps" | "menu" => (0x5D, KEYEVENTF_EXTENDEDKEY),
             "enter" | "return" => (0x0D, 0),
             "esc" | "escape" => (0x1B, 0),
             "tab" => (0x09, 0),
             "space" => (0x20, 0),
             "backspace" => (0x08, 0),
             "delete" | "del" => (0x2E, KEYEVENTF_EXTENDEDKEY),
+            "insert" | "ins" => (0x2D, KEYEVENTF_EXTENDEDKEY),
             "home" => (0x24, KEYEVENTF_EXTENDEDKEY),
             "end" => (0x23, KEYEVENTF_EXTENDEDKEY),
-            "pageup" | "page_up" => (0x21, KEYEVENTF_EXTENDEDKEY),
-            "pagedown" | "page_down" => (0x22, KEYEVENTF_EXTENDEDKEY),
+            "pageup" | "page_up" | "pgup" => (0x21, KEYEVENTF_EXTENDEDKEY),
+            "pagedown" | "page_down" | "pgdn" | "pgdown" => (0x22, KEYEVENTF_EXTENDEDKEY),
             "left" | "leftarrow" => (0x25, KEYEVENTF_EXTENDEDKEY),
             "up" | "uparrow" => (0x26, KEYEVENTF_EXTENDEDKEY),
             "right" | "rightarrow" => (0x27, KEYEVENTF_EXTENDEDKEY),
@@ -1067,6 +1087,57 @@ mod windows_input {
         }
 
         #[test]
+        fn left_and_right_modifier_aliases_preserve_distinct_key_encoding() {
+            for (names, key, flags) in [
+                (["ctrlleft", "leftctrl", "lctrl"], 0xA2, 0),
+                (
+                    ["ctrlright", "rightctrl", "rctrl"],
+                    0xA3,
+                    KEYEVENTF_EXTENDEDKEY,
+                ),
+                (["altleft", "leftalt", "lalt"], 0xA4, 0),
+                (
+                    ["altright", "rightalt", "ralt"],
+                    0xA5,
+                    KEYEVENTF_EXTENDEDKEY,
+                ),
+                (["shiftleft", "leftshift", "lshift"], 0xA0, 0),
+                (["shiftright", "rightshift", "rshift"], 0xA1, 0),
+            ] {
+                for name in names {
+                    assert_eq!(virtual_key(name).unwrap(), (key, flags), "{name}");
+                    assert_ne!(virtual_scan_code(key).unwrap(), 0, "{name}");
+                }
+            }
+        }
+
+        #[test]
+        fn navigation_aliases_and_windows_keys_have_extended_scan_codes() {
+            for (name, key) in [
+                ("insert", 0x2D),
+                ("ins", 0x2D),
+                ("pgup", 0x21),
+                ("pgdn", 0x22),
+                ("pgdown", 0x22),
+                ("win", 0x5B),
+                ("winleft", 0x5B),
+                ("winright", 0x5C),
+                ("apps", 0x5D),
+                ("menu", 0x5D),
+            ] {
+                assert_eq!(
+                    virtual_key(name).unwrap(),
+                    (key, KEYEVENTF_EXTENDEDKEY),
+                    "{name}"
+                );
+                assert_ne!(virtual_scan_code(key).unwrap(), 0, "{name}");
+            }
+            for name in ["", "invented_key", "ctrl+a", "\0"] {
+                assert!(virtual_key(name).is_err());
+            }
+        }
+
+        #[test]
         fn unicode_events_keep_literal_code_units() {
             let event = keyboard_input(0, 0x0645, KEYEVENTF_UNICODE);
             let payload = unsafe { event.data.keyboard };
@@ -1158,10 +1229,10 @@ impl InputController for NativeInput {
         motion.run(
             || started.elapsed(),
             std::thread::sleep,
-            || {
-                emergency
-                    .check()
-                    .and_then(|_| verify_foreground(foreground))
+            |previous| {
+                emergency.check()?;
+                verify_foreground(foreground)?;
+                windows_input::verify_position(previous)
             },
             windows_input::move_to,
         )
@@ -1203,10 +1274,10 @@ impl InputController for NativeInput {
         let movement_result = motion.run(
             || started.elapsed(),
             std::thread::sleep,
-            || {
-                emergency
-                    .check()
-                    .and_then(|_| verify_foreground(foreground))
+            |previous| {
+                emergency.check()?;
+                verify_foreground(foreground)?;
+                windows_input::verify_position(previous)
             },
             windows_input::move_to,
         );

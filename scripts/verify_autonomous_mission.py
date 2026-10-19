@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import html
 import json
+import math
 import os
 import subprocess
 import tempfile
@@ -33,6 +34,61 @@ from core.universal_interaction import _browser_hotkey
 NOTE = 'JARVIS validation — مرحبا'
 AUDIT = 'reviewed-r4'
 STATE = {'saves': [], 'scrolls': 0, 'dismissed': False, 'visits': []}
+RECORDS = {
+    'orion-r5': ('Draft', 'No approval: this is an unapproved draft'),
+    'vega-r9': ('Approved', 'VEGA-R9-APPROVED-81'),
+    'orion-r4': ('Approved', 'ORION-R4-APPROVED-57'),
+    'orion-r3': ('Approved', 'ORION-R3-APPROVED-26'),
+}
+
+
+def run_with_quota_recovery(agent, goal, emit, control, *, max_resumes=2):
+    """Keep this qualification's live browser/journal through bounded minute resets."""
+    outcome = run_agent_mission(agent, goal, emit=emit, mission_control=control)
+    for _ in range(max_resumes):
+        delay = getattr(agent, '_provider_pause_retry_seconds', None)
+        if (outcome.get('status') != 'waiting_user'
+                or not str(outcome.get('result', '')).startswith('AI_PROVIDER_RATE_LIMITED:')
+                or not isinstance(delay, (int, float)) or isinstance(delay, bool)
+                or not math.isfinite(delay) or not 0 < delay <= 61
+                or agent._is_stopped() or control.cancelled):
+            break
+        if emit:
+            emit(_agent_runtime.AgentEvent('status',
+                f'Qualification waiting {delay:g}s for the provider minute reset; resuming the same mission without replay.'))
+        deadline = time.monotonic() + delay
+        while time.monotonic() < deadline:
+            if agent._is_stopped() or control.cancelled:
+                return {**outcome, 'status': 'cancelled', 'ok': False, 'requires_user_action': False,
+                        'result': 'CANCELLED: Qualification stopped during provider cooldown'}
+            time.sleep(min(0.1, max(0, deadline - time.monotonic())))
+        if agent._is_stopped() or control.cancelled:
+            return {**outcome, 'status': 'cancelled', 'ok': False, 'requires_user_action': False,
+                    'result': 'CANCELLED: Qualification stopped during provider cooldown'}
+        metrics = agent.orchestrator.current.metrics
+        metrics['qualification_quota_resumes'] = metrics.get('qualification_quota_resumes', 0) + 1
+        metrics['provider_cooldown_ms'] = metrics.get('provider_cooldown_ms', 0) + round(delay * 1000)
+        outcome = run_agent_mission(agent, goal, emit=emit, mission_control=control, resume_current=True)
+    return outcome
+
+
+def five_stage_objective() -> str:
+    return (
+        'Complete these five processes in order in the already-connected local browser. '
+        'Use exactly five meaningful task-plan steps and preserve them until completion. '
+        '1. Inspect the release library, choose the highest APPROVED revision of project Orion '
+        '(exclude drafts and other projects), open it and read its approval code. '
+        '2. Dismiss the review notice if present, wait for the form to be editable, focus Review note, '
+        f'use Ctrl+A to select its placeholder, and replace it with exactly {NOTE!r}. '
+        f'Enter exactly {AUDIT!r} in Audit label inside the Audit panel iframe. Verify both field values. '
+        '3. Scroll down to the draft controls, save the draft exactly once, and verify its receipt. '
+        '4. Open Review summary and verify the chosen record, approval code, receipt, and both exact texts. '
+        '5. Create output/result.md in the provided workspace containing all five verified values, '
+        'copy it to output/result-backup.md, then read both files and verify that they match exactly. '
+        'Keep one browser tab. Report completion only after all five processes are verified. '
+        'This is an isolated local test; only the connected browser and this workspace are available. '
+        'Use surface=browser. Do not access other apps, files or websites.'
+    )
 
 
 class Fixture(BaseHTTPRequestHandler):
@@ -92,8 +148,9 @@ class Fixture(BaseHTTPRequestHandler):
             content = '<label>Audit label<input id="audit" aria-label="Audit label"></label>'
         elif self.path.startswith('/document/'):
             record = self.path.rsplit('/', 1)[-1]
+            status, approval = RECORDS.get(record, ('Unknown', 'No approval'))
             content = '''<h1>Document review</h1><p id="record">Record: RECORD</p>
-            <p>Approval code: ORION-R4-APPROVED-57</p>
+            <p>Status: STATUS</p><p>Approval code: APPROVAL</p><a href="/">Return to library</a>
             <dialog open aria-label="Review notice"><p>This local draft is editable; wait for the editor to load.</p>
             <button onclick="document.querySelector('dialog').close();fetch('/event',{method:'POST',body:JSON.stringify({event:'dismiss'})})">Dismiss notice</button></dialog>
             <label>Review note<textarea id="note" aria-label="Review note" disabled>Replace this placeholder</textarea></label>
@@ -101,6 +158,11 @@ class Fixture(BaseHTTPRequestHandler):
             <p id="ready">Loading editor...</p><div style="height:1400px">Scroll to the draft controls below.</div>
             <button id="save">Save draft</button><p id="saved" role="status"></p><a href="/summary">Review summary</a>
             <script>
+            const editor=document.querySelector('#note');
+            const reportInput=data=>fetch('/typing-event',{method:'POST',body:JSON.stringify(data)});
+            editor.addEventListener('input',()=>reportInput({event:'input',value:editor.value}));
+            editor.addEventListener('keyup',e=>{if(e.key.toLowerCase()==='a'&&e.ctrlKey)
+              reportInput({event:'select-all',selected:document.activeElement===editor&&editor.selectionStart===0&&editor.selectionEnd===editor.value.length})});
             setTimeout(()=>{document.querySelector('#note').disabled=false;document.querySelector('#ready').textContent='Editor ready'},900);
             let scrolled=false;
             addEventListener('scroll',()=>{if(scrollY>300&&!scrolled){scrolled=true;fetch('/event',{method:'POST',body:JSON.stringify({event:'scroll'})})}});
@@ -109,12 +171,13 @@ class Fixture(BaseHTTPRequestHandler):
               const r=await fetch('/save',{method:'POST',body:JSON.stringify(payload)});const saved=await r.json();
               document.querySelector('#saved').textContent='Draft saved: '+saved.receipt;document.querySelector('#save').disabled=true;
             };
-            </script>'''.replace('RECORD', record)
+            </script>'''.replace('RECORD', record).replace('STATUS', status).replace('APPROVAL', approval)
         elif self.path == '/summary':
             content = '<h1>Draft summary</h1>' + (''.join(
                 '<p>' + html.escape(str(value)) + '</p>' for value in [
                     STATE['saves'][-1]['record'], STATE['saves'][-1]['note'], STATE['saves'][-1]['audit'],
-                    'ORION-R4-APPROVED-57', 'DRAFT-0042']) if STATE['saves'] else '<p>No draft saved</p>')
+                    RECORDS.get(STATE['saves'][-1]['record'], ('Unknown', 'No approval'))[1],
+                    'DRAFT-0042']) if STATE['saves'] else '<p>No draft saved</p>')
             content += '<a href="/">Return to library</a>'
         else:
             self.send_error(404)
@@ -125,11 +188,17 @@ class Fixture(BaseHTTPRequestHandler):
 
 def main(argv=None):
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument('--scenario', choices=('release', 'tickets', 'typing'), default='release',
+    parser.add_argument('--scenario', choices=('release', 'tickets', 'typing', 'five-stage'), default='release',
                         help='Real-planner mission to run in an isolated local browser (default: release).')
     parser.add_argument('--reasoning-effort', choices=('minimal', 'low', 'medium', 'high'),
                         help='Override AI reasoning effort only for this test process; leaves .env unchanged.')
+    parser.add_argument('--quota-resumes', type=int, choices=range(6), default=2,
+                        help='Maximum same-mission continuations after validated minute quotas (0-5).')
+    parser.add_argument('--deadline-seconds', type=int, default=240,
+                        help='Total qualification deadline including provider cooldowns (30-600 seconds).')
     options = parser.parse_args(argv)
+    if not 30 <= options.deadline_seconds <= 600:
+        parser.error('--deadline-seconds must be between 30 and 600')
     STATE.clear()
     STATE.update({'saves': [], 'scrolls': 0, 'dismissed': False, 'visits': []})
     state = autonomous_ticket_fixture.fresh_state() if options.scenario == 'tickets' else STATE
@@ -149,7 +218,8 @@ def main(argv=None):
     server_thread.start()
     base = f'http://127.0.0.1:{server.server_port}'
     process = runtime = agent = timer = None
-    outcome = {'scenario': options.scenario, 'reasoning_effort': os.getenv('AI_REASONING_EFFORT', '') or 'provider_default'}
+    outcome = {'scenario': options.scenario, 'reasoning_effort': os.getenv('AI_REASONING_EFFORT', '') or 'provider_default',
+               'quota_resume_limit': options.quota_resumes, 'deadline_seconds': options.deadline_seconds}
     events = []
     cleanup_errors = []
     started = time.perf_counter()
@@ -252,16 +322,18 @@ def main(argv=None):
                     goal = (f'In the already-connected test browser, select all of the existing Review note text using Ctrl+A, '
                             f'then replace it with exactly {NOTE!r}. Verify the exact editor text. Leave it as an unsent draft. '
                             'Only use this connected browser; do not open other apps, websites or files.')
+                elif options.scenario == 'five-stage':
+                    goal = five_stage_objective()
                 (output / 'mission.txt').write_text(goal, encoding='utf-8')
                 def progress(event):
                     item = {'seconds': round(time.perf_counter() - started, 2), 'kind': event.kind,
                             'tool': event.tool, 'message': str(event.message)}
                     events.append(item)
                     print(json.dumps({**item, 'message': item['message'][:900]}, ensure_ascii=False), flush=True)
-                timer = threading.Timer(240, agent.request_stop)
+                timer = threading.Timer(options.deadline_seconds, agent.request_stop)
                 timer.start()
                 print('LIVE_AUTONOMOUS_TEST_STARTED ' + str(output), flush=True)
-                outcome.update(run_agent_mission(agent, goal, emit=progress, mission_control=control))
+                outcome.update(run_with_quota_recovery(agent, goal, progress, control, max_resumes=options.quota_resumes))
                 from core.process_control import set_cancellation
                 set_cancellation(lambda: False)  # Test ended; allow only independent readback and cleanup.
                 # Independent result checks inspect fixture state and real file bytes,
@@ -293,6 +365,10 @@ def main(argv=None):
                               'select_all_observed': state.get('select_all_observed') is True,
                               'no_saves': len(state['saves']) == 0,
                               'one_tab': len(runtime.call('tabs')) == 1}
+                elif options.scenario == 'five-stage':
+                    checks['select_all_observed'] = state.get('select_all_observed') is True
+                    checks['five_verified_plan_steps'] = (len(agent.orchestrator.current.plan) == 5
+                        and all(step.status == 'completed' for step in agent.orchestrator.current.plan))
                 outcome['independent_checks'] = checks
                 outcome['trace_path'] = str(agent.orchestrator.trace_dir / (outcome['task_id'] + '.json'))
                 outcome['independent_pass'] = all(checks.values()) and outcome.get('mission_completed') is True

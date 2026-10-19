@@ -135,6 +135,8 @@ def desktop_scroll(clicks: int) -> str:
     if not -1000 <= clicks <= 1000:
         raise ValueError("Scroll must contain at most 1000 wheel steps")
     hwnd = foreground_identity()
+    if not hwnd:
+        raise RuntimeError("Foreground window unavailable for desktop scroll")
     remaining = clicks
     while remaining:
         check_cancelled()
@@ -146,9 +148,9 @@ def desktop_scroll(clicks: int) -> str:
     return f"Scrolled desktop by {clicks}"
 
 
-def desktop_double_click(x: int, y: int) -> str:
+def desktop_double_click(x: int, y: int, button: str = "left") -> str:
     from .desktop_control_tools import desktop_click_button
-    desktop_click_button(x, y, clicks=2)
+    desktop_click_button(x, y, button=button, clicks=2)
     return f"Double-clicked desktop at ({x}, {y})"
 
 
@@ -263,7 +265,7 @@ def register_advanced_tools(registry: ToolRegistry) -> None:
         "desktop_double_click",
         "Double-click absolute screen coordinates.",
         Risk.MEDIUM,
-        {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}}, "required": ["x", "y"]},
+        {"type": "object", "properties": {"x": {"type": "integer"}, "y": {"type": "integer"}, "button": {"type": "string", "enum": ["left", "right", "middle"]}}, "required": ["x", "y"]},
         desktop_double_click,
     ))
     registry.register(ToolSpec(

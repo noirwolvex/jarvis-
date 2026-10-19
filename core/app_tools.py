@@ -838,7 +838,9 @@ def _focus(hwnd: int) -> bool:
     check_cancelled()
     if not user32.IsWindow(hwnd) or not user32.IsWindowVisible(hwnd):
         return False
-    if int(user32.GetForegroundWindow()) == hwnd:
+    # HWND's ctypes return type maps a transient NULL foreground to None.
+    # Treat it as unverified state, including while Windows changes activation.
+    if int(user32.GetForegroundWindow() or 0) == hwnd:
         return True
     # Restoring every visible window also unmaximizes it. Restore only minimized windows.
     record_backend("windows_api", detail="Activate exact target window")
@@ -846,7 +848,7 @@ def _focus(hwnd: int) -> bool:
         user32.ShowWindow(hwnd, 9)
     user32.SetForegroundWindow(hwnd)
     check_cancelled()
-    if int(user32.GetForegroundWindow()) != hwnd:
+    if int(user32.GetForegroundWindow() or 0) != hwnd:
         # Windows can deny SetForegroundWindow to a background worker. Retrying the
         # same call for the entire launch deadline cannot resolve that restriction.
         try:
@@ -855,7 +857,7 @@ def _focus(hwnd: int) -> bool:
             pass  # A provider exception is not evidence of failure or success; read back.
     try:
         wait_until(
-            lambda: int(user32.GetForegroundWindow()) == hwnd,
+            lambda: int(user32.GetForegroundWindow() or 0) == hwnd,
             timeout=0.8,
             interval=0.025,
             description="launched application foreground",
@@ -947,7 +949,7 @@ def launch_installed_app(
             raise RuntimeError("Existing application identity changed during focus; inspect before another launch")
         # Identity reads may take long enough for another window to receive focus.
         # Read foreground again without replaying activation or trusting old evidence.
-        focused = focused and int(ctypes.windll.user32.GetForegroundWindow()) == int(best_window["hwnd"])
+        focused = focused and int(ctypes.windll.user32.GetForegroundWindow() or 0) == int(best_window["hwnd"])
         launcher_pid = None
     else:
         check_cancelled()

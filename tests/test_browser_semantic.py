@@ -12,6 +12,37 @@ from core.desktop_input import InputNotDispatchedError
 
 
 class BrowserRuntimeTests(unittest.TestCase):
+    def test_scene_id_rejected_with_actionable_guidance_before_dom_lookup(self):
+        from core.browser_semantic import _target
+        page = MagicMock()
+        with self.assertRaisesRegex(ValueError, "target.browser_target"):
+            _target(page, {"node_id": "dom:n4"}, "page:6")
+        page.evaluate_handle.assert_not_called()
+        _target(page, {"node_id": "n4"}, "page:6")
+        self.assertEqual(page.evaluate_handle.call_args.args[1], {"node_id": "n4", "version": "page:6"})
+
+    def test_unsupported_role_is_rejected_without_polling_or_dispatch(self):
+        from core.browser_semantic import _target, _wait_state
+        page = MagicMock()
+        for role in ("text", "input", "iframe", "invented", ""):
+            with self.subTest(role=role), patch("core.browser_semantic.time.sleep") as sleep:
+                target = {"role": role, "name": "Approval code"}
+                with self.assertRaisesRegex(ValueError, "Unsupported browser role"):
+                    _wait_state(page, {"target": target}, lambda: None)
+                with self.assertRaisesRegex(ValueError, "Unsupported browser role"):
+                    _target(page, target)
+                page.get_by_role.assert_not_called()
+                page.locator.assert_not_called()
+                sleep.assert_not_called()
+
+    def test_role_catalog_matches_installed_browser_backend(self):
+        import inspect
+        from typing import get_args
+        from playwright.sync_api import Page
+        from core.browser_roles import BROWSER_ROLES
+        roles = get_args(inspect.signature(Page.get_by_role).parameters["role"].annotation)
+        self.assertEqual(set(BROWSER_ROLES), set(roles))
+
     def test_missing_node_version_returns_pre_input_telemetry_through_interaction_tool(self):
         from core.browser_semantic import register_browser_semantic_tools
         from core.execution_telemetry import input_not_dispatched
@@ -267,6 +298,19 @@ class BrowserSemanticFixtureTests(unittest.TestCase):
             self.run_op("semantic_snapshot")
         self.assertFalse(self.page.evaluate("!!window.__jarvisSemanticV1.cache"))
 
+    def test_blank_middle_of_page_reports_remaining_scroll_range(self):
+        self.page.set_viewport_size({"width": 800, "height": 600})
+        self.page.set_content('<div style="height:2400px"></div><button>Save draft</button>')
+        self.run_op("semantic_scroll", delta_y=900)
+        snapshot = self.run_op("semantic_snapshot", force=True)
+        self.assertEqual(snapshot["nodes"], [])
+        self.assertEqual(snapshot["viewport"]["scroll_y"], 900)
+        self.assertGreater(snapshot["viewport"]["max_scroll_y"], 900)
+        self.assertEqual(snapshot["viewport"]["max_scroll_x"], 0)
+        self.run_op("semantic_scroll", delta_y=snapshot["viewport"]["max_scroll_y"] - 900)
+        bottom = self.run_op("semantic_snapshot", force=True)
+        self.assertIn("Save draft", [node["name"] for node in bottom["nodes"]])
+
     def test_implicit_browser_typing_uses_focused_editor_and_exact_readback(self):
         from core.browser_semantic import register_browser_semantic_tools
         from core.tools import ToolRegistry
@@ -464,6 +508,37 @@ class BrowserSemanticFixtureTests(unittest.TestCase):
         self.assertEqual(frame["nodes"][0]["name"], "Inside")
         self.page.locator("canvas, iframe").evaluate_all("els => els.forEach(el => el.hidden=true)")
         self.assertEqual(self.run_op("semantic_snapshot")["coverage_gaps"], [])
+
+    def test_snapshot_supplies_unique_escaped_iframe_locator_for_inner_controls(self):
+        self.page.set_content('<iframe title="Audit panel" height="60" srcdoc="<input aria-label=Audit>"></iframe>')
+        self.page.locator('iframe').evaluate('(el) => el.id = \'audit:"frame]\\\\value\'')
+        snapshot = self.run_op("semantic_snapshot")
+        node = next(n for n in snapshot["nodes"] if n["tag"] == "iframe")
+        self.assertEqual(self.page.locator(node["frame_selector"]).count(), 1)
+        inner = self.run_op("semantic_snapshot", frame_selector=node["frame_selector"])
+        self.assertEqual(inner["nodes"][0]["name"], "Audit")
+        self.run_op("semantic_action", action="fill", value="reviewed", frame_selector=node["frame_selector"],
+                    target={"role": "textbox", "name": "Audit"})
+        self.assertEqual(self.page.frame_locator(node["frame_selector"]).get_by_role('textbox').input_value(), 'reviewed')
+
+    def test_duplicate_iframes_do_not_advertise_ambiguous_selectors(self):
+        self.page.set_content('<iframe id="duplicate" title="Same" height="60"></iframe>'
+                              '<iframe id="duplicate" title="Same" height="60"></iframe>')
+        nodes = self.run_op("semantic_snapshot")["nodes"]
+        self.assertEqual(len(nodes), 2)
+        self.assertTrue(all(not row.get("frame_selector") for row in nodes))
+        self.page.locator('iframe').nth(1).evaluate('(el) => el.title = "Distinct"')
+        rows = self.run_op("semantic_snapshot")["nodes"]
+        self.assertTrue(all(self.page.locator(row["frame_selector"]).count() == 1 for row in rows))
+
+    def test_action_snapshot_keeps_row_context_without_exposing_editor_values(self):
+        self.page.set_content('<table><tr><td>Orion</td><td>5</td><td>Draft</td><td><a href="#">Open revision 5</a>'
+            '<input aria-label="Private draft" value="not-for-row-context"></td></tr>'
+            '<tr><td>Orion</td><td>4</td><td>Approved</td><td><a href="#">Open revision 4</a></td></tr></table>')
+        rows = {row['name']: row for row in self.run_op('semantic_snapshot')['nodes']}
+        self.assertIn('Orion 5 Draft', rows['Open revision 5']['context_text'])
+        self.assertIn('Orion 4 Approved', rows['Open revision 4']['context_text'])
+        self.assertNotIn('not-for-row-context', str(rows))
 
     def test_changed_dom_invalidates_observed_node_and_never_clicks(self):
         self.page.set_content('<button onclick="window.clicks=(window.clicks||0)+1">Send</button>')

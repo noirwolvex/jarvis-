@@ -92,14 +92,40 @@ class UniversalInteractionTests(unittest.TestCase):
         activate.assert_called_once_with(target="Save", title="Notepad", control_type="Button", selector=None)
         browser.assert_not_called()
 
-    def test_browser_target_on_desktop_is_rejected_without_input(self):
+    def test_explicit_desktop_surface_rejects_browser_target_without_input(self):
         tools = registry()
         with patch("core.universal_interaction._browser_active", return_value=False), \
              patch("core.semantic_ui_tools.ui_activate") as desktop, \
              patch("core.browser_semantic.browser_semantic_action") as browser:
-            result = tools.execute("interaction_click", {"browser_target": {"role": "listitem", "name": "bel"}}, approved=True)
+            result = tools.execute("interaction_click", {"surface": "desktop", "browser_target": {"role": "listitem", "name": "bel"}}, approved=True)
         self.assertIn("browser target cannot control", result)
         self.assertEqual(result.execution["input_delivery"], "not_dispatched")
+        desktop.assert_not_called()
+        browser.assert_not_called()
+
+    def test_auto_dom_target_uses_connected_page_without_foreground_input(self):
+        tools = registry()
+        with patch("core.universal_interaction._browser_active", return_value=False) as foreground, \
+             patch("core.chrome_cdp.chrome_is_connected", return_value=True), \
+             patch("core.semantic_ui_tools.ui_activate") as desktop, \
+             patch("core.browser_semantic.browser_semantic_action", return_value="ACTION_EXECUTED: clicked") as browser:
+            result = tools.execute("interaction_click", {
+                "browser_target": {"role": "button", "name": "Open"}}, approved=True)
+        self.assertTrue(result.startswith("ACTION_EXECUTED:"), result)
+        browser.assert_called_once_with("click", {"role": "button", "name": "Open"}, expected_version="", frame_selector="")
+        desktop.assert_not_called()
+        foreground.assert_not_called()
+
+    def test_disconnected_dom_target_never_falls_back_to_desktop(self):
+        with patch("core.chrome_cdp.chrome_is_connected", return_value=False), \
+             patch("core.semantic_ui_tools.ui_activate") as desktop, \
+             patch("core.browser_semantic.browser_semantic_action") as browser:
+            for surface in ("auto", "browser"):
+                with self.subTest(surface=surface):
+                    result = registry().execute("interaction_click", {
+                        "surface": surface, "browser_target": {"role": "button", "name": "Open"}}, approved=True)
+                    self.assertIn("CDP is not connected", result)
+                    self.assertEqual(result.execution["input_delivery"], "not_dispatched")
         desktop.assert_not_called()
         browser.assert_not_called()
 
@@ -232,6 +258,7 @@ class UniversalInteractionTests(unittest.TestCase):
     def test_browser_submit_rejects_snapshot_node_before_any_partial_write(self):
         tools = registry()
         with patch("core.universal_interaction._browser_active", return_value=True), \
+             patch("core.chrome_cdp.chrome_is_connected", return_value=True), \
              patch("core.browser_semantic.browser_semantic_action") as action:
             with self.assertRaisesRegex(ValueError, "node_id"):
                 interaction_type(

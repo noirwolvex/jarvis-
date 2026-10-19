@@ -36,7 +36,7 @@ def objective() -> str:
         'Exclude blocked/completed tickets and other projects. Dismiss the handoff notice if present and wait '
         'for the delayed handoff form to become editable. Replace the Handoff note placeholder with exactly '
         f'{NOTE!r}. In the Reference panel iframe, replace Handoff reference with exactly {REFERENCE!r}. '
-        'Scroll down to the draft controls and save the handoff draft exactly once. Verify the receipt, '
+        'Check the Reviewed for handoff checkbox. Scroll down to the draft controls and save the handoff draft exactly once. Verify the receipt, '
         'then open Preview handoff and verify the selected ticket and both exact texts. '
         'Create an output folder in the provided workspace and write output/result.md containing the ticket ID, '
         'project, priority, status, verification code shown on the ticket, draft receipt, and both exact texts. '
@@ -52,12 +52,13 @@ def independent_checks(state: dict, workspace: Path, tab_count: int) -> dict[str
     backup = workspace / 'output/result-backup.md'
     text = report.read_text(encoding='utf-8') if report.is_file() else ''
     saved = state['saves'][0] if len(state['saves']) == 1 else {}
-    expected = {'ticket': SELECTED_ID, 'note': NOTE, 'reference': REFERENCE}
+    expected = {'ticket': SELECTED_ID, 'note': NOTE, 'reference': REFERENCE, 'reviewed': True}
     return {
         'filtered_queue': any(item == {'project': 'Atlas', 'status': 'READY'} for item in state['filters']),
         'correct_ticket': saved.get('ticket') == SELECTED_ID,
         'unicode_note': saved.get('note') == NOTE,
         'iframe_reference': saved.get('reference') == REFERENCE,
+        'review_checkbox': saved.get('reviewed') is True,
         'saved_once': len(state['saves']) == 1,
         'popup_dismissed': state['dismissed'] is True,
         'scrolled': state['scrolls'] > 0,
@@ -162,6 +163,7 @@ class TicketFixture(BaseHTTPRequestHandler):
                 '<label>Handoff note<textarea id="note" aria-label="Handoff note" disabled>'
                 'Replace handoff placeholder</textarea></label>'
                 '<iframe title="Reference panel" id="reference-frame" src="/reference-frame"></iframe>'
+                '<label><input type="checkbox" id="reviewed">Reviewed for handoff</label>'
                 '<p id="ready" role="status">Loading handoff form...</p>'
                 '<div style="height:1200px">Draft controls are below. Scroll down after entering the note and reference.</div>'
                 '<button id="save">Save handoff draft</button><p id="receipt" role="status"></p>'
@@ -176,7 +178,8 @@ class TicketFixture(BaseHTTPRequestHandler):
                 "fetch('/event',{method:'POST',body:JSON.stringify({event:'scroll'})})}});"
                 "document.querySelector('#save').onclick=async()=>{const payload={ticket,"
                 "note:document.querySelector('#note').value,"
-                "reference:document.querySelector('iframe').contentDocument.querySelector('#reference').value};"
+                "reference:document.querySelector('iframe').contentDocument.querySelector('#reference').value,"
+                "reviewed:document.querySelector('#reviewed').checked};"
                 "const r=await fetch('/save',{method:'POST',body:JSON.stringify(payload)});"
                 "const result=await r.json();document.querySelector('#receipt').textContent='Draft saved: '+result.receipt;"
                 "document.querySelector('#save').disabled=true;};</script>"

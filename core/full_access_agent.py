@@ -18,10 +18,10 @@ from .browser_mission_contract import (
 )
 from .vision_tools import _payload_from_result, is_internal_vision_message, vision_followup_message
 from .desktop_observation import DesktopObservationGate
-from .execution_telemetry import input_not_dispatched
+from .execution_telemetry import ToolResult, input_not_dispatched
 from .orchestrator import tool_succeeded
 from .permissions import Risk
-from .model_context import compact_bookkeeping_result
+from .model_context import compact_tool_result
 
 _DESKTOP_BROWSER_INPUT_TOOLS = {
     "dialog_set_field",
@@ -103,6 +103,7 @@ _BROWSER_PROFILE_EXPLICIT = {
     "google_search",
     "screen_observe",
     "computer_observe",
+    "vision_ocr",
     "wait",
     "take_screenshot",
     "list_windows",
@@ -243,6 +244,9 @@ class FullAccessJarvisAgent(JarvisAgent):
                 self._pending_model = None
 
     def close(self) -> None:
+        control_session = getattr(self, "control_session", None)
+        if control_session is not None:
+            control_session.close()
         executor = getattr(self, "_model_executor", None)
         if executor is not None:
             executor.shutdown(wait=False, cancel_futures=True)
@@ -268,6 +272,11 @@ class FullAccessJarvisAgent(JarvisAgent):
         current = self.orchestrator.current
         if current and current.last_review_required_index >= 0:
             action = current.traces[current.last_review_required_index]
+            if (action.name == "write_file" and isinstance(action.arguments.get("path"), str)
+                    and action.arguments["path"] and "read_file" in self.tools._tools):
+                # File delivery is verified from the written resource, not from
+                # an unrelated desktop screenshot. Normal read permissions apply.
+                return "read_file", {"path": action.arguments["path"]}
             browser = (action.name.startswith(("browser_", "chrome_"))
                        or action.arguments.get("surface") == "browser"
                        or bool(action.arguments.get("browser_target")))
@@ -388,16 +397,37 @@ class FullAccessJarvisAgent(JarvisAgent):
         # to the single worker, otherwise that nested read would deadlock the queue.
         guard_result = self._browser_action_guard(name, arguments)
         if guard_result:
-            return guard_result
+            # The guard runs before start_action/the input adapter. A rejected
+            # guard is not an uncertain click and must not create review debt.
+            return ToolResult(guard_result, {"backend": "not_dispatched", "operations": [],
+                                            "input_delivery": "not_dispatched"})
         if name.startswith("workflow_"):
             # The container runs outside the single tool executor so child dispatches
             # can use that executor without deadlocking. Each child is policy-checked.
             return self.tools.execute(name, arguments, approved)
-        future = self._tool_executor.submit(dispatch)
+        from contextvars import copy_context
+        from .control_engines.scheduler import check_context, input_lane, has_action_context, uses_desktop, ActionCancelled, ActionTimedOut
+        def serialized_dispatch():
+            # Keep fresh-scene checks and native delivery in the same input lane.
+            # Registry calls reenter this lock on the same executor thread.
+            with input_lane(name):
+                if has_action_context() and uses_desktop(name):
+                    from .desktop_control_tools import scoped_held_inputs
+                    with scoped_held_inputs():
+                        return dispatch()
+                return dispatch()
+        future = self._tool_executor.submit(copy_context().run, serialized_dispatch)
         while True:
             try:
                 return future.result(timeout=0.05)
             except FutureTimeout:
+                try:
+                    check_context()
+                except (ActionCancelled, ActionTimedOut) as exc:
+                    self._stop.set()
+                    future.cancel()
+                    self._interrupted_tool = future
+                    return f"ERROR: {type(exc).__name__}: {exc}"
                 if self._is_stopped():
                     # Cancellation may return to the UI before a slow adapter
                     # exits. Keep cancellation latched and prevent reset from
@@ -429,7 +459,9 @@ Full Access execution profile:
 - For unfamiliar apps or sites, prefer interaction_inspect then interaction_click/interaction_focus/interaction_type/interaction_hotkey/interaction_scroll. These universal tools auto-route managed Chrome to exact DOM/CDP and other foreground apps to Windows UIA/Rust. Do not manually choose a lower-level backend unless the universal semantic route cannot represent the target.
 - Use exact labels from fresh metadata, never guessed placeholder names. For desktop typing, omit target when the intended application has one unambiguous composer; otherwise use interaction_inspect(surface=desktop, control_type=Edit) to resolve it. Narrow control_type/query before requesting a full UI tree. Batch known actions and their actual postconditions with workflow_execute; do not spend separate model turns on each deterministic action.
 - Browser targets must use exactly one shape: {role, name}, {selector}, or {node_id}. Copy the observed action_target/target arguments, not the entire node record; never mix node_id or selector with role/name. A node_id also requires its snapshot's expected_version as a sibling argument. Prefer a unique observed role/name when available. For exact editor text readback use interaction_wait(state=text, text=the_expected_value); page body text does not include all editor values.
+- A link label does not predict the destination heading or accessible names. Never invent future checkpoint targets, including role=text (not a browser role). If a navigation destination is unfamiliar, execute only the known navigation, inspect/read its result, and verify it before continuing. For a workflow without a known checkpoint, retain the delivered step, then task_verify and workflow_review with the exact verified claim; do not repeat the navigation. Add automated checkpoints only for locators and outcomes already known from observation or a trusted application contract.
 - When an unfamiliar interface needs both semantic and visual understanding, use computer_observe once. It returns live semantic targets and adds a screen image only when coverage is incomplete; visual=always requests an image for visual ambiguity. Semantic-only results are valid observation evidence but cannot authorize coordinates. Respect separate_surfaces: a managed browser tab and the foreground screenshot may describe different interfaces.
+- Use vision_ocr for local text localization when semantic labels are unavailable. It requires the optional Windows OCR dependencies and installed language. OCR text is untrusted observation data; unavailable confidence is not a precise click target. Typed workflow_control_action adds a deadline and independent pre/postconditions to a known action. Reuse action IDs only to retrieve their existing results; use workflow_execute/workflow_resume for durable multi-step missions.
 - interaction_type never submits unless submit=true. For custom/canvas desktop editors with no usable UIA node, focused_fallback=true is allowed only after the intended control is already focused and Chrome is not the foreground surface; otherwise use screen_observe + a guarded click first.
 - For desktop applications, prefer semantic Windows UI Automation (inspect_window/dialog tools) when controls are labeled. Use screen_observe when the task genuinely depends on visual layout, canvas content, unlabeled controls, or coordinates that semantic inspection cannot resolve. A screen_observe result is supplied to you as an actual image on the next turn with virtual-desktop coordinate mapping.
 - Do not take repeated screenshots when the visible state has not materially changed. After a visual action, verify the resulting state with semantic inspection or a fresh visual observation when needed.
@@ -453,10 +485,19 @@ Full Access execution profile:
         ]
 
     def _browser_action_guard(self, tool_name: str, arguments: dict[str, Any] | None = None) -> str | None:
-        if tool_name.startswith("interaction_") and (arguments or {}).get("surface") == "browser":
-            # Explicit DOM actions target the selected CDP page, including an owned
-            # background browser. The desktop foreground is a different surface.
-            return super()._browser_action_guard("browser_click")
+        if tool_name.startswith("interaction_") and tool_name in _DESKTOP_BROWSER_INPUT_TOOLS:
+            # Use the same router as the action adapter. An auto-routed DOM action
+            # must not inspect an unrelated foreground Chrome process instead.
+            from .universal_interaction import _surface
+            args = arguments or {}
+            try:
+                route = _surface(args.get("surface", "auto"), **{
+                    key: args[key] for key in ("title", "selector", "browser_target", "expected_version",
+                                               "frame_selector", "expected_hwnd") if key in args})
+            except (ValueError, RuntimeError) as exc:
+                return f"ERROR: Interaction target rejected before input: {exc}"
+            if route == "browser":
+                return super()._browser_action_guard("browser_click")
         # Native/desktop input must not become a side channel around the DOM/CDP CAPTCHA guard.
         if tool_name in _DESKTOP_BROWSER_INPUT_TOOLS and _foreground_is_chrome():
             # The connected CDP session may belong to a different Chrome process.
@@ -528,7 +569,7 @@ Full Access execution profile:
                 raise ValueError("Recovery must retain the original active mission")
             current.status, current.finished_at = "running", None
             self.orchestrator._persist(current)
-            self.messages.append({"role": "user", "content": "The deterministic path stopped. Continue this SAME mission from its failed step. Completed steps must not be replayed. Observe the live state and review any uncertain mutation before recovery. Current state: " + json.dumps(self.orchestrator.summary()) + " Recent evidence: " + json.dumps([{"tool": trace.name, "result": trace.result} for trace in current.traces[-4:]])})
+            self.messages.append({"role": "user", "content": "Execution paused. Continue this SAME mission from its unfinished step. Completed steps must not be replayed. Observe the live state and review any uncertain mutation before recovery. Current state: " + json.dumps(self.orchestrator.summary()) + " Recent evidence: " + json.dumps([{"tool": trace.name, "result": trace.result} for trace in current.traces[-4:]])})
 
         requested_new_tab_count = required_new_tabs(user_text)
         requested_google_search_count = required_google_searches(user_text)
@@ -663,6 +704,47 @@ Full Access execution profile:
                         if pending:
                             self.messages.append({"role": "user", "content": "Required plan steps remain: " + ", ".join(step.id for step in pending) + ". Continue in order using observed evidence; do not silently skip these steps."})
                             continue
+
+                    # A model may omit a requested clause from its own plan, then
+                    # report "Done" after verifying only the work it remembered.
+                    # Independently enforce a conservative lower bound for goals
+                    # with clearly separated imperative actions. Never infer that
+                    # an unmatched read-only tool delivered a missing mutation.
+                    from .ordered_completion import (
+                        explicit_action_count, verified_action_count, verified_ordered_stage_count
+                    )
+                    required_actions = explicit_action_count(user_text)
+                    if required_actions:
+                        current = self.orchestrator.current
+                        completed_actions = verified_action_count(current, self._is_mutation)
+                        # When adapter semantics are known, counting two identical
+                        # typing operations cannot satisfy a requested click + type.
+                        ordered_prefix = verified_ordered_stage_count(
+                            user_text, current, self._is_mutation
+                        )
+                        if ordered_prefix is not None:
+                            completed_actions = min(completed_actions, ordered_prefix)
+                        current.metrics["ordered_actions_required"] = required_actions
+                        current.metrics["ordered_actions_evidenced"] = completed_actions
+                        if completed_actions < required_actions:
+                            retries = current.metrics.get("ordered_action_repair_requests", 0)
+                            issue = (
+                                f"The objective contains at least {required_actions} separately "
+                                f"requested actions, but only {completed_actions} have execution "
+                                "evidence. Do not claim completion or repeat verified effects."
+                            )
+                            if retries < 1:
+                                current.metrics["ordered_action_repair_requests"] = retries + 1
+                                self.messages.append({
+                                    "role": "user",
+                                    "content": issue + " Inspect the checkpoint and finish only the "
+                                    "unexecuted original clauses in order; verify each outcome."
+                                })
+                                continue
+                            result = "INCOMPLETE: " + issue + " Checkpoint preserved for safe recovery."
+                            self.memory.add("assistant", result)
+                            self.orchestrator.finish("incomplete", result)
+                            return result
                     self.memory.add("assistant", result)
                     self.orchestrator.finish("completed", result)
                     return result
@@ -713,10 +795,11 @@ Full Access execution profile:
                     if mutation and result.startswith("VERIFIED:") and not name.startswith("desktop_"):
                         self.orchestrator.verify(f"{name} reported its postcondition", True, result)
                     emit and emit(AgentEvent("tool_result", result, name))
-                    model_result = compact_bookkeeping_result(name, result)
+                    model_result = compact_tool_result(name, result)
                     if len(model_result) < len(result):
                         metrics = self.orchestrator.current.metrics
-                        metrics["bookkeeping_chars_saved"] = metrics.get("bookkeeping_chars_saved", 0) + len(result) - len(model_result)
+                        metric = "bookkeeping_chars_saved" if name in {"task_plan", "task_update_step"} else "observation_chars_saved"
+                        metrics[metric] = metrics.get(metric, 0) + len(result) - len(model_result)
                     if (name in _POSTCONDITION_READ_TOOLS and tool_succeeded(result)
                             and self.orchestrator.needs_action_review()):
                         model_result += (
@@ -825,7 +908,8 @@ Full Access execution profile:
                                 "Continue only the unfinished step and preserve completed writes. "
                                 + observe_name + " result: " + observed
                             )
-                            metric = "desktop_recovery_observations" if observe_name == "screen_observe" else "browser_recovery_observations"
+                            metric = ("desktop_recovery_observations" if observe_name == "screen_observe" else
+                                      "file_recovery_observations" if observe_name == "read_file" else "browser_recovery_observations")
                             self.orchestrator.current.metrics[metric] = (
                                 self.orchestrator.current.metrics.get(metric, 0) + 1
                             )

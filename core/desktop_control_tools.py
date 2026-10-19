@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import time
+from contextlib import contextmanager
 from typing import Literal
 
 from .permissions import Risk
@@ -30,11 +31,55 @@ def _button(value: str) -> Literal["left", "right", "middle"]:
     return normalized  # type: ignore[return-value]
 
 
+_KEY_ALIASES: dict[str, str] = {
+    "control": "ctrl",
+    "ctrlleft": "ctrlleft",
+    "leftctrl": "ctrlleft",
+    "lctrl": "ctrlleft",
+    "ctrlright": "ctrlright",
+    "rightctrl": "ctrlright",
+    "rctrl": "ctrlright",
+    "altleft": "altleft",
+    "leftalt": "altleft",
+    "lalt": "altleft",
+    "altright": "altright",
+    "rightalt": "altright",
+    "ralt": "altright",
+    "shiftleft": "shiftleft",
+    "leftshift": "shiftleft",
+    "lshift": "shiftleft",
+    "shiftright": "shiftright",
+    "rightshift": "shiftright",
+    "rshift": "shiftright",
+    "windows": "win",
+    "winleft": "winleft",
+    "lwin": "winleft",
+    "super": "win",
+    "meta": "win",
+    "winright": "winright",
+    "rwin": "winright",
+    "escape": "esc",
+    "return": "enter",
+    "del": "delete",
+    "ins": "insert",
+    "page_up": "pageup",
+    "pgup": "pageup",
+    "page_down": "pagedown",
+    "pgdn": "pagedown",
+    "pgdown": "pagedown",
+    "leftarrow": "left",
+    "rightarrow": "right",
+    "uparrow": "up",
+    "downarrow": "down",
+    "menu": "apps",
+}
+
+
 def _key(value: str) -> str:
     normalized = str(value or "").strip().lower()
     if not normalized or len(normalized) > 32 or "\0" in normalized:
         raise ValueError("Keyboard key is invalid")
-    return normalized
+    return _KEY_ALIASES.get(normalized, normalized)
 
 
 def desktop_cursor() -> str:
@@ -101,13 +146,16 @@ def move_pointer(x: int, y: int, duration: float = 0.08, *, expected_foreground:
         check_cancelled()
         if foreground_identity() != hwnd:
             raise RuntimeError("Foreground changed during pointer movement")
+        actual = pyautogui.position()
+        if (actual.x, actual.y) != previous:
+            raise RuntimeError("Pointer moved externally during movement; inspect before continuing")
         progress = 1.0 if duration == 0 or previous == destination else min(1.0, (time.monotonic() - start) / duration)
         eased = progress * progress * (3 - 2 * progress)
         point = (round(origin.x + (x - origin.x) * eased), round(origin.y + (y - origin.y) * eased))
         if point != previous:
             pyautogui.moveTo(*point, _pause=False)
             previous = point
-        if progress >= 1:
+        if point == destination:
             actual = pyautogui.position()
             if (actual.x, actual.y) != destination:
                 raise RuntimeError("Pointer did not reach the requested destination")
@@ -130,6 +178,8 @@ def desktop_drag(
     seconds = max(0.05, min(float(duration), 2.0))
     from .desktop_observation import foreground_identity
     hwnd = foreground_identity()
+    if not hwnd:
+        raise RuntimeError("Foreground window unavailable for pointer drag")
     move_pointer(int(start_x), int(start_y), 0.05, expected_foreground=hwnd)
     try:
         if foreground_identity() != hwnd:
@@ -196,23 +246,39 @@ def desktop_key_up(key: str) -> str:
     return f"Key up: {value}"
 
 
-def release_held_inputs() -> None:
+@contextmanager
+def scoped_held_inputs():
+    """Release inputs introduced by one typed dispatch while its input lane is held.
+
+    Existing legacy holds belong to their caller. Never release them from an
+    unrelated observation, or release a later action's inputs from a stale worker.
+    """
+    keys, buttons = set(_HELD_KEYS), set(_HELD_MOUSE_BUTTONS)
+    try:
+        yield
+    finally:
+        release_held_inputs(keys=_HELD_KEYS - keys, buttons=_HELD_MOUSE_BUTTONS - buttons)
+
+
+def release_held_inputs(*, keys: set[str] | None = None, buttons: set[str] | None = None) -> None:
     """Best-effort fail-safe so an interrupted mission never leaves synthetic input held down."""
-    if os.name != "nt" or (not _HELD_MOUSE_BUTTONS and not _HELD_KEYS):
-        _HELD_MOUSE_BUTTONS.clear()
-        _HELD_KEYS.clear()
+    held_keys = set(_HELD_KEYS if keys is None else keys)
+    held_buttons = set(_HELD_MOUSE_BUTTONS if buttons is None else buttons)
+    if os.name != "nt" or (not held_buttons and not held_keys):
+        _HELD_MOUSE_BUTTONS.difference_update(held_buttons)
+        _HELD_KEYS.difference_update(held_keys)
         return
     try:
         import pyautogui
         previous_failsafe, previous_pause = pyautogui.FAILSAFE, pyautogui.PAUSE
         # Releasing synthetic inputs must work even when the pointer is in a fail-safe corner.
         pyautogui.FAILSAFE, pyautogui.PAUSE = False, 0
-        for key in list(_HELD_KEYS):
+        for key in held_keys:
             try:
                 pyautogui.keyUp(key)
             except Exception:
                 pass
-        for button in list(_HELD_MOUSE_BUTTONS):
+        for button in held_buttons:
             try:
                 pyautogui.mouseUp(button=button)
             except Exception:
@@ -220,8 +286,8 @@ def release_held_inputs() -> None:
     finally:
         if "previous_failsafe" in locals():
             pyautogui.FAILSAFE, pyautogui.PAUSE = previous_failsafe, previous_pause
-        _HELD_KEYS.clear()
-        _HELD_MOUSE_BUTTONS.clear()
+        _HELD_KEYS.difference_update(held_keys)
+        _HELD_MOUSE_BUTTONS.difference_update(held_buttons)
 
 
 def register_desktop_control_tools(registry: ToolRegistry) -> None:

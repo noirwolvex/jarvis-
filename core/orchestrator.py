@@ -294,12 +294,26 @@ class TaskOrchestrator:
             return ""
         self.current.recoveries += 1
         low = result.lower()
+        if tool_name == "task_update_step":
+            return ("Recovery guidance: This is a plan/evidence bookkeeping rejection, not a failed UI action. "
+                    "Inspect task_status and the recorded results; complete dependencies in order. "
+                    "Do not repeat a delivered save, send, click, or write to manufacture completion evidence. "
+                    "Complete each verified plan step before executing the next step. If the existing evidence "
+                    "cannot support completion, preserve the checkpoint and report the unresolved step.")
         from .execution_telemetry import input_not_dispatched
         if (input_not_dispatched(result) and ("unknown tool:" in low or "validationerror:" in low)
                 or "workflow preflight rejected" in low):
             return ("Recovery guidance: Correct the tool name or arguments using the available tool definitions. "
                     "This request was rejected before its action ran. Keep the current plan step pending; "
                     "do not rewrite the mission or claim completion. A workflow preflight failure dispatched none of its actions.")
+        if tool_name.startswith("workflow_"):
+            return ("Recovery guidance: Inspect workflow_status for the original program and current step. "
+                    "Do not repeat an already delivered click, save, send, or write. For checkpoint_pending, "
+                    "workflow_resume retries only the declared read-only checkpoint. For an uncertain action, "
+                    "observe the result, task_verify with fresh evidence, workflow_review using that exact claim, "
+                    "then workflow_resume. Do not create a replacement workflow to bypass its unfinished steps. "
+                    "If a checkpoint names an element that does not exist, preserve the journal and report "
+                    "the unresolved verification target instead of blindly repeating the input.")
         if "inputnotdispatchederror" in low and tool_name.startswith(("browser_", "interaction_click")):
             return ("Recovery guidance: No input was dispatched. Resolve the target from a fresh browser observation "
                     "or use its exact observed role/name. Snapshot IDs require the matching current expected_version. "
