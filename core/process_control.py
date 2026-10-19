@@ -17,6 +17,8 @@ def set_cancellation(check: Callable[[], bool]) -> None:
 
 
 def check_cancelled() -> None:
+    from .control_engines.scheduler import check_context
+    check_context()
     if _cancelled():
         raise RuntimeError("Emergency stop is active")
 

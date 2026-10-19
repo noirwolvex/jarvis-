@@ -108,8 +108,10 @@ def _browser_nodes(snapshot: dict[str, Any], frame_selector: str = "") -> list[d
             "source": "DOM",
             "role": role,
             "name": name,
+            **({"context_text": row["context_text"]} if row.get("context_text") else {}),
             "tag": _clean(row.get("tag")).casefold(),
             "frame_url": str(row.get("frame_url") or "")[:1024],
+            **({"frame_selector": row["frame_selector"]} if row.get("frame_selector") else {}),
             "input_kind": row.get("input_kind", ""),
             "parent": "dom:" + _clean(row.get("parent")) if row.get("parent") else "",
             "rect": _rect_browser(row.get("bounds")),
@@ -350,6 +352,12 @@ def interaction_scene(
         "cached_source": bool(snapshot.get("cached")),
         "truncated": bool(snapshot.get("truncated")),
         "coverage_gaps": list(snapshot.get("coverage_gaps") or []),
+        **({"viewport": snapshot["viewport"]} if actual == "browser" and "viewport" in snapshot else {}),
+        # Keep outcome/error text even when the caller requests only actionable
+        # controls. Otherwise a saved receipt disappears from the compact view.
+        "notices": [{"role": row.get("role"), "text": row.get("name", "")}
+                    for row in snapshot.get("nodes", [])
+                    if row.get("role") in {"status", "alert", "progressbar"} and row.get("name")][:12],
         "scope": scope,
         "node_count": len(nodes),
         "actionable_count": sum(bool(node.get("actionable")) for node in nodes),
@@ -364,6 +372,10 @@ def interaction_scene(
         ][:12],
         "mode": "delta" if use_delta else "full",
         "note": (
+            ("Browser nodes cover the current viewport only; an empty list does not mean the page has no controls. "
+             "Use viewport scroll position and limits to inspect the remaining page. " if actual == "browser" else "") +
+            ("Use each node's target for actions; dom: IDs identify scene rows, not browser nodes. "
+             "For browser_semantic_action, use target.browser_target as target. " if actual == "browser" else "") +
             "Detached semantic metadata only. Actions resolve live targets again; "
             "use screen_observe only when semantic evidence is unavailable or ambiguous."
         ),

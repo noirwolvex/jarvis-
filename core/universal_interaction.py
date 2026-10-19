@@ -4,6 +4,7 @@ import json
 from typing import Any
 
 from .desktop_input import InputNotDispatchedError
+from .browser_roles import BROWSER_ROLES
 from .permissions import Risk
 from .semantic_target import SELECTOR_SCHEMA
 from .tools import ToolRegistry, ToolSpec
@@ -15,7 +16,7 @@ _BROWSER_TARGET_SCHEMA = {
     "properties": {
         "node_id": {"type": "string", "maxLength": 32},
         "selector": {"type": "string", "maxLength": 500},
-        "role": {"type": "string", "maxLength": 40},
+        "role": {"type": "string", "enum": list(BROWSER_ROLES)},
         "name": {"type": "string", "maxLength": 300},
     },
     "additionalProperties": False,
@@ -50,7 +51,10 @@ def _surface(
             "Mixed desktop and browser targets; use the action_target returned by interaction_resolve"
         )
     if requested == "auto":
-        route = "desktop" if desktop_bound else "browser" if _browser_active() else "desktop"
+        # A DOM target is an explicit binding to the selected CDP page. Its
+        # routing must not depend on an unrelated foreground desktop window.
+        # Unbound actions still follow the foreground application.
+        route = "desktop" if desktop_bound else "browser" if browser_bound or _browser_active() else "desktop"
     else:
         route = requested
     if route == "desktop" and browser_bound:
@@ -60,10 +64,10 @@ def _surface(
         )
     if route == "browser" and desktop_bound:
         raise InputNotDispatchedError("Desktop window/selector arguments cannot be used for browser interaction")
-    if requested == "browser":
+    if requested == "browser" or requested == "auto" and browser_bound:
         from .chrome_cdp import chrome_is_connected
         if not chrome_is_connected():
-            raise RuntimeError("Managed Chrome/CDP is not connected; use desktop interaction for another application/browser")
+            raise InputNotDispatchedError("Managed Chrome/CDP is not connected; inspect or connect the intended browser before retrying")
     return route
 
 
@@ -325,11 +329,16 @@ def interaction_type(
 def _browser_hotkey(keys: list[str]) -> str:
     aliases = {
         "ctrl": "Control", "control": "Control", "alt": "Alt", "shift": "Shift",
-        "win": "Meta", "windows": "Meta", "esc": "Escape", "escape": "Escape",
-        "enter": "Enter", "tab": "Tab", "space": "Space", "backspace": "Backspace",
-        "delete": "Delete", "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft",
+        "win": "Meta", "windows": "Meta", "super": "Meta", "meta": "Meta",
+        "esc": "Escape", "escape": "Escape",
+        "enter": "Enter", "return": "Enter",
+        "tab": "Tab", "space": "Space", "backspace": "Backspace",
+        "delete": "Delete", "del": "Delete",
+        "insert": "Insert", "ins": "Insert",
+        "up": "ArrowUp", "down": "ArrowDown", "left": "ArrowLeft",
         "right": "ArrowRight", "home": "Home", "end": "End",
         "pageup": "PageUp", "pagedown": "PageDown",
+        "pgup": "PageUp", "pgdn": "PageDown", "page_up": "PageUp", "page_down": "PageDown",
     }
     result: list[str] = []
     for key in keys:
@@ -510,21 +519,29 @@ def register_universal_interaction_tools(registry: ToolRegistry) -> None:
         {"type": "object", "properties": {
             **common,
             "text": {"type": "string", "minLength": 1, "maxLength": 4096},
-            "replace": {"type": "boolean"}, "submit": {"type": "boolean"},
+            "replace": {"type": "boolean", "description": "Set true to replace the entire current value with text. Default false appends to the existing value, regardless of selection."}, "submit": {"type": "boolean"},
             "focused_fallback": {"type": "boolean"},
         }, "required": ["text"], "additionalProperties": False},
         lambda text, **kwargs: interaction_type(text, registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(
         "interaction_wait",
-        "Universal read-only postcondition checkpoint. Auto-routes managed Chrome to bounded DOM polling and desktop apps to fresh UIA state polling. selected is desktop-only and proves control selection, not navigation. Use inside workflow_execute after delivered semantic clicks/hotkeys with the actual expected result so execution can continue without another model turn.",
+        "Universal read-only postcondition checkpoint. Use stable observed role/name or selector targets, never snapshot node_id or expected_version. Auto-routes managed Chrome to bounded DOM polling and desktop apps to fresh UIA state polling. selected is desktop-only and proves control selection, not navigation. Use inside workflow_execute with known postconditions; do not invent destination labels before observing them.",
         Risk.LOW,
         {"type": "object", "properties": {
             **common,
+            "expected_version": {"const": ""},
+            "browser_target": {"allOf": [_BROWSER_TARGET_SCHEMA, {"not": {"required": ["node_id"]}}]},
             "state": {"enum": ["visible", "hidden", "enabled", "text", "focused", "selected"]},
             "timeout_ms": {"type": "integer", "minimum": 0, "maximum": 15000},
             "text": {"type": "string", "maxLength": 4096},
-        }, "anyOf": [{"required": ["target"]}, {"required": ["selector"]}, {"required": ["browser_target"]}], "additionalProperties": False},
+        }, "anyOf": [{"required": ["target"]}, {"required": ["selector"]}, {"required": ["browser_target"]}],
+        "allOf": [{"if": {"required": ["state"], "properties": {"state": {"const": "selected"}}},
+                   "then": {"not": {"anyOf": [
+                       {"required": ["surface"], "properties": {"surface": {"const": "browser"}}},
+                       {"required": ["browser_target"]},
+                       {"required": ["frame_selector"], "properties": {"frame_selector": {"minLength": 1}}},
+                   ]}}}], "additionalProperties": False},
         lambda **kwargs: interaction_wait(registry=registry, **kwargs),
     ))
     registry.register(ToolSpec(

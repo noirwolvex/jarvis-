@@ -129,7 +129,7 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
     const checkpoint = typeof parsed.task_id === "string" ? ` [checkpoint: ${parsed.task_id}]` : "";
     throw new Error(detail + checkpoint);
   }
-  if (parsed.action !== "full_access_mission" || parsed.access_mode !== "full" || !Number.isSafeInteger(parsed.tools_used) || (parsed.tools_used as number) < 1
+  if (parsed.action !== "full_access_mission" || parsed.access_mode !== "full" || !Number.isSafeInteger(parsed.tools_used) || (parsed.tools_used as number) < 0
       || typeof parsed.result !== "string" || typeof parsed.task_id !== "string" || typeof parsed.status !== "string"
       || typeof parsed.requires_user_action !== "boolean" || typeof parsed.mission_completed !== "boolean"
       || typeof parsed.verified !== "boolean" || !Array.isArray(parsed.incomplete_steps)
@@ -140,10 +140,19 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
   if (!parsed.requires_user_action && !parsed.mission_completed) {
     throw new Error(parsed.result || "Full Access mission did not complete or reach a user-action checkpoint");
   }
-  if (parsed.mission_completed && (parsed.status !== "completed" || parsed.incomplete_steps.length || !(parsed.verified || parsed.read_only_observation_verified === true))) {
+  if (parsed.mission_completed && (parsed.status !== "completed" || (parsed.tools_used as number) < 1 || parsed.incomplete_steps.length || !(parsed.verified || parsed.read_only_observation_verified === true))) {
     throw new Error("Full Access completion lacks verified evidence");
   }
-  if (parsed.requires_user_action && parsed.status !== "waiting_user") throw new Error("Invalid user-action checkpoint status");
+  if (parsed.requires_user_action && (parsed.status !== "waiting_user" || parsed.mission_completed
+      || !(parsed.task_id as string).trim() || !(parsed.result as string).trim())) {
+    throw new Error("Invalid user-action checkpoint status");
+  }
+  // A provider outage can pause planning before the first tool. Preserve that
+  // checkpoint, but never interpret it as delivered or verified device work.
+  if (parsed.tools_used === 0 && (!parsed.requires_user_action || parsed.verified
+      || parsed.read_only_observation_verified === true || parsed.verifications !== 0)) {
+    throw new Error("Unexecuted checkpoint cannot contain verification evidence");
+  }
   if (parsed.task_graph !== undefined) {
     const graph = validateTaskGraph(parsed.task_graph);
     if (parsed.mission_completed && graph.some(node => node.status !== "COMPLETED")) {
@@ -152,9 +161,16 @@ export function validateMissionResult(input: unknown): FullAccessMissionResult {
     if (parsed.mission_completed && graph.some(node => node.verification_result?.trim().toUpperCase() === "FAILED")) {
       throw new Error("Full Access completion contradicts failed task graph verification");
     }
+    if (parsed.tools_used === 0 && graph.some(node => ["DELIVERED", "VERIFIED", "COMPLETED"].includes(node.status)
+        || node.verification_result?.trim().toUpperCase() === "VERIFIED")) {
+      throw new Error("Unexecuted checkpoint cannot contain completed task graph work");
+    }
   }
   if (parsed.engine_visibility !== undefined && (!Array.isArray(parsed.engine_visibility) || parsed.engine_visibility.length > 50)) {
     throw new Error("Invalid engine visibility");
+  }
+  if (parsed.tools_used === 0 && Array.isArray(parsed.engine_visibility) && parsed.engine_visibility.length) {
+    throw new Error("Unexecuted checkpoint cannot contain execution engines");
   }
   if (parsed.recovery_history !== undefined && (!Array.isArray(parsed.recovery_history) || parsed.recovery_history.length > 100)) {
     throw new Error("Invalid recovery history");

@@ -49,6 +49,8 @@ def build_full_access_agent():
     agent.tools.permissions.set_access_mode("full")
     agent.require_action_confirmation = True
     register_app_tools(agent.tools)
+    from .known_folder_tools import register_known_folder_tools
+    register_known_folder_tools(agent.tools)
     register_browser_tab_tools(agent.tools)
     register_chrome_session_tools(agent.tools)
     register_browser_fast_tools(agent.tools)
@@ -81,6 +83,8 @@ def build_full_access_agent():
     from .workflow_tools import register_workflow_tools
 
     register_workflow_tools(agent)
+    from .control_engines.integration import register_control_engines
+    register_control_engines(agent)
 
     # Desktop/browser/workspace mutations are approved by explicit session-level Full Access.
     # HIGH/CRITICAL tools still require a separate approval surface and fail closed here.
@@ -107,6 +111,7 @@ def run_agent_mission(
     observation_emit=None,
     task_graph_emit=None,
     mission_control=None,
+    resume_current: bool = False,
 ) -> dict[str, Any]:
     if not goal.strip():
         return {"ok": False, "error": "Mission cannot be empty"}
@@ -116,7 +121,19 @@ def run_agent_mission(
 
     # Reuse the expensive provider/client/tool/runtime objects, but never leak chat tool-call
     # protocol state from one mission into the next. Long-term MemoryStore remains intentional.
-    agent.reset()
+    if resume_current:
+        current = agent.orchestrator.current
+        if current is None or current.goal != goal or current.status not in {"waiting_user", "incomplete"}:
+            raise ValueError("Continuation requires the same paused mission")
+        if (agent._is_stopped() or bool(cancel_event and cancel_event.is_set())
+                or bool(mission_control and mission_control.cancelled)):
+            raise RuntimeError("CANCELLED: A stopped mission cannot resume automatically")
+        for name in ("_pending_model", "_interrupted_tool"):
+            pending = getattr(agent, name, None)
+            if pending is not None and not pending.done():
+                raise RuntimeError("Previous request is still stopping; no continuation was started")
+    else:
+        agent.reset()
     agent.mission_control = mission_control
     agent.cancel_event = cancel_event
     agent.allow_shell = allow_shell
@@ -151,7 +168,7 @@ def run_agent_mission(
             )
             agent.live_monitor = monitor
             monitor.start()
-        result = agent.run(goal, emit=emit)
+        result = agent.run(goal, emit=emit, resume_current=True) if resume_current else agent.run(goal, emit=emit)
     finally:
         try:
             if monitor:

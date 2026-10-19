@@ -37,7 +37,23 @@ class PointerDeliveryTests(unittest.TestCase):
         control.move_pointer(11, 20, 0.1)
         self.fake.moveTo.assert_called_once_with(11, 20, _pause=False)
         self.assertEqual((self.point.x, self.point.y), (11, 20))
-        self.assertLessEqual(self.clock, 0.1)
+        self.assertAlmostEqual(self.clock, 0.064)
+
+    def test_external_movement_during_wait_stops_without_repositioning(self):
+        def interrupt(seconds):
+            self.clock += seconds
+            self.move(500, 500)
+        with patch.object(control.time, "sleep", side_effect=interrupt):
+            with self.assertRaisesRegex(RuntimeError, "moved externally"):
+                control.move_pointer(100, 100, 0.1)
+        self.fake.moveTo.assert_not_called()
+        self.assertEqual((self.point.x, self.point.y), (500, 500))
+
+    def test_failed_intermediate_move_stops_before_next_sample(self):
+        self.fake.moveTo.side_effect = None
+        with self.assertRaisesRegex(RuntimeError, "moved externally"):
+            control.move_pointer(100, 100, 0.1)
+        self.fake.moveTo.assert_called_once()
 
     def test_pointer_delivery_failure_cannot_claim_destination(self):
         self.fake.moveTo.side_effect = None
@@ -90,3 +106,21 @@ class PointerDeliveryTests(unittest.TestCase):
         with patch.object(control, "desktop_click_button", return_value="DELIVERED: fixture") as click:
             self.assertEqual(_desktop_click(10, 20), "DELIVERED: fixture")
         click.assert_called_once_with(10, 20)
+
+    def test_drag_without_foreground_window_fails_before_moving_pointer(self):
+        with patch("core.desktop_observation.foreground_identity", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "Foreground window unavailable"):
+                control.desktop_drag(0, 0, 100, 100)
+        self.fake.moveTo.assert_not_called()
+
+    def test_double_click_with_button_passes_button_parameter(self):
+        from core.advanced_tools import desktop_double_click
+        with patch.object(control, "desktop_click_button") as click_btn:
+            desktop_double_click(50, 60, button="right")
+        click_btn.assert_called_once_with(50, 60, button="right", clicks=2)
+
+    def test_desktop_scroll_without_foreground_fails(self):
+        from core.advanced_tools import desktop_scroll
+        with patch("core.desktop_observation.foreground_identity", return_value=0):
+            with self.assertRaisesRegex(RuntimeError, "Foreground window unavailable"):
+                desktop_scroll(5)

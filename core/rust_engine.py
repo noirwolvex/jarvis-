@@ -277,11 +277,11 @@ class RustDaemonClient:
                         f"Native input precondition failed before dispatch; automatic fallback refused: {exc}"
                     ) from exc
             request_id = str(uuid.uuid4())
-            self._sequence += 1
+            next_sequence = self._sequence + 1
             request = {
                 "protocol": 1,
                 "session": self._session,
-                "seq": self._sequence,
+                "seq": next_sequence,
                 "expires_at_ms": int(time.time() * 1000) + 5000,
                 "request_id": request_id,
                 "capability_id": capability_id,
@@ -301,6 +301,9 @@ class RustDaemonClient:
                 from .execution_telemetry import record_backend
                 record_backend("rust_native", phase="execute" if mutating else "observe",
                                detail=str(action.get("kind", "request")))
+                # Local validation/encoding failures must not leave a gap in the
+                # daemon's strictly ordered session. Consume only when sending.
+                self._sequence = next_sequence
                 self._socket.sendall(struct.pack(">I", len(encoded)) + encoded)
                 for _ in range(64):
                     if not control:

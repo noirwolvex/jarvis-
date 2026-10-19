@@ -17,6 +17,7 @@ _DESKTOP_FAST_EXPLICIT = {
     "control_guide", "list_skills", "load_skill",
     "find_installed_app",
     "launch_installed_app",
+    "open_known_folder",
     "open_application",
     "open_application_and_type",
     "list_windows",
@@ -26,6 +27,7 @@ _DESKTOP_FAST_EXPLICIT = {
     "close_window",
     "screen_observe",
     "computer_observe",
+    "vision_ocr",
     "take_screenshot",
     "wait",
     "google_search",
@@ -77,6 +79,12 @@ High-speed execution:
 - Prefer direct application integration, then DOM/CDP, Windows UIA, guarded Rust input, then vision/coordinates when necessary. Call only exposed tools with their current argument schemas.
 - Planning decides outcomes; deterministic tools execute known arguments. After verified launch/readback continue immediately. Do not spend a model turn restating a plan, marking a step running, or repeating an unchanged observation.
 - For multiple known actions, issue ordered tool calls in one response or compile workflow_execute with actual postcondition checkpoints. Include every requested clause, preserve dependencies, and stop only where the next target depends on an unread result.
+- Explicit interaction requirements are steps, not optional implementation suggestions: if the user asks for Ctrl+A, scrolling, a new tab, or another named operation, perform and verify it. Replacing a field with fill alone does not satisfy a requested Ctrl+A shortcut. Prefer interaction_hotkey for key combinations; it verifies selection locally.
+- interaction_type defaults to append. For replacement or an exact final field value, pass replace=true even after Ctrl+A. If a requested shortcut was blocked before dispatch, recover and perform it before typing; a blocked call does not satisfy that requested operation.
+- Once field labels and a dialog's close button are observed, compile dismissal with a hidden-dialog checkpoint, required keyboard shortcuts, and field entry into one workflow_execute. Do not ask the model separately to focus, select, type, and inspect each known field. Keep unknown record values and new-page decisions as observation boundaries.
+- Use one tool family consistently inside a workflow: interaction_* tools accept surface=browser and browser_target objects; browser_wait_state accepts target, not browser_target. interaction_type always requires text. Use interaction_wait for checkpoints accompanying interaction_* actions. Copy the observed iframe selector when a control is inside a frame.
+- A workflow changes the page between steps. Reuse unique role/name browser_target identities and resolve them live; do not pin every step to the same expected_version. Snapshot node IDs and coordinates still require fresh versions and cannot be carried across page changes.
+- Copy each observed scene node's target object directly as action arguments; its dom: display ID is not a browser node_id. For an iframe copy its frame_selector into interaction_inspect, then target the observed inner field with that same frame_selector. Never use frame_url or an invented name attribute as a selector.
 - A delivered click/hotkey is not verified success. Check the requested outcome, not mere button visibility. For uncertain mutations inspect first and never blindly replay; preserve checkpoints and completed work.
 - Use fresh semantic identities. Unique role/name targets can be reused; node_id requires its snapshot version. Desktop selectors resolve live. Pointer arrival is not application success; coordinates require fresh stable screen evidence.
 - Unfamiliar or incomplete interfaces need computer_observe; known semantic interfaces need compact interaction_scene/delta. Use browser_read_page for actual page records, not an action-only scene. Do not take repeated screenshots of unchanged labeled controls.
@@ -98,8 +106,11 @@ High-speed execution:
                 filtered.append(schema)
         return filtered or schemas
 
-    def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None) -> str:
+    def run(self, user_text: str, emit: Callable[[AgentEvent], None] | None = None, *, resume_current: bool = False) -> str:
         self._active_emit = emit
+        if resume_current:
+            # Resume the existing journal, never recompile/replay a fast mission.
+            return super().run(user_text, emit=emit, resume_current=True)
 
         from .whatsapp_fast_mission import execute_whatsapp_ordinal_mission
 

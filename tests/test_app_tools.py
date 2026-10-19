@@ -377,6 +377,20 @@ class ExistingApplicationTests(unittest.TestCase):
         mocks.focus.assert_called_once_with(77)
         mocks.foreground.assert_called_once()
 
+    def test_null_foreground_after_identity_reads_is_delivered_without_relaunch(self):
+        with ExitStack() as stack:
+            mocks = self.fixtures(stack)
+            mocks.foreground.return_value = None
+            result = launch_installed_app("Example")
+        self.assertTrue(result.startswith("DELIVERED: "), result)
+        payload = json.loads(result.removeprefix("DELIVERED: "))
+        self.assertFalse(payload["interaction_ready"])
+        self.assertFalse(payload["focused"])
+        self.assertTrue(payload["reused_existing"])
+        mocks.launch.assert_not_called()
+        mocks.focus.assert_called_once_with(77)
+        mocks.foreground.assert_called_once()
+
     def test_multiple_matching_windows_are_rejected_without_launch_or_focus(self):
         with ExitStack() as stack:
             mocks = self.fixtures(stack, windows=[self.window, {**self.window, "hwnd": 88}])
@@ -457,6 +471,35 @@ class WindowFocusTests(unittest.TestCase):
              patch("core.app_tools._focus_via_uia") as fallback:
             self.assertTrue(_focus(77))
         fallback.assert_not_called()
+
+    def test_null_foreground_during_activation_and_polling_can_recover(self):
+        for initial in (None, 88):
+            with self.subTest(initial=initial):
+                api = self.user32()
+                api.GetForegroundWindow.side_effect = [initial, None, None, 77]
+                with patch("core.app_tools.ctypes.windll", SimpleNamespace(user32=api), create=True), \
+                     patch("core.app_tools._focus_via_uia") as fallback, \
+                     patch("core.ui_state.time.sleep"):
+                    self.assertTrue(_focus(77))
+                api.SetForegroundWindow.assert_called_once_with(77)
+                fallback.assert_called_once_with(77)
+                self.assertEqual(api.GetForegroundWindow.call_count, 4)
+
+    def test_permanent_null_foreground_never_verifies_or_replays_activation(self):
+        api = self.user32(foreground=None)
+
+        def timed_out(probe, **kwargs):
+            self.assertFalse(probe())
+            self.assertLessEqual(kwargs["timeout"], 0.8)
+            raise TimeoutError("fixture has no foreground window")
+
+        with patch("core.app_tools.ctypes.windll", SimpleNamespace(user32=api), create=True), \
+             patch("core.app_tools._focus_via_uia") as fallback, \
+             patch("core.ui_state.wait_until", side_effect=timed_out):
+            self.assertFalse(_focus(77))
+        api.SetForegroundWindow.assert_called_once_with(77)
+        fallback.assert_called_once_with(77)
+        self.assertEqual(api.GetForegroundWindow.call_count, 3)
 
     def test_already_foreground_window_has_no_focus_mutation(self):
         api = self.user32(foreground=77)

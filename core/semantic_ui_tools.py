@@ -1110,6 +1110,11 @@ def _hotkey_tokens(keys: list[str]) -> list[str]:
     allowed = {
         "ctrl", "control", "alt", "shift", "win", "windows", "enter", "tab", "esc", "escape",
         "space", "backspace", "delete", "up", "down", "left", "right", "home", "end", "pageup", "pagedown",
+        "insert", "ins", "del", "pgup", "pgdn", "return", "super", "meta", "page_up", "page_down",
+        "ctrlleft", "leftctrl", "lctrl", "ctrlright", "rightctrl", "rctrl",
+        "altleft", "leftalt", "lalt", "altright", "rightalt", "ralt",
+        "shiftleft", "leftshift", "lshift", "shiftright", "rightshift", "rshift",
+        "winleft", "lwin", "winright", "rwin", "apps", "menu",
     }
     result: list[str] = []
     for key in keys:
@@ -1129,7 +1134,12 @@ def ui_hotkey(keys: list[str], title: str = "") -> str:
     win = _window(title)
     hwnd = _focus_window(win)
     normalized = _hotkey_tokens(keys)
-    aliases = {"control": "ctrl", "windows": "win", "escape": "esc"}
+    aliases = {
+        "control": "ctrl", "windows": "win", "escape": "esc", "return": "enter",
+        "super": "win", "meta": "win", "ins": "insert", "del": "delete",
+        "pgup": "pageup", "pgdn": "pagedown", "page_up": "pageup", "page_down": "pagedown",
+        "menu": "apps",
+    }
     _guard_foreground(hwnd)
     _SNAPSHOTS.invalidate(hwnd)
     method = _rust_hotkey_or_python([aliases.get(value, value) for value in normalized],

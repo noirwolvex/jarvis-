@@ -3,7 +3,6 @@ from __future__ import annotations
 import ctypes
 import ctypes.wintypes
 import re
-import time
 
 
 class InputDeliveryError(RuntimeError):
@@ -157,13 +156,44 @@ def _send_unicode_text(text: str) -> None:
 def _clipboard_paste(text: str) -> None:
     import pyperclip
     import pyautogui
-    pyautogui.PAUSE = 0
-    pyautogui.FAILSAFE = False
+    from .desktop_observation import foreground_identity
+    from .process_control import check_cancelled
 
-    pyperclip.copy(text)
-    time.sleep(0.05)
-    pyautogui.hotkey("ctrl", "v")
-    time.sleep(max(0.05, min(0.5, len(text) / 2000)))
+    try:
+        check_cancelled()
+        foreground = foreground_identity()
+        if not foreground:
+            raise InputNotDispatchedError("No foreground window; clipboard text was not pasted")
+        # Copy is synchronous. Read back the clipboard instead of waiting a
+        # fixed delay, and recheck the target after potentially blocking I/O.
+        pyperclip.copy(text)
+        if pyperclip.paste() != text:
+            raise InputNotDispatchedError("Clipboard changed before paste; no input dispatched")
+        check_cancelled()
+        if foreground_identity() != foreground:
+            raise InputNotDispatchedError("Foreground changed before paste; no input dispatched")
+    except InputNotDispatchedError:
+        raise
+    except Exception as exc:
+        raise InputNotDispatchedError("Clipboard preparation failed; no input dispatched") from exc
+
+    previous_pause, previous_failsafe = pyautogui.PAUSE, pyautogui.FAILSAFE
+    pyautogui.PAUSE, pyautogui.FAILSAFE = 0, False
+    try:
+        pyautogui.hotkey("ctrl", "v", _pause=False)
+    except Exception as exc:
+        # A failed shortcut may already have pressed Ctrl. Release only; never
+        # replay a paste whose outcome is unknown.
+        for key in ("v", "ctrl"):
+            try:
+                pyautogui.keyUp(key, _pause=False)
+            except Exception:
+                pass
+        raise InputDeliveryError("Clipboard paste outcome is uncertain; inspect before retrying") from exc
+    finally:
+        pyautogui.PAUSE, pyautogui.FAILSAFE = previous_pause, previous_failsafe
+    # Delivery is not verification. The caller observes the editor when ready;
+    # a fixed post-paste delay neither proves success nor improves precision.
 
 
 def paste_text(text: str, window_title: str | None = None, verify: bool = False) -> str:
@@ -177,29 +207,18 @@ def paste_text(text: str, window_title: str | None = None, verify: bool = False)
         ok, detail = _uia_type_and_verify(window_title, text)
         if ok:
             return f"VERIFIED: {detail}"
+        # A named window is an explicit target. Failed discovery does not
+        # authorize typing into whichever unrelated window is foreground now.
+        raise InputNotDispatchedError(f"Named editor could not be resolved; no text sent. {detail}")
 
-    direct_error = None
     try:
         _send_unicode_text(text)
         method = "Windows Unicode input"
     except InputDeliveryError:
         raise
-    except Exception as exc:
-        direct_error = f"{type(exc).__name__}: {exc}"
+    except Exception:
         _clipboard_paste(text)
         method = "clipboard fallback"
 
-    if verify and window_title:
-        # Verification must never set text again or refocus a different control.
-        from pywinauto import Desktop
-        window = Desktop(backend="uia").window(title_re=re.escape(window_title))
-        edits = [edit for edit in window.descendants(control_type="Edit") if edit.is_visible() and edit.is_enabled()]
-        if any(edit.get_value() == text for edit in edits):
-            return f"VERIFIED: editor text matched after {method}"
-        raise InputDeliveryError("Editor text did not match; inspect before retrying")
-    else:
-        failure = "verification not requested"
-
-    if direct_error:
-        return f"Entered {len(text)} characters via {method}; verification: {failure}"
-    return f"Entered {len(text)} characters via {method}; verification: {failure}"
+    verification = "requires a semantic editor target" if verify else "not requested"
+    return f"Entered {len(text)} characters via {method}; verification: {verification}"
